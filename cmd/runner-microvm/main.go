@@ -5,4 +5,8 @@
 // It is a placeholder until the architecture epic decides the package layout.
 package main
 
-func main() {}
+import "os"
+
+func main() {
+	os.Remove("does-not-exist")
+}
