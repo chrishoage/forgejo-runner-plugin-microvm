@@ -12,7 +12,31 @@
     let
       # x86_64 only: GitHub's x86 Linux runners provide KVM; arm64 is out of scope.
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ (import ./nix/libkrun-overlay.nix) ];
+      };
+      inherit (pkgs) lib;
+
+      # libkrun and libkrunfw side by side, in the one directory the plugin
+      # will read them from (RUNNER_MICROVM_LIBDIR).
+      libdir = pkgs.symlinkJoin {
+        name = "runner-microvm-libs";
+        paths = [
+          pkgs.libkrun
+          pkgs.libkrunfw
+        ];
+      };
+
+      # Fails evaluation, and so `nix flake check`, when a library resolves
+      # below its minimum or libkrun lacks block or network support.
+      minimums = lib.importJSON ./nix/lib-minimums.json;
+      atLeastMinimum =
+        name:
+        lib.assertMsg (lib.versionAtLeast pkgs.${name}.version minimums.${name})
+          "${name} ${pkgs.${name}.version} is older than the minimum ${minimums.${name}} (nix/lib-minimums.json)";
+      libkrunHas =
+        flag: lib.assertMsg (lib.elem flag pkgs.libkrun.makeFlags) "libkrun is built without ${flag}";
 
       # Selected explicitly, so a change to nixpkgs' default `go` can't
       # silently change the Go minor version. A minor bump is a deliberate
@@ -40,6 +64,7 @@
           goTools.golangci-lint
           goTools.go-licenses
           goTools.govulncheck
+          libdir
           pkgs.cocogitto
           # `go test -race` needs cgo, so the shell carries a C compiler
           # (mkShell's stdenv) even though the binary builds without it.
@@ -47,8 +72,21 @@
 
         # The flake is the only source of Go: never download a toolchain.
         GOTOOLCHAIN = "local";
+
+        # Where the plugin finds libkrun.so.1 and libkrunfw.so.5.
+        RUNNER_MICROVM_LIBDIR = "${libdir}/lib64";
       };
 
-      checks.${system}.devShell = self.devShells.${system}.default;
+      checks.${system} = {
+        devShell = self.devShells.${system}.default;
+        libVersions =
+          assert atLeastMinimum "libkrun";
+          assert atLeastMinimum "libkrunfw";
+          assert libkrunHas "BLK=1";
+          assert libkrunHas "NET=1";
+          pkgs.runCommand "lib-versions" { } ''
+            echo "libkrun ${pkgs.libkrun.version}, libkrunfw ${pkgs.libkrunfw.version}" > $out
+          '';
+      };
     };
 }
