@@ -1,6 +1,17 @@
 # Conventions
 
-The project's rules for commits, pull requests, source files, lint, dependencies and dependency updates, each with its reason. `nix develop -c just check` runs every check below; CI runs each as its own job.
+The project's definition of done, and its rules for commits, pull requests, source files, lint, dependencies and dependency updates, each with its reason. `nix develop -c just check` runs every check below; CI runs each as its own job.
+
+## Definition of done
+
+A change is done when:
+
+- `nix develop -c just check` passes;
+- the issue's acceptance checks are shown passing in the PR;
+- `docs/` and `GLOSSARY.md` are updated in the same PR;
+- there are no unmarked shortcuts: every deliberately naive piece of code carries `// SHORTCUT(#<issue>): <what is naive>`, naming the issue that replaces it.
+
+`AGENTS.md` stays a lean index, so the conventions live here.
 
 ## Commits and merging
 
