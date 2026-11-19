@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Set up Nix
+description: Install Nix and restore the Nix store from the Actions cache.
+
+runs:
+  using: composite
+  steps:
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      with:
+        github_access_token: ${{ github.token }}
+
+    # The store is cached in the Actions cache: no account or secret. The key
+    # changes with the flake. Pushes to main purge older entries once a new one
+    # is saved, so the repo's cache doesn't fill with stale stores; PR runs
+    # never purge, so a PR that changes the flake can't delete main's entry.
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 5G
+        purge: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        purge-prefixes: nix-${{ runner.os }}-
+        purge-created: 0
+        purge-primary-key: never
