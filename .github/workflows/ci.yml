@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Each job runs one `just` recipe inside the dev shell, so CI runs exactly what
+# `just check` runs locally. Separate jobs show which rule failed at a glance.
+name: CI
+
+on:
+  # Every PR, whatever its base, so stacked PRs get checks too.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just lint
+
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just test
+
+  licenses:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just licenses
+
+  vuln:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just vuln
+
+  commits:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      # The PR's own commits (base..head, not the merge ref GitHub checks
+      # out), or the commits a push to main added.
+      - name: Check commit messages
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$PUSH_BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            range="$PUSH_AFTER~1..$PUSH_AFTER" # a new branch: its tip
+          else
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          fi
+          nix develop -c just lint-commits "$range"
