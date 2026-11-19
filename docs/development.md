@@ -30,3 +30,32 @@ With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just
 - **The dev shell carries every tool the project's checks need:** Go, just, golangci-lint, go-licenses, govulncheck and cocogitto. It also carries a C compiler, because `go test -race` needs cgo even though the binary builds without it (`CGO_ENABLED=0`).
 - **`.envrc` contains `use flake`,** so direnv users get the shell on `cd`.
 - **`just` is the task runner:** every routine command is a recipe, so the maintainer, agents and CI run the same commands.
+
+## Libraries and KVM
+
+runner-microvm runs each job's VM with libkrun, which loads its guest kernel from libkrunfw.
+
+### Minimum versions
+
+The minimums live in `nix/lib-minimums.json`. They apply to the dev shell, CI and the operator docs alike.
+
+- **libkrun 1.19.8 or later, built with block and network support.**
+  - Older 1.x releases truncate a raw disk image when the guest discards at its end (libkrun #949), which corrupts read-write disks.
+  - Without block and network support there are no disks and no job network.
+- **libkrunfw 5.6.4 or later:** the version proven by the prototype. Older releases have not been checked for the guest's needs: file-backed EROFS mounts, and overlays built with `lowerdir+`.
+- **The library majors are `libkrun.so.1` and `libkrunfw.so.5`.** The project targets the libkrun 1.x API.
+
+### Overlays
+
+- **libkrun is installed by the operator and never bundled.** The dev shell provides it only for development and CI.
+- **`nix/libkrun-overlay.nix` overlays each library only while nixpkgs' version is older than its minimum.** As soon as nixpkgs catches up, the flake uses nixpkgs' package. The overlays retire themselves, so a nixpkgs bump can't leave a stale override in force. An active overlay provides exactly the minimum version. Whether each one is active depends on the pinned nixpkgs; #26 records nixpkgs' versions when it was filed.
+- **libkrun's block and network support are switched on in either case.**
+- **A flake check (`checks.x86_64-linux.libVersions`) asserts that each resolved version is at least its minimum, and that libkrun is built with block and network support,** so a regression fails `nix flake check`. The assertion is evaluated, so `nix flake check --no-build` shows it too.
+- **Renovate does not bump the overlays.** libkrun is Rust, so a version change also changes its vendored-crate hash, and an unattended bump would produce a broken PR. Bumping is a manual change of the version and hashes in the overlay.
+- **#26 tracks removing the overlays** once nixpkgs meets both minimums. The overlay links it. When it closes, the dead override code is deleted.
+
+### Library location
+
+- **The dev shell exports `RUNNER_MICROVM_LIBDIR`:** the one directory holding both libraries, which the plugin will later read to find them (#1).
+- **`just check-libs` checks that directory.** `libkrun.so.1` and `libkrunfw.so.5` must resolve to real files whose versioned names are at least the minimums. It prints both versions.
+

@@ -73,5 +73,31 @@ lint-commits range="origin/main..HEAD":
     done
     exit "$status"
 
+# Check that libkrun and libkrunfw in RUNNER_MICROVM_LIBDIR meet the minimums.
+check-libs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="${RUNNER_MICROVM_LIBDIR:?is not set: run inside the dev shell}"
+    status=0
+    for lib in libkrun.so.1 libkrunfw.so.5; do
+        name="${lib%%.so.*}"
+        want=$(sed -n "s/^ *\"$name\": *\"\([^\"]*\)\".*/\1/p" nix/lib-minimums.json)
+        if [ -z "$want" ]; then
+            echo "$name: no minimum in nix/lib-minimums.json" >&2; status=1; continue
+        fi
+        if ! real=$(readlink -e "$dir/$lib") || [ ! -f "$real" ]; then
+            echo "$name: $dir/$lib does not resolve to a file" >&2; status=1; continue
+        fi
+        have="${real##*/"$name".so.}"
+        if ! [[ "$have" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "$name: $real has no versioned name" >&2; status=1; continue
+        fi
+        if [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -n1)" != "$want" ]; then
+            echo "$name $have is older than the minimum $want ($real)" >&2; status=1; continue
+        fi
+        echo "$name $have (minimum $want): $real"
+    done
+    exit "$status"
+
 # Everything a PR must pass.
 check: build lint test licenses vuln lint-commits
