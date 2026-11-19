@@ -59,3 +59,13 @@ The minimums live in `nix/lib-minimums.json`. They apply to the dev shell, CI an
 - **The dev shell exports `RUNNER_MICROVM_LIBDIR`:** the one directory holding both libraries, which the plugin will later read to find them (#1).
 - **`just check-libs` checks that directory.** `libkrun.so.1` and `libkrunfw.so.5` must resolve to real files whose versioned names are at least the minimums. It prints both versions.
 
+### KVM in CI
+
+- **The `kvm` job on `ubuntu-24.04` proves a GitHub x86 runner can use `/dev/kvm`.** It does four things:
+  1. Adds a udev rule granting `/dev/kvm` read-write to everyone (`KERNEL=="kvm", GROUP="kvm", MODE="0666"`).
+  2. Reloads udev.
+  3. Opens `/dev/kvm` read-write as the runner user.
+  4. Runs `nix develop -c just check-libs`, then `nix flake check`, so a library below its minimum also fails CI.
+- **The job boots no VM:** booting is plugin behaviour, which belongs to the architecture (#3) and first-workflow (#4) epics.
+- **It uses the same Nix install and store cache as the other jobs.** The cache matters here, because the libkrunfw overlay builds a kernel. The cache key includes `nix/`, so a change to the overlays builds and saves a fresh store.
+- **`setup-nix` roots the dev shell with `nix develop --profile`,** because `nix develop` makes no GC root and the cache action collects garbage before it saves, which would delete the libraries and make the next run rebuild them.
