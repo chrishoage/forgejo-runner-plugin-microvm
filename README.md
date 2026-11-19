@@ -1,6 +1,6 @@
 # runner-microvm
 
-`runner-microvm` is a backend plugin for [forgejo-runner](https://code.forgejo.org/forgejo/runner) that runs each job in its own microVM. It is in early development and does nothing useful yet.
+`runner-microvm` is a backend plugin for [forgejo-runner](https://code.forgejo.org/forgejo/runner) that runs each job in microVMs of its own. It is in early development and does nothing useful yet.
 
 ## Development
 

@@ -17,7 +17,7 @@ With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just
 
 - The module path is `github.com/chrishoage/forgejo-runner-plugin-microvm`: it matches where the code lives, and a vanity domain is one more thing to own.
 - The binary is named `runner-microvm`, matching the naming of other runner plugins; the repository name already carries "forgejo".
-- The placeholder `main` lives under `cmd/runner-microvm/`. It is a stand-in: the package layout below the top level belongs to the architecture epic (#3), which may move it.
+- The package layout, three programs under `cmd/` and everything else under `internal/`, is in [`docs/architecture.md`](architecture.md#packages).
 
 ## Toolchain
 

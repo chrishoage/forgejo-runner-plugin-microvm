@@ -6,13 +6,18 @@
 - Every commit is a Conventional Commit, and lands on `main` as written (rebase merge).
 - No `nolint` without a reason on that line.
 - Never open throwaway pull requests. To show a check going red, push the breaking commit to the PR you intend to merge, record the run, then force-push it away.
+- The spike is a reference for behaviour only: never copy its code, layout or patterns.
+- A deliberate shortcut carries `// SHORTCUT(#<issue>): <what is naive>`. `git grep SHORTCUT` finds them all, and the issue that removes the shortcut deletes the comment.
+- When code and `docs/architecture.md` disagree, the same PR fixes one or the other.
 
 ## Docs
 
 Durable decisions live here, not in this file or in issues.
 
+- `docs/architecture.md`: the processes, packages and their import rules, on-disk layout, failure handling and tests.
+- `GLOSSARY.md`: the project's vocabulary; use its terms.
 - `docs/development.md`: how the project is built, the toolchain and the dev shell.
-- `docs/conventions.md`: commits and merging, the PR template, SPDX headers, lint, dependency licenses, Renovate.
+- `docs/conventions.md`: the definition of done, commits and merging, the PR template, SPDX headers, lint, dependency licenses, Renovate.
 - `docs/adr/`: decisions that are hard to reverse.
 - `docs/agents/`: how agent skills use the issue tracker, triage labels and domain docs.
 
