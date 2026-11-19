@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Renovate, run by the Mend-hosted GitHub App: no runner or token to maintain.
+// Each decision and its reason is in docs/conventions.md (Renovate).
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    // Actions are pinned to commit digests, with the version as a comment: a
+    // digest can't be moved under us the way a tag can.
+    'helpers:pinGitHubActionDigests',
+  ],
+
+  // Weekly: fewer, larger PRs keep review load low.
+  schedule: ['* 0-3 * * 1'],
+
+  // Conventional Commits, so Renovate's commits pass the commit check:
+  // build(deps) by default; Actions get ci(deps) below.
+  semanticCommits: 'enabled',
+  semanticCommitType: 'build',
+  semanticCommitScope: 'deps',
+
+  // Automerge relies on main's required checks and the repo's rebase merge.
+  platformAutomerge: true,
+  automergeType: 'pr',
+  automergeStrategy: 'rebase',
+
+  // Go modules: go mod tidy after every update, import paths rewritten on
+  // major bumps (the runner's plugin protocol path carries its major).
+  postUpdateOptions: ['gomodTidy', 'gomodUpdateImportPaths'],
+
+  // Flake inputs: weekly flake.lock maintenance, a PR of its own. Go patch
+  // releases and tool updates arrive this way.
+  nix: {
+    enabled: true,
+  },
+  lockFileMaintenance: {
+    enabled: true,
+    automerge: true,
+    schedule: ['* 0-3 * * 1'],
+  },
+
+  packageRules: [
+    // Go modules: build(deps). config:recommended would make them fix(deps).
+    {
+      matchManagers: ['gomod'],
+      semanticCommitType: 'build',
+    },
+    // The go directive is not a dependency: a Go minor bump is a deliberate
+    // change of go.mod and the flake together (docs/development.md).
+    {
+      matchManagers: ['gomod'],
+      matchDepTypes: ['golang', 'toolchain'],
+      enabled: false,
+    },
+    // One automerging group for non-major Go module updates.
+    {
+      matchManagers: ['gomod'],
+      matchUpdateTypes: ['minor', 'patch', 'digest'],
+      groupName: 'Go modules',
+      automerge: true,
+    },
+    // GitHub Actions: ci(deps), one automerging group for digest and version
+    // updates.
+    {
+      matchManagers: ['github-actions'],
+      semanticCommitType: 'ci',
+    },
+    {
+      matchManagers: ['github-actions'],
+      matchUpdateTypes: ['minor', 'patch', 'digest', 'pin', 'pinDigest'],
+      groupName: 'GitHub Actions',
+      automerge: true,
+    },
+    // Flake inputs arrive only through flake.lock maintenance, not as one PR
+    // per input.
+    {
+      matchManagers: ['nix'],
+      matchUpdateTypes: ['major', 'minor', 'patch', 'digest', 'pin', 'pinDigest'],
+      enabled: false,
+    },
+    // Any major update waits for the maintainer.
+    {
+      matchUpdateTypes: ['major'],
+      automerge: false,
+    },
+    // The runner's plugin protocol is the plugin's contract with the runner:
+    // its updates wait for the maintainer, in a PR of their own, so they
+    // don't hold back the automerging Go group.
+    {
+      matchPackageNames: [
+        'code.forgejo.org/forgejo/runner',
+        'code.forgejo.org/forgejo/runner/**',
+      ],
+      groupName: 'forgejo runner',
+      automerge: false,
+    },
+  ],
+}
