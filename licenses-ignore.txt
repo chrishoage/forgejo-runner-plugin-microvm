@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Go packages exempt from the dependency license check (`just licenses`), one
+# package path prefix per line. Each entry needs a comment above it saying what
+# was checked by hand and why the license is acceptable.
