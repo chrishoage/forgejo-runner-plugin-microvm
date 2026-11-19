@@ -9,3 +9,8 @@ func TestMainReturns(t *testing.T) {
 	t.Parallel()
 	main()
 }
+
+func TestDeliberateFailure(t *testing.T) {
+	t.Parallel()
+	t.Fatal("deliberate failure (throwaway, never merged)")
+}
