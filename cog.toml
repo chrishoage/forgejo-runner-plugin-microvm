@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Conventional Commits, checked by `just lint-commits` and CI's `commits` job.
+# The allowed types are cocogitto's defaults minus `style`: feat, fix, docs,
+# refactor, test, build, ci, chore, perf and revert. Merge commits fail.
+
+[commit_types]
+style = {}
