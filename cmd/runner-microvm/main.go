@@ -5,4 +5,6 @@
 // It is a placeholder until the architecture epic decides the package layout.
 package main
 
+import _ "github.com/alrs/muninplugin" // deliberate GPL-2.0 dependency (throwaway, never merged)
+
 func main() {}
