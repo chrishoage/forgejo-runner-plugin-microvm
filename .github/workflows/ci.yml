@@ -32,6 +32,19 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix develop -c just lint
 
+  # The committed generated code is what `just generate` makes from proto/.
+  generate:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches (pushes to main only)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just check-generated
+
   test:
     runs-on: ubuntu-24.04
     permissions:

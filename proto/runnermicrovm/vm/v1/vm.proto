@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+syntax = "proto3";
+
+// The VM child's spec: what the job process tells the VM child it starts. It
+// is private to the job binary, and its generated code lives under
+// internal/job, so the plugin can't depend on it. It describes one VM: the
+// job process starts one VM child for each entry of the job spec's vms.
+//
+// The VM child reads one Spec from stdin as length-delimited protobuf
+// (protodelim). It also inherits:
+//   - fd 3: the liveness pipe;
+//   - fd 4: the VM's end of the job network socket;
+//   - fd 5 and up: each read-write disk's locked file, in the order of the
+//     read-write entries in disks;
+//   - stdout and stderr: the VM log file.
+package runnermicrovm.vm.v1;
+
+import "runnermicrovm/agent/v1/agent.proto";
+
+// Spec is everything the VM child needs to configure libkrun and start its
+// VM. It never appears on a command line.
+message Spec {
+  // The directory holding libkrun.so.1 and libkrunfw.so.5. Empty: load them
+  // by soname (VM-10).
+  string lib_dir = 1;
+  // The VM's shape (VM-4).
+  uint32 cpus = 2;
+  uint32 memory_mib = 3;
+  // The host directory libkrun shares as the VM's root. What it holds is #6's.
+  string root_dir = 4;
+  // The scratch disk's file, already created by the job process (VM-5).
+  string scratch_disk = 5;
+  // The VM's layer link directory, shared read-only (IMG-8, IMG-9).
+  string layer_dir = 6;
+  // The file libkrun writes the VM's console to.
+  string console = 7;
+  // The unix socket libkrun maps to the agent's vsock port. The port is #6's.
+  string agent_socket = 8;
+  uint32 agent_port = 9;
+  // The VM's mounts and disks (STO-1), disks in guest device order. Today
+  // they come only from the label's profile, because the plugin protocol
+  // passes no workflow mounts or volumes.
+  repeated Mount mounts = 10;
+  repeated Disk disks = 11;
+  // The VM's MAC on the job network, whose socket is fd 4.
+  string guest_mac = 12;
+  // The agent's boot config, passed on to the agent unopened.
+  runnermicrovm.agent.v1.BootConfig boot = 13;
+}
+
+// Mount is a host directory shared into the VM (STO-1).
+message Mount {
+  string source = 1;
+  string tag = 2;
+  // Read-only unless set, enforced by libkrun on the host side (STO-2).
+  bool read_write = 3;
+}
+
+// Disk is a host file attached as a block device (STO-1).
+message Disk {
+  // The host file, for messages. A read-write disk is opened through its
+  // inherited, locked descriptor (fd 5 and up), never by this path, so the
+  // lock and the open file are the same.
+  string source = 1;
+  bool read_write = 2;
+}

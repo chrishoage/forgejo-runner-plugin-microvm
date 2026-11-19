@@ -18,9 +18,34 @@ build:
 fmt:
     golangci-lint fmt
 
-# Lint, formatting included. Any finding fails.
+# Lint, formatting included, and the .proto files. Any finding fails.
 lint:
     golangci-lint run
+    buf lint
+
+# Directories holding only generated code.
+generated := "internal/gen internal/job/internal/gen"
+
+# Regenerate the protocols' Go code from proto/.
+generate:
+    rm -rf {{ generated }}
+    buf generate
+
+# Fail when the committed generated code is not what `just generate` makes.
+check-generated:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    buf generate --output "$out"
+    status=0
+    for dir in {{ generated }}; do
+        diff -r "$out/$dir" "$dir" || status=1
+    done
+    if [ "$status" -ne 0 ]; then
+        echo "generated code is stale: run 'just generate' and commit the result" >&2
+    fi
+    exit "$status"
 
 # Run the unit tests with the race detector.
 test:
@@ -100,4 +125,4 @@ check-libs:
     exit "$status"
 
 # Everything a PR must pass.
-check: build lint test licenses vuln lint-commits
+check: build lint check-generated test licenses vuln lint-commits

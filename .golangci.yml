@@ -31,6 +31,10 @@ linters:
       require-explanation: true
       allow-unused: false
   exclusions:
+    # Generated protocol code (`just generate`) is not ours to lint.
+    paths:
+      - ^internal/gen/
+      - ^internal/job/internal/gen/
     rules:
       # Fixtures trip gosec, and test helpers often take constant arguments.
       - path: _test\.go$
@@ -42,6 +46,10 @@ formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      - ^internal/gen/
+      - ^internal/job/internal/gen/
 
 issues:
   # Nothing is hidden.
