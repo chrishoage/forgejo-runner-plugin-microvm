@@ -9,7 +9,8 @@ The project's rules for commits, pull requests, source files, lint, dependencies
 - **cocogitto checks the messages** (`cog check`, configured in `cog.toml`). It is a single binary from the flake, with no Node toolchain.
   - `just lint-commits` checks `origin/main..HEAD` and is part of `just check`. `just lint-commits <range>` checks another range.
   - CI's `commits` job checks the PR's own commits (its base to its head), or the commits a push to `main` added.
-  - cocogitto 7.0.0 checks the whole history when a range starts at the repository's root commit. For that case only, the recipe verifies each commit in the range with `cog verify`.
+  - Two commits on `main` predate the rule and are not Conventional Commits: the initial empty commit and the agent-skills setup. `commits-ignore.txt` lists them, and the commit check skips them. The changelog (#12) must skip them too. No later commit is ever added to the list; its message is fixed before it merges.
+  - `cog check` can't skip commits, and cocogitto 7.0.0 checks the whole history when a range starts at the root commit. When a range contains an ignored commit or starts at the root, the recipe runs `cog verify` on each commit itself.
 - **Rules:**
   - The allowed types are `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `chore`, `perf` and `revert`: the standard set. cocogitto's extra default, `style`, is turned off.
   - Scopes are optional and free-form.
