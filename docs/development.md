@@ -7,8 +7,9 @@ How the project is built, and why it is built this way.
 With only Nix installed (flakes enabled):
 
 ```sh
-nix develop -c just build   # bin/runner-microvm
-nix develop -c just check   # everything a PR must pass
+nix develop -c just build      # bin/runner-microvm, job binary and agent embedded
+nix develop -c just check      # everything a PR must pass
+nix develop -c just test-kvm   # every test, VM-booting ones included (needs /dev/kvm)
 ```
 
 With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just <recipe>` directly. `just` with no recipe lists them all.
@@ -31,6 +32,31 @@ With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just
 - **`.envrc` contains `use flake`,** so direnv users get the shell on `cd`.
 - **`just` is the task runner:** every routine command is a recipe, so the maintainer, agents and CI run the same commands.
 
+## Building and the payload
+
+`runner-microvm` embeds the job binary and the agent (`docs/architecture.md`, The embedded payload).
+
+```sh
+nix develop -c just payload   # internal/payload/runner-microvm-{job,agent}
+nix develop -c just build     # runs payload, then bin/runner-microvm with -tags payload
+```
+
+- **`just build` always builds the payload first,** then the plugin with `-tags payload`. Every binary builds with `CGO_ENABLED=0 -trimpath -buildvcs=false`, so the plugin binary is reproducible under Nix.
+- **`internal/payload/embedded.go` (tag `payload`) embeds the two files by exact name,** so a build with the tag but without the payload fails to compile. Without the tag, `internal/payload/stub.go` returns `ErrNoPayload`, so `go build ./...`, `go vet` and `go test` need no payload.
+- **`just lint` builds the payload, then lints twice:** once as `go test` builds (cgo on, no tags), and once as the binaries ship (`CGO_ENABLED=0`, `-tags payload`). One pass leaves the other's files unlinted: `embedded.go` hid an unused variable that way. A second pass costs about a second, and the payload build is cached after `just build`; golangci-lint's `build-tags` setting would replace one view instead of adding the other.
+- **The built payload is ignored by git and never committed.**
+
+## Tests
+
+```sh
+nix develop -c just test       # go test -race ./...: no KVM, no root, no payload
+nix develop -c just test-kvm   # go test -race -tags kvm,payload ./..., after just payload
+```
+
+- **`just test-kvm` runs every test, the `kvm`-tagged ones included,** against the embedded payload. It needs `/dev/kvm` and the dev shell's libraries, and runs as a step of CI's `kvm` job.
+- **The dependency test (`cmd/deps_test.go`) runs `go list -deps`,** so `go test` needs the `go` command on `PATH`, which `go test` provides.
+- **It lists each binary as it ships, not as the test process is built:** `CGO_ENABLED=0` for all three, `-tags payload` for the plugin, `GOOS=linux GOARCH=amd64`, and an empty `GOFLAGS`. Under `-race` the test process has cgo on and no tags, and a file behind `//go:build !cgo` or `payload` is only in one of those graphs. The pinned values are constants in the test, so go test's cache keys on them. It passes `-e` so it works before `just payload`; an embed pattern matching no file is the only error it accepts.
+
 ## Protocols and codegen
 
 The three protocols are `.proto` files under `proto/`; `docs/architecture.md` (Protocols) says what each carries.
@@ -38,7 +64,7 @@ The three protocols are `.proto` files under `proto/`; `docs/architecture.md` (P
 ```sh
 nix develop -c just generate          # regenerate the Go code from proto/
 nix develop -c just check-generated   # fail if the committed code is stale
-nix develop -c just lint              # golangci-lint, then buf lint
+nix develop -c just lint              # payload, golangci-lint twice, then buf lint
 ```
 
 - **`buf` with local plugins (`protoc-gen-go`, `protoc-gen-go-grpc`) from the dev shell, and no Buf Schema Registry.** One tool generates and lints, with no account or network. `buf.yaml` names the module (`proto/`) and the lint rules; `buf.gen.yaml` the plugins and output.
@@ -79,11 +105,12 @@ The minimums live in `nix/lib-minimums.json`. They apply to the dev shell, CI an
 
 ### KVM in CI
 
-- **The `kvm` job on `ubuntu-24.04` proves a GitHub x86 runner can use `/dev/kvm`.** It does four things:
+- **The `kvm` job on `ubuntu-24.04` proves a GitHub x86 runner can use `/dev/kvm`.** It does five things:
   1. Adds a udev rule granting `/dev/kvm` read-write to everyone (`KERNEL=="kvm", GROUP="kvm", MODE="0666"`).
   2. Reloads udev.
   3. Opens `/dev/kvm` read-write as the runner user.
   4. Runs `nix develop -c just check-libs`, then `nix flake check`, so a library below its minimum also fails CI.
-- **The job boots no VM:** booting is plugin behaviour, which belongs to the architecture (#3) and first-workflow (#4) epics.
+  5. Runs `nix develop -c just test-kvm`.
+- **The job then runs `nix develop -c just test-kvm`:** the tier for tests that boot VMs (`kvm` build tag). Until #4 adds such tests, it runs the plain tests against the embedded payload.
 - **It uses the same Nix install and store cache as the other jobs.** The cache matters here, because the libkrunfw overlay builds a kernel. The cache key includes `nix/`, so a change to the overlays builds and saves a fresh store.
 - **`setup-nix` roots the dev shell with `nix develop --profile`,** because `nix develop` makes no GC root and the cache action collects garbage before it saves, which would delete the libraries and make the next run rebuild them.

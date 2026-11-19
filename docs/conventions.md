@@ -1,6 +1,6 @@
 # Conventions
 
-The project's definition of done, and its rules for commits, pull requests, source files, lint, dependencies and dependency updates, each with its reason. `nix develop -c just check` runs every check below; CI runs each as its own job.
+The project's definition of done, and its rules for commits, pull requests, source files, lint, tests, package boundaries, dependencies and dependency updates, each with its reason. `nix develop -c just check` runs every check below; CI runs each as its own job.
 
 ## Definition of done
 
@@ -66,7 +66,14 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 
 ## Tests
 
-- **`just test` runs `go test -race ./...`.** The race detector catches concurrency bugs early, and the plugin is concurrent by design.
+- **`just test` runs `go test -race ./...`.** The race detector catches concurrency bugs early, and the plugin is concurrent by design. It needs no KVM, no root and no payload.
+- **Tests that boot VMs carry `//go:build kvm`.** `just test-kvm` runs every test with `-tags kvm,payload`, as a step of CI's `kvm` job (see `docs/architecture.md`, Tests).
+
+## Boundary enforcement
+
+- **The package boundaries in `docs/architecture.md` are enforced, not just documented.** The compiler keeps `internal/job/internal/` private to the job process, and `cmd/deps_test.go` runs `go list -deps` on each binary under plain `go test ./...`: the plugin must not depend on purego, gvisor, gvisor-tap-vsock, `internal/job` or `internal/agent`; the job binary must depend on purego and gvisor-tap-vsock; the agent may depend only on its allow-list.
+- **The test checks transitive dependencies,** which is the property that matters. depguard checks only direct imports, so it isn't used.
+- **A change that needs a boundary moved changes `docs/architecture.md` and the test in the same PR.**
 
 ## Dependency licenses
 
@@ -93,6 +100,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **A new push to a PR cancels its older run; runs on `main` are never cancelled,** so every push to `main` is checked and saves its cache.
 - **The jobs are `lint`, `generate`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
 - **Every Action is pinned to a commit digest, with its version as a comment.** Renovate keeps the digests current.
+- **The `kvm` job also runs `just test-kvm`,** the only tier that boots VMs (see `docs/development.md`, KVM in CI).
 - **CI never runs Forgejo.** End-to-end runs use a local harness (#4).
 
 ## Renovate

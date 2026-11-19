@@ -10,17 +10,28 @@ allowed_licenses := "MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,MPL-2.0,LGPL-2.1,L
 default:
     @just --list
 
-# Build the runner-microvm binary into bin/.
-build:
-    CGO_ENABLED=0 go build -trimpath -o bin/runner-microvm ./cmd/runner-microvm
+# Build flags shared by every binary: reproducible under Nix.
+build_flags := "-trimpath -buildvcs=false"
+
+# Build the job binary and the agent into internal/payload/, for embedding.
+payload:
+    CGO_ENABLED=0 go build {{ build_flags }} -o internal/payload/runner-microvm-job ./cmd/runner-microvm-job
+    CGO_ENABLED=0 go build {{ build_flags }} -o internal/payload/runner-microvm-agent ./cmd/runner-microvm-agent
+
+# Build bin/runner-microvm with the job binary and the agent embedded.
+build: payload
+    CGO_ENABLED=0 go build {{ build_flags }} -tags payload -o bin/runner-microvm ./cmd/runner-microvm
 
 # Apply the formatters (gofumpt, goimports).
 fmt:
     golangci-lint fmt
 
-# Lint, formatting included, and the .proto files. Any finding fails.
-lint:
+# Lint, formatting included, and the .proto files. Any finding fails. The
+# second pass lints the shipped build (CGO_ENABLED=0, -tags payload), so
+# files behind those build constraints are linted too.
+lint: payload
     golangci-lint run
+    CGO_ENABLED=0 golangci-lint run --build-tags payload
     buf lint
 
 # Directories holding only generated code.
@@ -47,9 +58,14 @@ check-generated:
     fi
     exit "$status"
 
-# Run the unit tests with the race detector.
+# Run the unit tests with the race detector. No KVM, no root, no payload.
 test:
     go test -race ./...
+
+# Run every test, those that boot VMs (`kvm` tag) included, against the
+# embedded payload. Needs /dev/kvm and the dev shell's libraries.
+test-kvm: payload
+    go test -race -tags kvm,payload ./...
 
 # Fail on any dependency whose license is not on the allow-list.
 licenses:
