@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Strict, no warnings: every finding fails `just lint`. Reasons for each
+# choice are in docs/conventions.md (Lint).
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - errname
+    - errorlint
+    - exhaustive
+    - gocritic
+    - goheader
+    - gosec
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+    - usestdlibvars
+  settings:
+    goheader:
+      template: "SPDX-License-Identifier: GPL-3.0-or-later"
+    nolintlint:
+      require-specific: true
+      require-explanation: true
+      allow-unused: false
+  exclusions:
+    rules:
+      # Fixtures trip gosec, and test helpers often take constant arguments.
+      - path: _test\.go$
+        linters:
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+
+issues:
+  # Nothing is hidden.
+  max-issues-per-linter: 0
+  max-same-issues: 0
