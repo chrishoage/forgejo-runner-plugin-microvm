@@ -34,7 +34,7 @@ It ends with a checklist: `just check` is green, and durable decisions are recor
 ## SPDX headers
 
 - **Every source file starts with `SPDX-License-Identifier: GPL-3.0-or-later`,** in that language's comment form. One line states the license where the code is read.
-- Here "source file" means Go, Nix, YAML, TOML, the `justfile`, `go.mod`, `.envrc` and `.gitignore`. Markdown, `LICENSE`, and generated files without comments (`flake.lock`, `go.sum`) are exempt.
+- Here "source file" means Go, Nix, YAML, TOML, the `justfile`, `go.mod`, `renovate.json5`, `.envrc` and `.gitignore`. Markdown, `LICENSE`, and generated files without comments (`flake.lock`, `go.sum`) are exempt.
 - **goheader enforces the header for Go** as part of `just lint`, so no extra tool is needed.
 - **No REUSE tooling:** one header line is enough for this repo.
 
@@ -82,3 +82,32 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **CI never runs Forgejo.** End-to-end runs use a local harness (#4).
 
 ## Renovate
+
+`renovate.json5` configures it; a comment above each rule names the decision it implements.
+
+- **After editing `renovate.json5`, validate it by hand: `nix shell nixpkgs#renovate -c renovate-config-validator --strict`, run at the repo root.** With no argument it finds the file and checks it as repo config; given the path, it needs `--no-global`, or it checks it as self-hosted global config. The dev shell, the justfile and CI don't run it: the file changes rarely, and the validator is a 250 MiB package.
+- **Renovate runs as the Mend-hosted GitHub App:** no runner or token to maintain.
+
+### What it updates
+
+- **Go modules, with `go mod tidy` after every update and import paths rewritten on major bumps** (`gomodTidy`, `gomodUpdateImportPaths`). The runner's plugin protocol is imported from `code.forgejo.org/forgejo/runner/v13/...`, and a major bump changes that path.
+- **Not the `go` directive in `go.mod`:** a Go minor bump is a deliberate change of `go.mod` and the flake together, and patch releases arrive through `flake.lock` (see `docs/development.md`).
+- **GitHub Actions, pinned to commit digests with the version as a comment** (`helpers:pinGitHubActionDigests`). A digest can't be moved under us the way a tag can.
+- **Flake inputs, through weekly `flake.lock` maintenance only,** never as a PR per input. This is how Go patch releases and tool updates arrive. The `nix` manager is off by default in Renovate, so the config enables it.
+- **Not the libkrun and libkrunfw overlays:** a version bump also needs a hash change Renovate can't make (#15). No Renovate manager reads `nix/libkrun-overlay.nix` or `nix/lib-minimums.json`, and the config adds no custom manager that would.
+
+### Grouping and schedule
+
+- **Weekly, early on Monday (UTC).** Fewer, larger PRs keep review load low.
+- **One group for non-major Go module updates, one for non-major Actions updates; `flake.lock` maintenance is a PR of its own.** Each major update gets a PR of its own, so it can't hold back a group that automerges.
+- **`code.forgejo.org/forgejo/runner` updates get a group of their own,** so a runner update waiting for review doesn't hold back the automerging Go group.
+
+### Automerge
+
+- **Non-major Go module updates, Action digest and version updates, and `flake.lock` maintenance automerge once every required check passes.** CI is the gate, and these are low risk.
+- **Never automerged: any major update, and any update to `code.forgejo.org/forgejo/runner`,** whose plugin protocol is the plugin's contract with the runner. They wait for the maintainer.
+- **Automerge is GitHub's platform automerge, gated by `main`'s required checks, and uses the repo's rebase merge** (`automergeStrategy: rebase`), like every other PR.
+
+### Commit messages
+
+- **Renovate's commits are Conventional Commits,** so they pass the commit check: `build(deps): …` for Go modules and flake inputs, `ci(deps): …` for Actions. The config overrides `config:recommended`, which would make Go modules `fix(deps)`.
