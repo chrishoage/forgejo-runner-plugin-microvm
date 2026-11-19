@@ -51,14 +51,21 @@ lint-commits range="origin/main..HEAD":
             exit 1
         fi
     done
-    if git rev-parse -q --verify "$from^" >/dev/null; then
+    ignored=$(grep -v -e '^#' -e '^[[:space:]]*$' commits-ignore.txt || true)
+    commits=$(git rev-list "$range")
+    # cog check can't skip commits, and cocogitto 7.0.0 checks the whole
+    # history when a range starts at the root commit. Only in those cases,
+    # verify each commit in the range itself.
+    if git rev-parse -q --verify "$from^" >/dev/null &&
+        { [ -z "$ignored" ] || ! grep -qxF -f <(printf '%s\n' "$ignored") <<<"$commits"; }; then
         exec cog check "$range"
     fi
-    # cocogitto 7.0.0 checks the whole history, root included, when a range
-    # starts at the root commit; verify each commit in the range itself.
-    commits=$(git rev-list "$range")
     status=0
     for c in $commits; do
+        if grep -qxF "$c" <<<"$ignored"; then
+            echo "skipping $c (commits-ignore.txt)"
+            continue
+        fi
         if ! out=$(cog verify "$(git log -1 --format=%B "$c")" 2>&1); then
             printf 'commit %s is not a Conventional Commit:\n%s\n' "$c" "$out" >&2
             status=1

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Commits on main that predate the Conventional Commits rule, one full SHA per
+# line. `just lint-commits` skips them, and so must the changelog (#12).
+# Never add a commit made after the rule; fix its message before it merges.
+
+# Initial empty commit
+4e29f28d496f31d62949494c60fdc1fc243a99ec
+# Set up agent skills config: GitHub issues, triage labels, domain docs
+7849c7fe90d7f9517220bbfaaf8d11df5b7af35f
