@@ -66,6 +66,12 @@
           goTools.govulncheck
           libdir
           pkgs.cocogitto
+          # Protocol codegen and lint, with local plugins: no Buf Schema
+          # Registry, no account, no network. They generate code rather than
+          # analyse it, so nixpkgs' builds are used as they are.
+          pkgs.buf
+          pkgs.protoc-gen-go
+          pkgs.protoc-gen-go-grpc
           # `go test -race` needs cgo, so the shell carries a C compiler
           # (mkShell's stdenv) even though the binary builds without it.
         ];

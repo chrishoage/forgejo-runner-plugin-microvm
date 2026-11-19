@@ -25,11 +25,29 @@ With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just
 - **nixpkgs follows `nixos-unstable`:** it carries current Go and lint tools, and a stable channel lags.
 - **x86_64 Linux only:** the flake defines the dev shell for `x86_64-linux` alone, because GitHub's x86 Linux runners provide KVM; arm64 is out of scope.
 - **The flake selects `go_1_26` explicitly,** so a change to nixpkgs' default `go` can't silently change the Go minor version. The shell's Go tools (golangci-lint, go-licenses, govulncheck) are built with that same Go, so they agree with `go` on the standard library; nixpkgs would otherwise build them with its latest Go.
-- **`go.mod` states the language minimum `go 1.26`, with no `toolchain` line, and the dev shell sets `GOTOOLCHAIN=local`,** so Go never downloads a toolchain of its own: the flake is the only source of Go.
+- **`go.mod` states the language minimum `go 1.26` (written `1.26.0` once a dependency requires that form), with no `toolchain` line, and the dev shell sets `GOTOOLCHAIN=local`,** so Go never downloads a toolchain of its own: the flake is the only source of Go.
 - **Go patch releases arrive through `flake.lock` updates.** A minor bump (1.27) is a deliberate change of `go.mod` and the flake together.
-- **The dev shell carries every tool the project's checks need:** Go, just, golangci-lint, go-licenses, govulncheck and cocogitto. It also carries a C compiler, because `go test -race` needs cgo even though the binary builds without it (`CGO_ENABLED=0`).
+- **The dev shell carries every tool the project's checks need:** Go, just, golangci-lint, go-licenses, govulncheck, cocogitto, and buf with protoc-gen-go and protoc-gen-go-grpc. It also carries a C compiler, because `go test -race` needs cgo even though the binary builds without it (`CGO_ENABLED=0`).
 - **`.envrc` contains `use flake`,** so direnv users get the shell on `cd`.
 - **`just` is the task runner:** every routine command is a recipe, so the maintainer, agents and CI run the same commands.
+
+## Protocols and codegen
+
+The three protocols are `.proto` files under `proto/`; `docs/architecture.md` (Protocols) says what each carries.
+
+```sh
+nix develop -c just generate          # regenerate the Go code from proto/
+nix develop -c just check-generated   # fail if the committed code is stale
+nix develop -c just lint              # golangci-lint, then buf lint
+```
+
+- **`buf` with local plugins (`protoc-gen-go`, `protoc-gen-go-grpc`) from the dev shell, and no Buf Schema Registry.** One tool generates and lints, with no account or network. `buf.yaml` names the module (`proto/`) and the lint rules; `buf.gen.yaml` the plugins and output.
+- **`buf lint` runs at its STANDARD rules, in `just lint`.** Each `.proto` file's directory mirrors its package, which has a version suffix (`runnermicrovm/agent/v1`).
+- **Go import paths come from buf's managed mode, so the `.proto` files carry no `go_package`.** The agent and job protocols are generated under `internal/gen/`; the VM child spec under `internal/job/internal/gen/`, so only the job binary can import it.
+- **Generated code is committed,** so `go build` and `go install` need no codegen.
+- **`just generate` deletes the generated directories and regenerates them,** so a removed `.proto` file leaves nothing behind.
+- **`just check-generated` generates into a temporary directory and compares,** as part of `just check` and as CI's `generate` job. Stale generated code fails the PR, and the check works the same before and after `git add`.
+- **The generated code needs Go modules at least as new as the generators:** `google.golang.org/protobuf` at least `protoc-gen-go`'s version, and a `google.golang.org/grpc` that supports `protoc-gen-go-grpc`'s output. A flake update that bumps a generator may need a module bump in the same PR.
 
 ## Libraries and KVM
 

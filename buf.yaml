@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The protocols' sources. `buf lint` (in `just lint`) checks them at the
+# STANDARD rules; docs/development.md (Protocols and codegen) has the rest.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD

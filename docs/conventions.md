@@ -45,7 +45,8 @@ It ends with a checklist: `just check` is green, and durable decisions are recor
 ## SPDX headers
 
 - **Every source file starts with `SPDX-License-Identifier: GPL-3.0-or-later`,** in that language's comment form. One line states the license where the code is read.
-- Here "source file" means Go, Nix, YAML, TOML, the `justfile`, `go.mod`, `renovate.json5`, `.envrc` and `.gitignore`. Markdown, `LICENSE`, and generated files without comments (`flake.lock`, `go.sum`) are exempt.
+- Here "source file" means Go, Protocol Buffers (`.proto`), Nix, YAML, TOML, the `justfile`, `go.mod`, `renovate.json5`, `.envrc` and `.gitignore`. Markdown, `LICENSE`, and generated files without comments (`flake.lock`, `go.sum`) are exempt.
+- The generated Go code carries the header because the generators copy it from the `.proto` file's leading comment.
 - **goheader enforces the header for Go** as part of `just lint`, so no extra tool is needed.
 - **No REUSE tooling:** one header line is enough for this repo.
 
@@ -59,6 +60,8 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **nolintlint requires a specific linter name and an explanation on every `nolint`,** so a skipped rule is always one line with a reason.
 - **The formatters are gofumpt and goimports,** run through golangci-lint's formatter support. gofumpt is a strict superset of gofmt, which removes formatting debates.
 - **Test files follow the same rules, except gosec and unparam.** Fixtures trip gosec, and test helpers often take constant arguments.
+- **Generated code (`internal/gen/`, `internal/job/internal/gen/`) is excluded from linting and formatting.** It is not ours to change, and `just check-generated` keeps it in step with `proto/`.
+- **`just lint` also runs `buf lint` at its STANDARD rules** on `proto/` (see `docs/development.md`).
 - **No caps on reported issues** (`max-issues-per-linter` and `max-same-issues` are 0), so nothing is hidden.
 
 ## Tests
@@ -88,7 +91,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
   - The cache key is the hash of `flake.nix` and `flake.lock`.
   - Pushes to `main` purge older entries once a new one is saved, so stale stores don't crowd out the repo's cache quota. PR runs never purge, so a PR that changes the flake can't delete `main`'s entry.
 - **A new push to a PR cancels its older run; runs on `main` are never cancelled,** so every push to `main` is checked and saves its cache.
-- **The jobs are `lint`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
+- **The jobs are `lint`, `generate`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
 - **Every Action is pinned to a commit digest, with its version as a comment.** Renovate keeps the digests current.
 - **CI never runs Forgejo.** End-to-end runs use a local harness (#4).
 

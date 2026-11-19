@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+syntax = "proto3";
+
+// The control channel between the plugin and a job process. The plugin
+// writes one Spec to the job process's stdin, and the job process writes
+// Events to its stdout, both as length-delimited protobuf (protodelim). The
+// job process's stderr is its log file, and fd 3 is the liveness pipe. It is
+// not gRPC: one message in and a handful out don't need a server.
+package runnermicrovm.job.v1;
+
+import "runnermicrovm/agent/v1/agent.proto";
+
+// Spec is everything a job process needs to run one job: its job network and
+// every VM on it. It never appears on a command line.
+message Spec {
+  // The job's environment id, for log lines.
+  string job = 1;
+  // The job binary's own path. The job process starts each VM child by
+  // running it with `vm`; it never execs os.Executable().
+  string job_binary = 2;
+  // The directory holding libkrun.so.1 and libkrunfw.so.5. Empty: load them
+  // by soname from the system (VM-10).
+  string lib_dir = 3;
+  // The job network, shared by every VM in vms (NET-1).
+  Network network = 4;
+  // The job's VMs, each run by its own VM child, all on the one job network.
+  // A VM is identified by its index here: index 0 is always the job's
+  // container, the VM the plugin's Exec runs in, and services follow, in
+  // order. Events name a VM by its index, and its directories are named by
+  // it: <state>/jobs/<id>/<n>/, <runtime>/<id>/<n>/ and
+  // <cache>/jobs/<id>/<n>/, where <n> is the index. The plugin chooses the
+  // index, so a workflow can't make two VMs collide or make a path leave its
+  // directory.
+  //
+  // Today vms always holds exactly one VM, the job's container, because the
+  // plugin protocol passes a service only its name, image, env and ports,
+  // and no VM options: a job that declares services fails at Create, and the
+  // job process rejects a spec whose vms count isn't one with Failed. The
+  // shape is built for more: services become more VMs of the same job, each
+  // another entry in vms, on the same job network and in the same job
+  // process, and that shape needs no redesign. What a service needs beyond
+  // it is added fields and calls, for example its entrypoint and cmd at boot
+  // and the plugin dialling its agent. Where a service VM's shape and
+  // storage come from is decided when services are.
+  repeated VM vms = 5;
+}
+
+// VM is one of the job's VMs, run by one VM child.
+message VM {
+  // The VM's name, unique within the spec: its name in Network.hosts, log
+  // lines and Failed reasons. It is never a path component or a cache key: a
+  // service's name would be its DNS name on the job network, its key in the
+  // workflow, which the workflow chooses and which may be `job`, `0` or
+  // `../x`. Today the job's container's name is the job's name
+  // made DNS-safe, as for its BootConfig.hostname (GST-12).
+  string name = 1;
+  // The VM's shape (VM-4).
+  uint32 cpus = 2;
+  uint32 memory_mib = 3;
+  // The VM's scratch disk's file, created fresh by the job process in
+  // <state>/jobs/<id>/<n>/, and its size (VM-5).
+  string scratch_disk = 4;
+  uint64 scratch_size_bytes = 5;
+  // The VM log file (the VM child's stdout and stderr) and the console file,
+  // both in <state>/jobs/<id>/<n>/.
+  string vm_log = 6;
+  string console = 7;
+  // The unix socket libkrun maps to the agent's vsock port, which the plugin
+  // dials, in <runtime>/<id>/<n>/. The port is #6's.
+  string agent_socket = 8;
+  uint32 agent_port = 9;
+  // The host directory libkrun shares as the VM's root. What it holds is #6's.
+  string root_dir = 10;
+  // The VM's layer link directory, <cache>/jobs/<id>/<n>/, shared into the
+  // VM read-only (IMG-8, IMG-9).
+  string layer_dir = 11;
+  // The VM's mounts and disks (STO-1), disks in guest device order. Today
+  // they come only from the label's profile, because the plugin protocol
+  // passes no workflow mounts or volumes.
+  repeated Mount mounts = 12;
+  repeated Disk disks = 13;
+  // The VM's address and MAC on the job network. The address is static:
+  // there is no DHCP.
+  string guest_address = 14;
+  string guest_mac = 15;
+  // The agent's boot config, passed on to the VM child unopened.
+  runnermicrovm.agent.v1.BootConfig boot = 16;
+}
+
+// Mount is a host directory a VM shares (STO-1).
+message Mount {
+  // The absolute host directory.
+  string source = 1;
+  // The tag it is shared under; the boot config names the same tag.
+  string tag = 2;
+  // Read-only unless set; enforced on the host side (STO-2).
+  bool read_write = 3;
+}
+
+// Disk is a host file a VM attaches as a block device (STO-1).
+message Disk {
+  // The absolute host file.
+  string source = 1;
+  // A read-write disk is locked with an exclusive flock for the life of the
+  // job process and that VM's VM child. A disk held by another process fails
+  // the job: `disk <source> is in use by another process` (STO-7).
+  //
+  // A read-write disk named twice in one job, in one VM or in two, fails at
+  // Create, so a spec never holds one. One process can't hold two flocks on
+  // one file (two opens in one process block each other), and two VMs
+  // writing one block device corrupt it. Read-only disks are not locked
+  // (STO-8), so a job's VMs may share them.
+  bool read_write = 2;
+}
+
+// Network is the job network's configuration (NET-*). Its DHCP and HTTP API
+// stay off (NET-6), and no address maps to the host's loopback (NET-4).
+// Port forwarding is off today: the only ports the plugin protocol passes
+// are a service's ports, and a job that declares services fails at Create.
+message Network {
+  // The job network's subnet, in CIDR notation.
+  string subnet = 1;
+  // The gateway's address and MAC. The gateway serves DNS only (NET-5).
+  string gateway_address = 2;
+  string gateway_mac = 3;
+  uint32 mtu = 4;
+  // Names the gateway's DNS answers with job network addresses, such as each
+  // VM's own name. Other names are forwarded to the host's resolver. Each
+  // VM's own address is in its VM entry.
+  repeated Host hosts = 5;
+}
+
+// Host is one name on the job network.
+message Host {
+  string name = 1;
+  string address = 2;
+}
+
+// Event is one status event from the job process, in the order they happen.
+message Event {
+  oneof event {
+    NetworkUp network_up = 1;
+    VMStarted vm_started = 2;
+    VMExited vm_exited = 3;
+    Failed failed = 4;
+  }
+}
+
+// NetworkUp: the job network is serving every VM's socket.
+message NetworkUp {}
+
+// VMStarted: one VM's VM child is running.
+message VMStarted {
+  // The VM's index in Spec.vms; 0 is the job's container.
+  uint32 vm = 1;
+  // The VM child's process id, for log lines.
+  int32 pid = 2;
+}
+
+// VMExited: one VM's VM child has exited.
+//
+// When the job's container (index 0) exits, the job ends: the job process
+// kills the other VM children, reports each one's VMExited once it is reaped,
+// and exits. What a service VM exiting does to the job is decided with
+// services.
+message VMExited {
+  // The VM's index in Spec.vms; 0 is the job's container.
+  uint32 vm = 1;
+  // The VM child's exit code.
+  int32 exit_code = 2;
+  // The end of the VM's console file, for the error that names why the VM
+  // stopped (VM-8, PROTO-10).
+  string console_tail = 3;
+  // The end of the VM's log file.
+  string log_tail = 4;
+}
+
+// Failed: the job process could not set up the job and is exiting.
+message Failed {
+  // Why, naming the cause: the network, a scratch disk, a disk, or a VM
+  // child, and the VM it belongs to by name (PROTO-10).
+  string reason = 1;
+}
