@@ -2,3 +2,6 @@
 /bin/
 /.direnv/
 /result
+# The payload `just payload` builds for embedding; never committed.
+/internal/payload/runner-microvm-job
+/internal/payload/runner-microvm-agent

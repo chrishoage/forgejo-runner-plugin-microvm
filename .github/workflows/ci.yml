@@ -111,8 +111,8 @@ jobs:
           fi
           nix develop -c just lint-commits "$range"
 
-  # A GitHub x86 runner can use /dev/kvm, and the dev shell's libkrun and
-  # libkrunfw meet the minimums. Boots no VM: that is plugin behaviour.
+  # A GitHub x86 runner can use /dev/kvm, the dev shell's libkrun and
+  # libkrunfw meet the minimums, and the tests that boot VMs pass.
   kvm:
     runs-on: ubuntu-24.04
     permissions:
@@ -136,3 +136,5 @@ jobs:
       - run: nix develop -c just check-libs
       # Asserts the library minimums and builds the dev shell.
       - run: nix flake check
+      # Every test, with the `kvm` tag and the payload embedded.
+      - run: nix develop -c just test-kvm
