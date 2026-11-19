@@ -17,6 +17,10 @@ The project's rules for commits, pull requests, source files, lint, dependencies
   - A breaking change is marked with `!` or a `BREAKING CHANGE:` footer.
   - Merge commits fail, because they can't land on `main` under rebase merging.
 
+## Showing a check going red
+
+- **Never open a throwaway pull request.** To show a check failing, push the breaking commit to the PR you intend to merge, record the red run's link, then force-push the PR back to its good state. Throwaway PRs and branches are clutter for the maintainer.
+
 ## PR template
 
 `.github/pull_request_template.md` has three sections:

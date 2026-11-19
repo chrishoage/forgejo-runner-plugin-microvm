@@ -5,6 +5,7 @@
 - Run everything through the dev shell and `just` (`nix develop -c just <recipe>`). `just check` must pass before a PR.
 - Every commit is a Conventional Commit, and lands on `main` as written (rebase merge).
 - No `nolint` without a reason on that line.
+- Never open throwaway pull requests. To show a check going red, push the breaking commit to the PR you intend to merge, record the run, then force-push it away.
 
 ## Docs
 
