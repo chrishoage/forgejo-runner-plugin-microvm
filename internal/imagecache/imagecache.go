@@ -20,6 +20,13 @@ type Request struct {
 	Ref string
 	// ForcePull looks a cached tag up again (IMG-6).
 	ForcePull bool
+	// Root is the VM's root directory, which Acquire creates and fills with
+	// the image's flattened filesystem.
+	//
+	// SHORTCUT(#5): the image is flattened into a read-write root directory
+	// per VM, under the job's state directory, instead of the layer link
+	// directory.
+	Root string
 }
 
 // Image is an image as the image cache hands it to one VM of a job.
@@ -30,6 +37,7 @@ type Image struct {
 	// order.
 	Env []string
 	// LinkDir is the VM's layer link directory, <cache>/jobs/<id>/<n>/:
-	// hard links to exactly the layers of the VM's image.
+	// hard links to exactly the layers of the VM's image. Empty until #5:
+	// the image is in Request.Root instead.
 	LinkDir string
 }
