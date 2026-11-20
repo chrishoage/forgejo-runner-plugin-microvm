@@ -46,6 +46,17 @@ nix develop -c just build     # runs payload, then bin/runner-microvm with -tags
 - **`just lint` builds the payload, then lints twice:** once as `go test` builds (cgo on, no tags), and once as the binaries ship (`CGO_ENABLED=0`, `-tags payload`). One pass leaves the other's files unlinted: `embedded.go` hid an unused variable that way. A second pass costs about a second, and the payload build is cached after `just build`; golangci-lint's `build-tags` setting would replace one view instead of adding the other.
 - **The built payload is ignored by git and never committed.**
 
+## Running the plugin
+
+```sh
+nix develop -c just build
+RUNNER_MICROVM_DIR=/tmp/rm bin/runner-microvm   # listens on /tmp/rm/runtime/runner-microvm.sock
+```
+
+- **`RUNNER_MICROVM_DIR=<base>` puts the state, cache and runtime directories under `<base>` (`<base>/state`, `<base>/cache`, `<base>/runtime`), with the listen socket in the runtime directory (`<base>/runtime/runner-microvm.sock`).** Without it, the built-in paths of #1 apply. An ordinary user can't write the built-in paths, and the tests need temporary directories; one variable is the least to throw away when the config file arrives. It is marked `SHORTCUT(#8)`: #8 replaces it with the config file's keys.
+- **The plugin takes no arguments yet, and SIGINT or SIGTERM stops it at once.**
+- **The plugin addresses its unix sockets through an open directory, as `/proc/self/fd/<fd>/<name>`.** bind and connect take at most 107 bytes of path, which a checkout's `.e2e/plugin/runtime/` can outgrow on its own.
+
 ## Tests
 
 ```sh
