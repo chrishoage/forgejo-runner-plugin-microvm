@@ -6,14 +6,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
 
 // Name is the plugin's name in Capabilities.
@@ -29,11 +34,31 @@ const (
 	platformArch  = "X64"
 )
 
+// Config is what the server needs from startup.
+type Config struct {
+	Dirs Dirs
+	// LibDir holds libkrun and libkrunfw; empty loads them by soname.
+	LibDir string
+	// JobBinary is the extracted job binary's path.
+	JobBinary string
+	// Agent is the agent binary, written into each VM's root.
+	Agent []byte
+	// Cache and Launcher are the plugin's two seams.
+	Cache    ImageCache
+	Launcher JobLauncher
+	// ReadyTimeout is how long Start waits for the agent to answer Ping.
+	ReadyTimeout time.Duration
+}
+
 // Server is the runner's BackendPlugin service and the job table.
 type Server struct {
 	pluginv1alpha.UnimplementedBackendPluginServer
 
 	log *slog.Logger
+	cfg Config
+	// runtime addresses the agent sockets under the runtime directory.
+	runtime   *sockDir
+	closeOnce sync.Once
 
 	mu   sync.Mutex
 	jobs map[string]*job
@@ -52,17 +77,48 @@ type job struct {
 	// mu is held by every call on the job for its whole length, so Remove
 	// waits until a cancelled call has unwound before it tears the job down.
 	// A call that holds it releases it promptly once ctx is cancelled, also
-	// while it is blocked on the runner's stream, so Remove never waits
-	// long.
+	// while it is blocked on the runner's stream (await), so Remove never
+	// waits long. Everything below is guarded by it.
 	mu sync.Mutex
-	// removed is set, under mu, by Remove: a call that found the job just
-	// before Remove took it out of the table sees it and fails with NotFound.
+	// removed is set by Remove: a call that found the job just before
+	// Remove took it out of the table sees it and fails with NotFound.
 	removed bool
+	// started is set when Start begins, and startErr when it failed: a
+	// job is started once only, and never again after a failed Start.
+	started  bool
+	startErr error
+	// proc is the job process, from Start's launch until teardown.
+	proc *joblaunch.Process
+	// agent is the job's container's agent, once it answered Ping.
+	agent *agentclient.Client
 }
 
-// NewServer returns a server with an empty job table.
-func NewServer(log *slog.Logger) *Server {
-	return &Server{log: log, jobs: map[string]*job{}}
+// NewServer returns a server with an empty job table. cfg.Dirs.Runtime must
+// exist. Close releases it.
+func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
+	rt, err := openSockDir(cfg.Dirs.Runtime)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ReadyTimeout == 0 {
+		cfg.ReadyTimeout = agentclient.ReadyTimeout
+	}
+	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}}, nil
+}
+
+// Close tears down every job still in the table, and releases the server.
+// A second Close does nothing more.
+func (s *Server) Close(ctx context.Context) error {
+	s.mu.Lock()
+	jobs := s.jobs
+	s.jobs = map[string]*job{}
+	s.mu.Unlock()
+	var errs []error
+	for _, j := range jobs {
+		errs = append(errs, s.remove(ctx, j))
+	}
+	s.closeOnce.Do(func() { errs = append(errs, s.runtime.Close()) })
+	return errors.Join(errs...)
 }
 
 // Capabilities names the plugin.
@@ -150,9 +206,49 @@ func notFound(id string) error {
 	return status.Errorf(codes.NotFound, "no environment %q", id)
 }
 
+// lock returns the job id names, locked, or NotFound. The caller unlocks it.
+func (s *Server) lock(id string) (*job, error) {
+	s.mu.Lock()
+	j, ok := s.jobs[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil, notFound(id)
+	}
+	j.mu.Lock()
+	if j.removed {
+		j.mu.Unlock()
+		return nil, notFound(id)
+	}
+	return j, nil
+}
+
+// callContext returns ctx, also cancelled when Remove starts on j.
+func callContext(ctx context.Context, j *job) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(j.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// await runs op, a call on the runner's stream, and returns its error, or
+// ctx's status as soon as ctx ends while op still blocks. A call holding the
+// job then releases it at once when Remove cancels it, even while the runner
+// neither reads nor writes. The call must return at once after a ctx error:
+// op is still running then, and ends when gRPC cancels the stream, as the
+// handler returns.
+func await(ctx context.Context, op func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- op() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	}
+}
+
 // Remove takes the job out of the table and tears it down. It cancels any
 // call still unwinding on the job first, and waits for it (PROTO-13).
-func (s *Server) Remove(_ context.Context, req *pluginv1alpha.RemoveRequest) (*pluginv1alpha.RemoveResponse, error) {
+func (s *Server) Remove(ctx context.Context, req *pluginv1alpha.RemoveRequest) (*pluginv1alpha.RemoveResponse, error) {
 	id := req.GetEnvironmentId()
 	s.mu.Lock()
 	j, ok := s.jobs[id]
@@ -161,10 +257,46 @@ func (s *Server) Remove(_ context.Context, req *pluginv1alpha.RemoveRequest) (*p
 	if !ok {
 		return nil, notFound(id)
 	}
+	if err := s.remove(ctx, j); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove %s: %v", id, err)
+	}
+	return &pluginv1alpha.RemoveResponse{}, nil
+}
+
+// remove tears down j, which is out of the table: it ends the job process,
+// which ends the VM, and deletes the job's files.
+func (s *Server) remove(ctx context.Context, j *job) error {
 	j.cancel()
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.removed = true
-	s.log.Info("removed", "job", id)
-	return &pluginv1alpha.RemoveResponse{}, nil
+	// The kill can't be left half done: it returns once the group is
+	// reaped, moments after SIGKILL.
+	err := s.stop(context.WithoutCancel(ctx), j)
+	err = errors.Join(err,
+		s.cfg.Cache.Release(context.WithoutCancel(ctx), j.id),
+		removeTree(s.jobStateDir(j.id)),
+		removeTree(filepath.Join(s.cfg.Dirs.Runtime, j.id)),
+	)
+	s.log.Info("removed", "job", j.id, "err", err)
+	return err
+}
+
+// stop closes j's agent connection and kills its job process, if any, and
+// waits until its process group is reaped. j.mu is held.
+func (s *Server) stop(ctx context.Context, j *job) error {
+	var err error
+	if j.agent != nil {
+		err = j.agent.Close()
+		j.agent = nil
+	}
+	if j.proc != nil {
+		err = errors.Join(err, s.cfg.Launcher.Kill(ctx, j.proc))
+		j.proc = nil
+	}
+	return err
+}
+
+func (s *Server) jobStateDir(id string) string {
+	return filepath.Join(s.cfg.Dirs.State, "jobs", id)
 }

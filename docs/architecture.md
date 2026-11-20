@@ -111,11 +111,12 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 ### A failed Start
 
 - **A failed Start kills the job process's group at once and waits until it is reaped.** That drops its VMs, job network and disk locks without waiting for the runner's Remove.
+- **A job whose Start failed is never started again.** A second Start fails with `FailedPrecondition`, naming the first failure: the failed Start left the VM's files half made, and the runner removes such a job rather than starting it again.
 - **Remove then only deletes files and frees queue places,** and does nothing harmful when the job process is already gone. A job's disks are still freed exactly once (QUE-7), and only after its group is gone.
 
 ## libkrun
 
-- **libkrun is bound with purego, not cgo, and only the VM child loads it.** With cgo, libkrun is linked when the binary loads, so `RUNNER_MICROVM_LIBDIR` (VM-10) would need `LD_LIBRARY_PATH` and a missing library couldn't give a clean error. purego `dlopen`s from the named directory, and the libkrun 1.x calls take only ints and strings. See [ADR 0004](adr/0004-libkrun-via-purego.md).
+- **libkrun is bound with purego, not cgo, and only the VM child loads it.** With cgo, libkrun is linked when the binary loads, so `RUNNER_MICROVM_LIBDIR` (VM-10) would need `LD_LIBRARY_PATH` and a missing library couldn't give a clean error. purego `dlopen`s from the named directory, and the libkrun 1.x calls take only ints and strings. See [ADR 0004](adr/0004-libkrun-via-purego.md). The plugin makes a relative `RUNNER_MICROVM_LIBDIR` absolute at startup, because the VM child changes its working directory before it loads libkrun.
 - **Every binary builds with `CGO_ENABLED=0`.**
 
 ## Job network
@@ -148,6 +149,7 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 | `<state>/bin/` | the job binary |
 | `<state>/jobs/<id>/` | the job process log |
 | `<state>/jobs/<id>/<n>/` | the VM's scratch disk, VM log and console |
+| `<state>/jobs/<id>/<n>/root/` | today, the VM's root: its image flattened into a read-write directory, with the agent written into it, until #5's layer link directory replaces it |
 | `<state>/logs/<id>/` | kept logs (whether to keep them is #11's) |
 | `<runtime>/<id>/<n>/` | the VM's agent socket |
 | `<listen>/` | the listen socket |

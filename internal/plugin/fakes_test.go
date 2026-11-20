@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package plugin
+
+import (
+	"context"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+
+	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
+)
+
+// newTestServer returns a server on temporary directories with the given
+// fakes for its seams. It is closed when the test ends. The directories are
+// deep enough that every agent socket's path outgrows bind and connect's 107
+// bytes, whatever the host's temporary directory is.
+func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Server {
+	t.Helper()
+	base := filepath.Join(t.TempDir(), strings.Repeat("d", 60), strings.Repeat("e", 60))
+	dirs, err := DirsFromEnv(func(string) string { return base })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirs.Runtime, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(discardLog(), Config{
+		Dirs:         dirs,
+		JobBinary:    "/fake/runner-microvm-job",
+		Agent:        []byte("agent binary"),
+		Cache:        cache,
+		Launcher:     launcher,
+		ReadyTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := srv.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return srv
+}
+
+// fakeCache stands in for the image cache.
+type fakeCache struct {
+	// err fails Acquire.
+	err error
+	// block makes Acquire wait for its context, after closing entered.
+	block   bool
+	entered chan struct{}
+	// agentSymlink puts a symlink at the agent's path in the root.
+	agentSymlink string
+
+	mu       sync.Mutex
+	acquired []imagecache.Request
+	released []string
+}
+
+func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagecache.Image, error) {
+	c.mu.Lock()
+	c.acquired = append(c.acquired, req)
+	c.mu.Unlock()
+	if c.block {
+		close(c.entered)
+		<-ctx.Done()
+		return imagecache.Image{}, ctx.Err()
+	}
+	if c.err != nil {
+		return imagecache.Image{}, c.err
+	}
+	if err := os.MkdirAll(filepath.Join(req.Root, "bin"), 0o755); err != nil {
+		return imagecache.Image{}, err
+	}
+	if c.agentSymlink != "" {
+		if err := os.Symlink(c.agentSymlink, filepath.Join(req.Root, agentPath)); err != nil {
+			return imagecache.Image{}, err
+		}
+	}
+	return imagecache.Image{Digest: "sha256:0", Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}}, nil
+}
+
+func (c *fakeCache) Release(_ context.Context, job string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.released = append(c.released, job)
+	return nil
+}
+
+// How the fake job process behaves once launched.
+type behaviour int
+
+const (
+	// The VM boots and its agent answers.
+	boots behaviour = iota
+	// The VM exits during boot, with a console tail.
+	exitsDuringBoot
+	// The VM never answers.
+	hangs
+)
+
+// fakeLauncher stands in for the job launcher. Its job processes are a fake
+// agent served on the spec's agent socket.
+type fakeLauncher struct {
+	err   error
+	does  behaviour
+	agent agentv1.AgentServiceServer
+
+	mu      sync.Mutex
+	specs   []*jobv1.Spec
+	logs    []string
+	running map[*joblaunch.Process]*fakeProcess
+	kills   int
+}
+
+type fakeProcess struct {
+	exited chan struct{}
+	once   sync.Once
+	gs     *grpc.Server
+	served chan struct{}
+	// dir is the agent socket's directory, which the fake binds through.
+	dir *sockDir
+}
+
+func (p *fakeProcess) end() {
+	p.once.Do(func() {
+		if p.gs != nil {
+			p.gs.Stop()
+			<-p.served
+		}
+		// The listener unlinks its socket through the directory, so the
+		// directory closes after it.
+		if p.dir != nil {
+			_ = p.dir.Close()
+		}
+		close(p.exited)
+	})
+}
+
+func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath string) (*joblaunch.Process, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.specs = append(l.specs, spec)
+	l.logs = append(l.logs, logPath)
+	if l.err != nil {
+		return nil, l.err
+	}
+	events := make(chan *jobv1.Event, 4)
+	fp := &fakeProcess{exited: make(chan struct{})}
+	p := &joblaunch.Process{Events: events, Exited: fp.exited}
+	switch l.does {
+	case boots:
+		// Like the VM child, it binds the agent socket relative to its
+		// directory, as the full path can outgrow bind's 107 bytes.
+		sock := spec.GetVms()[0].GetAgentSocket()
+		dir, err := openSockDir(filepath.Dir(sock))
+		if err != nil {
+			return nil, err
+		}
+		lis, err := new(net.ListenConfig).Listen(ctx, "unix", dir.path(filepath.Base(sock)))
+		if err != nil {
+			_ = dir.Close()
+			return nil, err
+		}
+		fp.dir = dir
+		agent := l.agent
+		if agent == nil {
+			agent = &fakeAgent{}
+		}
+		fp.gs = grpc.NewServer()
+		agentv1.RegisterAgentServiceServer(fp.gs, agent)
+		fp.served = make(chan struct{})
+		go func() { defer close(fp.served); _ = fp.gs.Serve(lis) }()
+		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
+	case exitsDuringBoot:
+		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
+		events <- &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
+			ExitCode: 1, ConsoleTail: "Kernel panic - not syncing",
+		}}}
+	case hangs:
+	}
+	if l.running == nil {
+		l.running = map[*joblaunch.Process]*fakeProcess{}
+	}
+	l.running[p] = fp
+	return p, nil
+}
+
+func (l *fakeLauncher) Kill(_ context.Context, p *joblaunch.Process) error {
+	l.mu.Lock()
+	fp, ok := l.running[p]
+	delete(l.running, p)
+	l.kills++
+	l.mu.Unlock()
+	if !ok {
+		return errors.New("Kill of a process the launcher never started, or twice")
+	}
+	fp.end()
+	return nil
+}
+
+// alive returns how many job processes are not killed.
+func (l *fakeLauncher) alive() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.running)
+}
+
+// fakeAgent is the agent inside a fake VM.
+type fakeAgent struct {
+	agentv1.UnimplementedAgentServiceServer
+}
+
+func (*fakeAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
+	return &agentv1.PingResponse{}, nil
+}

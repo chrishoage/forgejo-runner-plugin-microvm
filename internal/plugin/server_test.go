@@ -69,7 +69,7 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 
 func TestHealthServing(t *testing.T) {
 	t.Parallel()
-	conn := serve(t, NewServer(discardLog()))
+	conn := serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{}))
 	resp, err := healthv1.NewHealthClient(conn).Check(testContext(t), &healthv1.HealthCheckRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestHealthServing(t *testing.T) {
 
 func TestCapabilities(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, NewServer(discardLog())))
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
 	resp, err := c.Capabilities(testContext(t), &pluginv1alpha.CapabilitiesRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestCapabilities(t *testing.T) {
 
 func TestCreateReturnsPathsAndPlatform(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, NewServer(discardLog())))
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
 	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{Name: "echo", LabelArg: testImage})
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestCreateReturnsPathsAndPlatform(t *testing.T) {
 
 func TestCreateRefuses(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, NewServer(discardLog())))
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
 	for name, req := range map[string]*pluginv1alpha.CreateRequest{
 		"no image":        {},
 		"container image": {Image: testImage, LabelArg: testImage},
@@ -134,7 +134,7 @@ func TestCreateRefuses(t *testing.T) {
 
 func TestCreateGivesEachJobItsOwnID(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, NewServer(discardLog())))
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
 	seen := map[string]bool{}
 	for range 20 {
 		resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage})
@@ -150,7 +150,7 @@ func TestCreateGivesEachJobItsOwnID(t *testing.T) {
 
 func TestRemove(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, NewServer(discardLog())))
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
 	ctx := testContext(t)
 	_, err := c.Remove(ctx, &pluginv1alpha.RemoveRequest{EnvironmentId: "job-00000000"})
 	wantCode(t, err, codes.NotFound)
@@ -240,10 +240,11 @@ func TestServeStopsWithAStreamOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan error, 1)
-	go func() { served <- Serve(ctx, lis, NewServer(discardLog())) }()
+	go func() { served <- Serve(ctx, lis, srv) }()
 	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)

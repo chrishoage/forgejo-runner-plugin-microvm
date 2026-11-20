@@ -14,11 +14,6 @@ var (
 	agent []byte
 )
 
-// SHORTCUT(#4): nothing calls JobBinary or Agent until the plugin writes them
-// out at startup, and the linker drops unreferenced data. This variable keeps
-// both in the binary meanwhile.
-var linked = [][]byte{jobBinary, agent} //nolint:unused // read by nothing until #4; it only keeps the payload linked
-
 // JobBinary returns the embedded job binary.
 func JobBinary() ([]byte, error) { return jobBinary, nil }
 
