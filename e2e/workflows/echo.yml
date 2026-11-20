@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The simplest real workflow: one job, one step. `just e2e run` pushes it to
+# the harness, and the slice's protocol test reads this same file.
+name: echo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  echo:
+    runs-on: microvm
+    steps:
+      - run: echo "hello from runner-microvm e2e"

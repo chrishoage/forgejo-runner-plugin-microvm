@@ -5,3 +5,5 @@
 # The payload `just payload` builds for embedding; never committed.
 /internal/payload/runner-microvm-job
 /internal/payload/runner-microvm-agent
+# The local harness's state (docs/development.md), deleted by `just e2e down`.
+/.e2e/

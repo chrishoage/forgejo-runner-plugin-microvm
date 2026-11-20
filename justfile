@@ -142,3 +142,7 @@ check-libs:
 
 # Everything a PR must pass.
 check: build lint check-generated test licenses vuln lint-commits
+
+# The local harness: `just e2e up`, `just e2e run`, `just e2e down`
+# (docs/development.md, The local harness).
+mod e2e
