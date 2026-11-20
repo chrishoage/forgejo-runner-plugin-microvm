@@ -26,7 +26,8 @@
   automergeStrategy: 'rebase',
 
   // Go modules: go mod tidy after every update, import paths rewritten on
-  // major bumps (the runner's plugin protocol path carries its major).
+  // major bumps (the runner's import path, in the protocol test, carries
+  // its major).
   postUpdateOptions: ['gomodTidy', 'gomodUpdateImportPaths'],
 
   // Flake inputs: weekly flake.lock maintenance, a PR of its own. Go patch

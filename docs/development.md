@@ -59,7 +59,7 @@ nix develop -c just test-kvm   # go test -race -tags kvm,payload ./..., after ju
 
 ## Protocols and codegen
 
-The three protocols are `.proto` files under `proto/`; `docs/architecture.md` (Protocols) says what each carries.
+The three protocols are `.proto` files under `proto/`, beside a copy of forgejo-runner's plugin protocol; `docs/architecture.md` (Protocols) says what each carries.
 
 ```sh
 nix develop -c just generate          # regenerate the Go code from proto/
@@ -69,6 +69,7 @@ nix develop -c just lint              # payload, golangci-lint twice, then buf l
 
 - **`buf` with local plugins (`protoc-gen-go`, `protoc-gen-go-grpc`) from the dev shell, and no Buf Schema Registry.** One tool generates and lints, with no account or network. `buf.yaml` names the module (`proto/`) and the lint rules; `buf.gen.yaml` the plugins and output.
 - **`buf lint` runs at its STANDARD rules, in `just lint`.** Each `.proto` file's directory mirrors its package, which has a version suffix (`runnermicrovm/agent/v1`).
+- **forgejo-runner's plugin protocol is vendored as `proto/plugin/v1alpha/plugin.proto`, byte for byte as the runner ships it, and generated under `internal/gen/plugin/v1alpha/` like ours.** The runner's module is a test-only dependency, absent from every shipped binary (`cmd/deps_test.go`), so the plugin can't import the runner's own generated package; the file is MIT-licensed precisely so plugins can embed it. `buf lint` skips it, because its names are the runner's.
 - **Go import paths come from buf's managed mode, so the `.proto` files carry no `go_package`.** The agent and job protocols are generated under `internal/gen/`; the VM child spec under `internal/job/internal/gen/`, so only the job binary can import it.
 - **Generated code is committed,** so `go build` and `go install` need no codegen.
 - **`just generate` deletes the generated directories and regenerates them,** so a removed `.proto` file leaves nothing behind.
