@@ -29,6 +29,8 @@ const (
 	gvisorTapVsock = "github.com/containers/gvisor-tap-vsock"
 	grpc           = "google.golang.org/grpc"
 	protobuf       = "google.golang.org/protobuf"
+	// forgejo-runner's module: only the protocol test may use it.
+	forgejoRunner = "code.forgejo.org/forgejo/runner"
 )
 
 // The binaries as they ship (`just payload`, `just build`): every one with
@@ -63,12 +65,13 @@ func shippedEnv() []string {
 }
 
 // The plugin binary never loads libkrun, runs a job network, or contains job
-// process or agent code.
+// process or agent code. No binary contains forgejo-runner's module: the
+// protocol test alone uses it.
 func TestPluginDependencies(t *testing.T) {
 	t.Parallel()
 	deps := listDeps(t, module+"/cmd/runner-microvm", pluginBuild)
 	for _, p := range forbidden(deps, []string{
-		purego, gvisor, gvisorTapVsock, module + "/internal/job", module + "/internal/agent",
+		purego, gvisor, gvisorTapVsock, module + "/internal/job", module + "/internal/agent", forgejoRunner,
 	}) {
 		t.Errorf("the plugin binary depends on %s", p)
 	}
@@ -81,6 +84,9 @@ func TestJobDependencies(t *testing.T) {
 	deps := listDeps(t, module+"/cmd/runner-microvm-job", jobBuild)
 	for _, m := range missing(deps, []string{purego, gvisorTapVsock}) {
 		t.Errorf("the job binary does not depend on %s", m)
+	}
+	for _, p := range forbidden(deps, []string{forgejoRunner}) {
+		t.Errorf("the job binary depends on %s", p)
 	}
 }
 

@@ -247,8 +247,8 @@ Third-party libraries are free to use except where the boundary test below forbi
 
 - **The compiler enforces the nesting under `internal/job/internal/`.**
 - **A Go test (`cmd/deps_test.go`) runs `go list -deps` on each binary and asserts:**
-  - the plugin binary's dependencies exclude purego, gvisor, gvisor-tap-vsock, `internal/job` and `internal/agent`;
-  - the job binary's dependencies *include* purego and gvisor-tap-vsock, so a renamed import path can't make the check pass silently;
+  - the plugin binary's dependencies exclude purego, gvisor, gvisor-tap-vsock, `internal/job`, `internal/agent` and forgejo-runner's module;
+  - the job binary's dependencies *include* purego and gvisor-tap-vsock, so a renamed import path can't make the check pass silently, and exclude forgejo-runner's module;
   - the agent binary's dependencies are only from an allow-list: the standard library, grpc and protobuf and the modules they bring in, `internal/agent`, `internal/logging`, `internal/secret` and the agent protocol's generated package.
 - **It checks each binary's graph as it ships** (`CGO_ENABLED=0`, and `-tags payload` for the plugin), not as the test process is built, because a file behind a build constraint is in only one of the two.
 - **It runs under plain `go test ./...`.** It checks transitive dependencies, which is the property that matters. depguard checks only direct imports, so it isn't used.
@@ -276,5 +276,12 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
   - the agent's Exec and Copy are tested on the host in temporary directories;
   - the job network is tested in-process, with a test peer on the frame socket;
   - the plugin is tested with fakes for its two seams.
-- **Tests that boot VMs carry `//go:build kvm`, and `just test-kvm` runs them** with `-tags kvm,payload`, in the `kvm` CI job. That covers the VM child, the job process, the agent's boot mounts, and #4's protocol tests.
+- **Tests that boot VMs carry `//go:build kvm`, and `just test-kvm` runs them** with `-tags kvm,payload`, in the `kvm` CI job. That covers the VM child, the job process, the agent's boot mounts, and the protocol test.
+- **The protocol test (`cmd/protocol_test.go`) runs `e2e/workflows/echo.yml` through forgejo-runner's own job executor (`act/runner`), with no Forgejo and no runner daemon.** `act/runner` is the code inside forgejo-runner that calls plugins, through `act/plugin`, so the plugin sees exactly the runner's calls at the pinned version, and a runner bump re-runs the real sequence with nothing recorded to redo.
+  - Its config maps the workflow's `microvm` label to `runner-microvm://<the image in e2e/image>`, and the `runner-microvm` plugin to the listen socket of the plugin under test.
+  - Its work directory is a fresh, empty git repository, so `act/runner`'s git lookups don't fail noisily.
+  - It passes when the executor returns no error and the job's log holds the step's output.
+  - It lives beside the mains, in `cmd/`, because it tests the built binary: it builds `runner-microvm` with `-tags payload`, runs it by path with `RUNNER_MICROVM_DIR` set to a temporary directory and a timeout, and stops it with SIGTERM on cleanup. A plugin still running 30 seconds later, or at the timeout, is killed the hard way: first each of its children's process groups, because each job process leads a group of its own, which killing the plugin's group would miss, then the plugin's group. The children are found in `/proc/<pid>/task/*/children` while the plugin still runs, before it is killed and they are reparented.
+- **forgejo-runner's module (`code.forgejo.org/forgejo/runner/v13`) is a test-only dependency.** It brings in about 65 indirect modules, the docker client among them, but none reach a shipped binary, `go-licenses` or `govulncheck`: `cmd/deps_test.go` fails if any binary depends on it. Its GPL-3.0-or-later license matches the project's.
+- **`cmd/plugin_proto_test.go` checks that the vendored plugin protocol is byte for byte the runner module's copy,** under plain `go test`, so a runner update that changes the protocol fails CI.
 - **No test runs its own binary** (`os.Args[0]`, `os.Executable()`). A test that needs a program builds it and runs it by path, with a timeout, and kills its process group on cleanup.

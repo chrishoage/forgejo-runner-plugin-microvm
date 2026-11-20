@@ -27,11 +27,12 @@ fmt:
     golangci-lint fmt
 
 # Lint, formatting included, and the .proto files. Any finding fails. The
-# second pass lints the shipped build (CGO_ENABLED=0, -tags payload), so
-# files behind those build constraints are linted too.
+# second pass lints the shipped build (CGO_ENABLED=0, -tags payload) and the
+# tests that boot VMs (-tags kvm), so files behind those build constraints
+# are linted too.
 lint: payload
     golangci-lint run
-    CGO_ENABLED=0 golangci-lint run --build-tags payload
+    CGO_ENABLED=0 golangci-lint run --build-tags payload,kvm
     buf lint
 
 # Directories holding only generated code.
