@@ -31,20 +31,45 @@ expect := "hello from runner-microvm e2e"
 online_timeout := "120"
 run_timeout := "300"
 
+# The plugin, built by `up` and run on the host with its directories under
+# .e2e/plugin, its pid and log beside them.
+plugin := justfile_directory() / "bin/runner-microvm"
+plugin_dir := state / "plugin"
+plugin_pid := state / "plugin.pid"
+plugin_log := state / "plugin.log"
+
 # List the harness's recipes.
 [private]
 default:
     @just --list e2e
 
-# Start Forgejo and the runner from fresh state; wait until the runner is online.
+# Build and start the plugin, then Forgejo and the runner, from fresh state; wait until the runner is online.
 up: down
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p '{{ state }}/forgejo' '{{ state }}/runner' '{{ state }}/secrets'
-    # The runner image's user (uid 1000) writes its registration here,
-    # whatever the host's uid or user namespace.
-    chmod 0777 '{{ state }}/runner'
     chmod 0755 '{{ state }}/secrets'
+
+    # The plugin runs on the host, for /dev/kvm and libkrun, in the
+    # background, so an agent needs no second terminal. Its pid and log
+    # are in .e2e/; `down` stops it.
+    just --justfile '{{ justfile_directory() }}/justfile' build
+    RUNNER_MICROVM_DIR='{{ plugin_dir }}' setsid '{{ plugin }}' >'{{ plugin_log }}' 2>&1 </dev/null &
+    echo $! >'{{ plugin_pid }}'
+    sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
+    deadline=$((SECONDS + 30))
+    until [ -S "$sock" ]; do
+        if ! kill -0 "$(cat '{{ plugin_pid }}')" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            echo "the plugin did not start; its log:" >&2
+            cat '{{ plugin_log }}' >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    echo "plugin serving on $sock (pid $(cat '{{ plugin_pid }}'), log .e2e/plugin.log)"
+    # The runner's config, with the label's image from e2e/image.
+    image=$(tr -d '[:space:]' <image)
+    sed "s|@IMAGE@|$image|" runner-config.yaml >'{{ state }}/runner-config.yaml'
     # Throwaway secrets in plain text: they die at `down`.
     hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
     secret=$(hex 20)
@@ -140,11 +165,39 @@ run:
         exit 1
     fi
 
-# Stop this checkout's stack and delete .e2e/.
+# Stop this checkout's stack and plugin, and delete .e2e/.
 down:
     #!/usr/bin/env bash
     set -euo pipefail
     {{ compose }} down --volumes --remove-orphans --timeout 10
+    # SIGTERM: the plugin removes every job, ending its VMs, then exits.
+    if [ -f '{{ plugin_pid }}' ]; then
+        pid=$(cat '{{ plugin_pid }}')
+        if kill -TERM "$pid" 2>/dev/null; then
+            deadline=$((SECONDS + 30))
+            while kill -0 "$pid" 2>/dev/null; do
+                if [ "$SECONDS" -ge "$deadline" ]; then
+                    # Each job process leads a process group of its own,
+                    # which killing the plugin's misses: kill each child's
+                    # group while the plugin still runs, then the plugin's.
+                    echo "the plugin did not stop on SIGTERM; killing it and its job processes" >&2
+                    for child in $(cat /proc/"$pid"/task/*/children 2>/dev/null); do
+                        # The group is /proc's stat field 5, after the
+                        # parenthesised name.
+                        stat=$(cat /proc/"$child"/stat 2>/dev/null) || continue
+                        read -r _ _ pgid _ <<<"${stat##*) }"
+                        if [ -n "$pgid" ] && [ "$pgid" != "$pid" ]; then
+                            kill -KILL -- "-$pgid" 2>/dev/null || true
+                        fi
+                        kill -KILL "$child" 2>/dev/null || true
+                    done
+                    kill -KILL -- "-$pid" 2>/dev/null || true
+                    break
+                fi
+                sleep 0.1
+            done
+        fi
+    fi
     if [ -d '{{ state }}' ]; then
         # Containers write as uids the host user may not own (rootless
         # podman maps them to subordinate uids), so empty the directory
