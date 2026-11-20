@@ -5,6 +5,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
@@ -225,4 +228,58 @@ type fakeAgent struct {
 
 func (*fakeAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
 	return &agentv1.PingResponse{}, nil
+}
+
+// Exec writes its argv and working directory to stdout, its env's A to
+// stderr, and exits 3; a command named start-error can't start.
+func (*fakeAgent) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_ExecServer) error {
+	if req.GetArgv()[0] == "start-error" {
+		return stream.Send(&agentv1.ExecResponse{Event: &agentv1.ExecResponse_StartError{StartError: "no such file"}})
+	}
+	out := strings.Join(req.GetArgv(), " ") + " in " + req.GetWorkingDir()
+	for _, ev := range []*agentv1.ExecResponse{
+		{Event: &agentv1.ExecResponse_Stdout{Stdout: []byte(out)}},
+		{Event: &agentv1.ExecResponse_Stderr{Stderr: []byte(req.GetEnv()["A"])}},
+		{Event: &agentv1.ExecResponse_ExitCode{ExitCode: 3}},
+	} {
+		if err := stream.Send(ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CopyIn answers with its destination and data as an error, so the test
+// can see them.
+func (*fakeAgent) CopyIn(stream agentv1.AgentService_CopyInServer) error {
+	var dest string
+	var data []byte
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if req.GetDestination() != "" {
+			dest = req.GetDestination()
+		}
+		data = append(data, req.GetChunk()...)
+	}
+	if string(data) == "ok" {
+		return stream.SendAndClose(&agentv1.CopyInResponse{})
+	}
+	return status.Errorf(codes.InvalidArgument, "%s:%s", dest, data)
+}
+
+// CopyOut sends the path back in two chunks.
+func (*fakeAgent) CopyOut(req *agentv1.CopyOutRequest, stream agentv1.AgentService_CopyOutServer) error {
+	p := []byte(req.GetPath())
+	for _, chunk := range [][]byte{p[:1], p[1:]} {
+		if err := stream.Send(&agentv1.CopyOutResponse{Chunk: chunk}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

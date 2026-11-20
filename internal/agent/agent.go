@@ -62,6 +62,9 @@ func Serve(lis net.Listener, log *slog.Logger) error {
 type server struct {
 	agentv1.UnimplementedAgentServiceServer
 	log *slog.Logger
+	// execExited, when set, is called once Exec has told its output that
+	// the command exited: a test's view of it. Nil outside tests.
+	execExited func()
 }
 
 // Ping answers: the agent is ready.
