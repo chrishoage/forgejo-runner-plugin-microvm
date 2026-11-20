@@ -63,7 +63,7 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 - **libkrun runs in a VM child the job process starts, one for each VM, not in the job process itself.** `krun_start_enter` never returns, and libkrun ends the whole process when the guest stops. In a child, libkrun's Rust threads never share an address space with the Go code that owns the job network and the disk locks. The job process also outlives its VMs, so it can report why each one stopped. See [ADR 0002](adr/0002-job-process-with-vm-child.md).
 - **The VM child is the job binary run with a `vm` subcommand.** The plugin passes the job binary's own path in the job spec, so nothing ever execs `os.Executable()`, and a test binary can't recurse.
 - **Each VM child's inputs:**
-  - stdin: its VM child spec, one length-delimited protobuf message;
+  - stdin: its VM child spec, one length-delimited protobuf message, in a memory file (`memfd`), not a pipe, so no goroutine of the job process copies it in and a VM child that never reads it, or a process it left holding stdin, can't keep the job process waiting;
   - fd 3: the liveness pipe;
   - fd 4: its VM's end of the job network socket;
   - fd 5 and up: each of its VM's read-write disks' locked file, so the lock lasts as long as any process that can write the disk;

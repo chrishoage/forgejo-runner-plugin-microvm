@@ -8,7 +8,7 @@
 package jobnet
 
 import (
-	// SHORTCUT(#4): a blank import keeps gvisor-tap-vsock in the job binary
+	// SHORTCUT(#7): a blank import keeps gvisor-tap-vsock in the job binary
 	// for the dependency test until the job network uses it.
 	_ "github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
 )
