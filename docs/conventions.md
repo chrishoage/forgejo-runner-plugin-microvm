@@ -17,6 +17,7 @@ A change is done when:
 
 - **Every commit is a [Conventional Commit](https://www.conventionalcommits.org/).** It gives the release epic (#12) a history it can build a changelog from.
 - **PRs are rebase-merged,** so each logical commit lands on `main` as written. That keeps room for PRs with several meaningful commits.
+- **A PR's commits are its logical changes only; a fix to something the PR already contains is folded into the commit that introduced it,** never added as a new commit. That covers review findings, red CI and follow-ups: `git commit --fixup=<commit>`, then `git rebase --autosquash` locally, then force-push the PR branch. Rebase merge lands every commit on `main` as written, so a follow-up commit would become history.
 - **cocogitto checks the messages** (`cog check`, configured in `cog.toml`). It is a single binary from the flake, with no Node toolchain.
   - `just lint-commits` checks `origin/main..HEAD` and is part of `just check`. `just lint-commits <range>` checks another range.
   - CI's `commits` job checks the PR's own commits (its base to its head), or the commits a push to `main` added.
