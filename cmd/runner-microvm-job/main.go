@@ -6,9 +6,9 @@
 package main
 
 import (
-	// SHORTCUT(#4): main is empty until the job process runs; the blank
-	// import puts the job's tree in this binary for the dependency test.
-	_ "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job"
+	"os"
+
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job"
 )
 
-func main() {}
+func main() { os.Exit(job.Main(os.Args[1:])) }
