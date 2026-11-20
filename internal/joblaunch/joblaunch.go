@@ -7,6 +7,19 @@
 package joblaunch
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"sync"
+	"syscall"
+	"unsafe"
+
+	"google.golang.org/protobuf/encoding/protodelim"
+
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 )
 
@@ -33,4 +46,180 @@ type Process struct {
 	// or not Events has been read. The launcher kills the group when the job
 	// process exits, so a VM child it leaves behind never outlives Exited.
 	Exited <-chan struct{}
+
+	// pid is the job process's, and its process group's, id.
+	pid int
+	// mu orders Kill against the reaper: once exited is set, the job process
+	// may be reaped and its group id reused, so nothing signals the group
+	// again.
+	mu     sync.Mutex
+	exited bool
+}
+
+// maxEvent bounds one status event on the control channel.
+const maxEvent = 1 << 20
+
+// Launcher starts job processes. It is the plugin's JobLauncher.
+type Launcher struct {
+	log *slog.Logger
+}
+
+// New returns a launcher.
+func New(log *slog.Logger) *Launcher { return &Launcher{log: log} }
+
+// SetSubreaper makes the calling process a child subreaper, so a VM child
+// whose job process is gone is reparented to it, and the launcher can reap
+// it before Exited closes. The plugin calls it once, at startup.
+func SetSubreaper() error {
+	const prSetChildSubreaper = 36
+	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prSetChildSubreaper, 1, 0); errno != 0 {
+		return fmt.Errorf("PR_SET_CHILD_SUBREAPER: %w", errno)
+	}
+	return nil
+}
+
+// Launch starts spec's job binary as a job process leading its own process
+// group, with stderr on the job process log at logPath, and writes spec to
+// its control channel. ctx bounds the launch only. On error, every process it
+// started has been killed and reaped.
+//
+// SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the job process
+// outlives a plugin that dies.
+func (l *Launcher) Launch(ctx context.Context, spec *jobv1.Spec, logPath string) (*Process, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: the plugin names the job's log file
+	if err != nil {
+		return nil, fmt.Errorf("job process log: %w", err)
+	}
+	defer func() { _ = logFile.Close() }()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stdinW.Close() }()
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		_ = stdinR.Close()
+		return nil, err
+	}
+	proc, err := os.StartProcess(spec.GetJobBinary(), []string{spec.GetJobBinary()}, &os.ProcAttr{
+		Files: []*os.File{stdinR, stdoutW, logFile},
+		Sys:   &syscall.SysProcAttr{Setpgid: true},
+	})
+	// The child holds its own ends now.
+	_ = stdinR.Close()
+	_ = stdoutW.Close()
+	if err != nil {
+		_ = stdoutR.Close()
+		return nil, fmt.Errorf("start the job process: %w", err)
+	}
+	// The reaper waits by process group, not through proc. Release
+	// clears proc.Pid, so it is read first.
+	pid := proc.Pid
+	_ = proc.Release()
+	if pid <= 1 {
+		return nil, fmt.Errorf("start the job process: pid %d", pid)
+	}
+
+	events := make(chan *jobv1.Event, 2+2*len(spec.GetVms()))
+	exited := make(chan struct{})
+	p := &Process{Events: events, Exited: exited, pid: pid}
+	log := l.log.With("job", spec.GetJob(), "pid", p.pid)
+	go readEvents(stdoutR, events, log)
+	go p.reap(exited)
+
+	_, err = protodelim.MarshalTo(stdinW, spec)
+	if err == nil {
+		err = stdinW.Close()
+	}
+	if err != nil {
+		_ = l.Kill(context.WithoutCancel(ctx), p)
+		return nil, fmt.Errorf("write the job spec: %w", err)
+	}
+	log.Info("job process started")
+	return p, nil
+}
+
+// Kill sends SIGKILL to the job process's group, and returns once every
+// process in it has exited and been reaped, or with ctx's error. A job
+// process that is already gone is not an error.
+func (l *Launcher) Kill(ctx context.Context, p *Process) error {
+	p.mu.Lock()
+	if !p.exited {
+		_ = syscall.Kill(-p.pid, syscall.SIGKILL)
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.Exited:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// readEvents delivers the control channel's events until it ends, then
+// drains it, so the job process never blocks writing to it.
+func readEvents(r *os.File, events chan<- *jobv1.Event, log *slog.Logger) {
+	defer func() { _ = r.Close() }()
+	defer close(events)
+	br := bufio.NewReader(r)
+	for {
+		ev := &jobv1.Event{}
+		err := (protodelim.UnmarshalOptions{MaxSize: maxEvent}).UnmarshalFrom(br, ev)
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			log.Error("control channel", "err", err)
+			_, _ = io.Copy(io.Discard, br)
+			return
+		}
+		select {
+		case events <- ev:
+		default:
+			log.Error("control channel: event beyond the protocol dropped", "event", ev)
+		}
+	}
+}
+
+// reap waits for the job process to exit, without reaping it so its group
+// id can't be reused, kills the rest of its group, then reaps every process
+// in the group, and closes exited.
+func (p *Process) reap(exited chan<- struct{}) {
+	defer close(exited)
+	waitExitNoReap(p.pid)
+	p.mu.Lock()
+	p.exited = true
+	_ = syscall.Kill(-p.pid, syscall.SIGKILL)
+	p.mu.Unlock()
+	for {
+		var ws syscall.WaitStatus
+		_, err := syscall.Wait4(-p.pid, &ws, 0, nil)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			// ECHILD: no process of the group is left.
+			return
+		}
+	}
+}
+
+// waitExitNoReap blocks until pid has exited, leaving it a zombie.
+func waitExitNoReap(pid int) {
+	const (
+		pPID    = 1
+		wExited = 4
+		wNoWait = 0x1000000
+	)
+	var info [128]byte // siginfo_t
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, pPID, uintptr(pid),
+			uintptr(unsafe.Pointer(&info)), wExited|wNoWait, 0, 0) //nolint:gosec // G103: waitid(2) fills the siginfo_t buffer
+		if errno != syscall.EINTR {
+			return
+		}
+	}
 }

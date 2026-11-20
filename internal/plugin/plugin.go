@@ -39,11 +39,11 @@ type ImageCache interface {
 // JobLauncher starts and kills job processes. internal/joblaunch is the real
 // adapter.
 type JobLauncher interface {
-	// Launch starts a job process and writes spec to its control channel. ctx
-	// bounds the launch only: the job process runs until it exits or Kill.
-	// When Launch returns an error, it has killed and reaped every process
-	// it started.
-	Launch(ctx context.Context, spec *jobv1.Spec) (*joblaunch.Process, error)
+	// Launch starts a job process, with its stderr on the job process log at
+	// logPath, and writes spec to its control channel. ctx bounds the launch
+	// only: the job process runs until it exits or Kill. When Launch returns
+	// an error, it has killed and reaped every process it started.
+	Launch(ctx context.Context, spec *jobv1.Spec, logPath string) (*joblaunch.Process, error)
 	// Kill kills the job process's group, which ends its VM children, job
 	// network and disk locks, and returns only once every process in the
 	// group has exited and been reaped; the plugin is a child subreaper, so
