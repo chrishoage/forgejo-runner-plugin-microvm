@@ -92,5 +92,9 @@ _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin pro
 
 ## Process
 
+**Harness**:
+The local compose stack, a real Forgejo and a real forgejo-runner, that runs a workflow end to end on a developer's machine (`just e2e`). Never run in CI.
+_Avoid_: test environment, e2e stack
+
 **Shortcut**:
 A deliberately naive piece of code, marked with the issue that replaces it.
