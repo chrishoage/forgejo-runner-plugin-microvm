@@ -12,10 +12,6 @@ import (
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
-
-	// SHORTCUT(#4): a blank import links the payload into the plugin binary
-	// until the plugin writes out the job binary at startup.
-	_ "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/payload"
 )
 
 // ImageCache is the image cache as the plugin uses it. internal/imagecache is
