@@ -86,11 +86,16 @@
     },
     // The runner's plugin protocol is the plugin's contract with the runner:
     // its updates wait for the maintainer, in a PR of their own, so they
-    // don't hold back the automerging Go group.
+    // don't hold back the automerging Go group. The harness's runner image
+    // (e2e/compose.yaml) is in the same group, so updates to the module and
+    // the image that are pending together arrive in one PR. Grouping can't
+    // make one wait for the other: a release of only one, or a re-pushed
+    // image digest, opens the group's PR with that one alone.
     {
       matchPackageNames: [
         'code.forgejo.org/forgejo/runner',
         'code.forgejo.org/forgejo/runner/**',
+        'data.forgejo.org/forgejo/runner',
       ],
       groupName: 'forgejo runner',
       automerge: false,

@@ -102,7 +102,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **The jobs are `lint`, `generate`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
 - **Every Action is pinned to a commit digest, with its version as a comment.** Renovate keeps the digests current.
 - **The `kvm` job also runs `just test-kvm`,** the only tier that boots VMs (see `docs/development.md`, KVM in CI).
-- **CI never runs Forgejo.** End-to-end runs use a local harness (#4).
+- **CI never runs Forgejo.** End-to-end runs use the local harness (`docs/development.md`, The local harness).
 
 ## Renovate
 
@@ -117,18 +117,20 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **Not the `go` directive in `go.mod`:** a Go minor bump is a deliberate change of `go.mod` and the flake together, and patch releases arrive through `flake.lock` (see `docs/development.md`).
 - **GitHub Actions, pinned to commit digests with the version as a comment** (`helpers:pinGitHubActionDigests`). A digest can't be moved under us the way a tag can.
 - **Flake inputs, through weekly `flake.lock` maintenance only,** never as a PR per input. This is how Go patch releases and tool updates arrive. The `nix` manager is off by default in Renovate, so the config enables it.
+- **The harness's images in `e2e/compose.yaml`, Forgejo and forgejo-runner, pinned by tag and digest.** `config:recommended` enables the `docker-compose` manager, which updates the tag and the digest together.
 - **Not the libkrun and libkrunfw overlays:** a version bump also needs a hash change Renovate can't make (#15). No Renovate manager reads `nix/libkrun-overlay.nix` or `nix/lib-minimums.json`, and the config adds no custom manager that would.
 
 ### Grouping and schedule
 
 - **Weekly, early on Monday (UTC).** Fewer, larger PRs keep review load low.
 - **One group for non-major Go module updates, one for non-major Actions updates; `flake.lock` maintenance is a PR of its own.** Each major update gets a PR of its own, so it can't hold back a group that automerges.
-- **`code.forgejo.org/forgejo/runner` updates get a group of their own,** so a runner update waiting for review doesn't hold back the automerging Go group.
+- **`code.forgejo.org/forgejo/runner` updates get a group of their own,** so a runner update waiting for review doesn't hold back the automerging Go group. **The harness's runner image (`data.forgejo.org/forgejo/runner`) joins that group,** so when updates to the runner's Go module and its image are pending together, they arrive in one PR. Grouping doesn't make one wait for the other: a release of only one of them, or a re-pushed image digest with no new tag, opens the group's PR with that update alone.
 
 ### Automerge
 
 - **Non-major Go module updates, Action digest and version updates, and `flake.lock` maintenance automerge once every required check passes.** CI is the gate, and these are low risk.
-- **Never automerged: any major update, and any update to `code.forgejo.org/forgejo/runner`,** whose plugin protocol is the plugin's contract with the runner. They wait for the maintainer.
+- **Never automerged: any major update, and any update to `code.forgejo.org/forgejo/runner` or its image,** whose plugin protocol is the plugin's contract with the runner. They wait for the maintainer.
+- **The harness's Forgejo image is not automerged either:** no rule names it, so its updates get Renovate's default, a PR of their own that waits for the maintainer. The harness is local only, so no required check would exercise the new image.
 - **Automerge is GitHub's platform automerge, gated by `main`'s required checks, and uses the repo's rebase merge** (`automergeStrategy: rebase`), like every other PR.
 
 ### Commit messages
