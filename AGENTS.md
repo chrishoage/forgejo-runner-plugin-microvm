@@ -4,6 +4,7 @@
 
 - Run everything through the dev shell and `just` (`nix develop -c just <recipe>`). `just check` must pass before a PR.
 - Every commit is a Conventional Commit, and lands on `main` as written (rebase merge).
+- A PR's commits are its logical changes only. Fold a fix to something the PR contains (review findings, red CI, follow-ups) into the commit that introduced it (`git commit --fixup`, `git rebase --autosquash` locally, force-push the PR branch); never add it as a new commit.
 - No `nolint` without a reason on that line.
 - Never open throwaway pull requests. To show a check going red, push the breaking commit to the PR you intend to merge, record the run, then force-push it away.
 - The spike is a reference for behaviour only: never copy its code, layout or patterns.
