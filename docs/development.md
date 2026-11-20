@@ -136,6 +136,12 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 
 - **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, one `run: echo …` step that exits 0, triggered by `workflow_dispatch`.** It is the simplest real workflow. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
 
+### The test image
+
+- **`e2e/image` holds the one image the slice runs: `alpine:3.24`, pinned by tag and digest, as one line.** Both the harness's runner label and the protocol test read it. A `run:` step needs only a shell, and alpine's `sh` is enough; at about 4 MB, the naive pull costs seconds. Nothing is built.
+- **It is pulled from Docker Hub on every run, in CI too, with no cache step.** If Docker Hub's anonymous limit bites CI, mirroring the same digest elsewhere is #5's.
+- **Renovate keeps its tag and digest current** (`docs/conventions.md`, Renovate).
+
 ### Versions
 
 - **Forgejo and the runner images are pinned by tag and digest in `e2e/compose.yaml`:** Forgejo 17.0.2, the latest stable release, and forgejo-runner v13.2.2. v13.1.0 is the first release with the plugin protocol. Both come from `data.forgejo.org`, Forgejo's own registry.

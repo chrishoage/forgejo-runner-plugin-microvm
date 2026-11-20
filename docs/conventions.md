@@ -119,6 +119,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **GitHub Actions, pinned to commit digests with the version as a comment** (`helpers:pinGitHubActionDigests`). A digest can't be moved under us the way a tag can.
 - **Flake inputs, through weekly `flake.lock` maintenance only,** never as a PR per input. This is how Go patch releases and tool updates arrive. The `nix` manager is off by default in Renovate, so the config enables it.
 - **The harness's images in `e2e/compose.yaml`, Forgejo and forgejo-runner, pinned by tag and digest.** `config:recommended` enables the `docker-compose` manager, which updates the tag and the digest together.
+- **The slice's test image in `e2e/image`, pinned by tag and digest,** through a regex custom manager on that file, since no built-in manager reads it. It is one place to bump, read by both the harness and the protocol test. Its updates are a PR of their own that waits for the maintainer, like the harness's Forgejo image.
 - **Not the libkrun and libkrunfw overlays:** a version bump also needs a hash change Renovate can't make (#15). No Renovate manager reads `nix/libkrun-overlay.nix` or `nix/lib-minimums.json`, and the config adds no custom manager that would.
 
 ### Grouping and schedule
