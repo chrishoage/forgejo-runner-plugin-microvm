@@ -96,5 +96,9 @@ _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin pro
 The local compose stack, a real Forgejo and a real forgejo-runner, that runs a workflow end to end on a developer's machine (`just e2e`). Never run in CI.
 _Avoid_: test environment, e2e stack
 
+**Protocol test**:
+A test that runs a workflow through forgejo-runner's own job executor (`act/runner`) against the real plugin booting real VMs, with no Forgejo; it runs in KVM CI (`just test-kvm`).
+_Avoid_: integration test, e2e test
+
 **Shortcut**:
 A deliberately naive piece of code, marked with the issue that replaces it.
