@@ -192,6 +192,7 @@ proto/runnermicrovm/agent/v1/       agent protocol
 proto/runnermicrovm/job/v1/         control channel (plugin ↔ job process)
 proto/runnermicrovm/vm/v1/          VM child spec (private to the job binary)
 internal/gen/runnermicrovm/{agent,job}/v1/      generated, committed
+internal/gen/plugin/v1alpha/        the runner's plugin protocol, generated, committed
 internal/plugin/                    BackendPlugin server, job table, the two seam interfaces
 internal/imagecache/                pulls, conversion, cache, layer link directories, eviction
 internal/joblaunch/                 plugin side of a job process: start it, read events, kill it
@@ -253,10 +254,11 @@ Third-party libraries are free to use except where the boundary test below forbi
 
 ## Protocols
 
-Three `.proto` files under `proto/`, each in a directory that mirrors its versioned package. The commands are in `docs/development.md` (Protocols and codegen).
+Three `.proto` files under `proto/`, each in a directory that mirrors its versioned package, beside forgejo-runner's own plugin protocol (`proto/plugin/v1alpha/`, vendored unchanged). The commands are in `docs/development.md` (Protocols and codegen).
 
 | Package | Between | Carries |
 |---|---|---|
+| `plugin.v1alpha` (the runner's) | runner ↔ plugin (gRPC) | Capabilities, Create, Start, Exec, CopyIn, CopyOut, Remove |
 | `runnermicrovm.agent.v1` | plugin ↔ agent (gRPC) | Exec, CopyIn, CopyOut, readiness, the read-write flush; the agent's boot config |
 | `runnermicrovm.job.v1` | plugin ↔ job process (control channel) | the job spec in, status events out |
 | `runnermicrovm.vm.v1` | job process → VM child | the VM child spec |

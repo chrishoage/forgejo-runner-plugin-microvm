@@ -8,3 +8,7 @@ modules:
 lint:
   use:
     - STANDARD
+  # forgejo-runner's plugin protocol, kept byte for byte as the runner ships
+  # it: its names are the runner's, not ours to change.
+  ignore:
+    - proto/plugin

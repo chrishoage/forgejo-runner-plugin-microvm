@@ -3,8 +3,9 @@
 # `just generate`: the Go code for the protocols, from the dev shell's
 # protoc-gen-go and protoc-gen-go-grpc, with no Buf Schema Registry. Each
 # package's Go import path comes from managed mode, so the .proto files carry
-# no go_package. The VM child spec is generated under internal/job, so only
-# the job binary can import it.
+# no go_package; forgejo-runner's plugin protocol (proto/plugin/) keeps the
+# runner's, and managed mode overrides it too. The VM child spec is generated
+# under internal/job, so only the job binary can import it.
 version: v2
 managed:
   enabled: true

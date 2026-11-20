@@ -48,6 +48,7 @@ It ends with a checklist: `just check` is green, and durable decisions are recor
 - **Every source file starts with `SPDX-License-Identifier: GPL-3.0-or-later`,** in that language's comment form. One line states the license where the code is read.
 - Here "source file" means Go, Protocol Buffers (`.proto`), Nix, YAML, TOML, the `justfile`, `go.mod`, `renovate.json5`, `.envrc` and `.gitignore`. Markdown, `LICENSE`, and generated files without comments (`flake.lock`, `go.sum`) are exempt.
 - The generated Go code carries the header because the generators copy it from the `.proto` file's leading comment.
+- **The vendored plugin protocol (`proto/plugin/v1alpha/plugin.proto`) keeps the runner's own `SPDX-License-Identifier: MIT` header,** and so does its generated code. It is the runner's file, kept byte for byte, and MIT so that plugins may embed it.
 - **goheader enforces the header for Go** as part of `just lint`, so no extra tool is needed.
 - **No REUSE tooling:** one header line is enough for this repo.
 
@@ -113,7 +114,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 
 ### What it updates
 
-- **Go modules, with `go mod tidy` after every update and import paths rewritten on major bumps** (`gomodTidy`, `gomodUpdateImportPaths`). The runner's plugin protocol is imported from `code.forgejo.org/forgejo/runner/v13/...`, and a major bump changes that path.
+- **Go modules, with `go mod tidy` after every update and import paths rewritten on major bumps** (`gomodTidy`, `gomodUpdateImportPaths`). The protocol test imports the runner from `code.forgejo.org/forgejo/runner/v13/...`, and a major bump changes that path.
 - **Not the `go` directive in `go.mod`:** a Go minor bump is a deliberate change of `go.mod` and the flake together, and patch releases arrive through `flake.lock` (see `docs/development.md`).
 - **GitHub Actions, pinned to commit digests with the version as a comment** (`helpers:pinGitHubActionDigests`). A digest can't be moved under us the way a tag can.
 - **Flake inputs, through weekly `flake.lock` maintenance only,** never as a PR per input. This is how Go patch releases and tool updates arrive. The `nix` manager is off by default in Renovate, so the config enables it.
