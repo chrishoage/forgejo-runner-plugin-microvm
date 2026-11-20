@@ -7,9 +7,9 @@
 package main
 
 import (
-	// SHORTCUT(#4): main is empty until the agent serves; the blank import
-	// puts the agent's tree in this binary for the dependency test.
-	_ "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agent"
+	"os"
+
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agent"
 )
 
-func main() {}
+func main() { os.Exit(agent.Main(os.Args[1:])) }
