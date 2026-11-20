@@ -69,3 +69,19 @@ func (c *Client) WaitReady(ctx context.Context) error {
 
 // Close closes the connection, ending every call on it.
 func (c *Client) Close() error { return c.conn.Close() }
+
+// Exec runs one command in the guest; the stream ends with its exit code or
+// start error. Cancelling ctx kills the command.
+func (c *Client) Exec(ctx context.Context, req *agentv1.ExecRequest) (agentv1.AgentService_ExecClient, error) {
+	return c.rpc.Exec(ctx, req)
+}
+
+// CopyIn opens a CopyIn; its first request names the destination.
+func (c *Client) CopyIn(ctx context.Context) (agentv1.AgentService_CopyInClient, error) {
+	return c.rpc.CopyIn(ctx)
+}
+
+// CopyOut streams a guest path back as a tar.
+func (c *Client) CopyOut(ctx context.Context, req *agentv1.CopyOutRequest) (agentv1.AgentService_CopyOutClient, error) {
+	return c.rpc.CopyOut(ctx, req)
+}
