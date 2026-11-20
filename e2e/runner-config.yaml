@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# forgejo-runner's config in the local harness (docs/development.md).
+# forgejo-runner's config in the local harness (docs/development.md). `just
+# e2e up` writes it to .e2e/runner-config.yaml with @IMAGE@ replaced by the
+# image in e2e/image, the one the protocol test runs too.
 log:
   level: info
   job_level: info
@@ -8,13 +10,17 @@ log:
 runner:
   file: /data/.runner
   capacity: 1
-  # The runner's built-in host backend, so the harness proves itself before
-  # the plugin exists. #33 maps this label to the plugin instead; the
-  # workflow stays the same.
+  # The workflow's label, routed to the plugin with the test image.
   labels:
-    - microvm:host
+    - microvm:runner-microvm://@IMAGE@
 
 cache:
   # Off: the slice's guest has no network until #7, and nothing here needs
   # a cache.
   enabled: false
+
+plugins:
+  # The key is the label's scheme. The plugin runs on the host; its runtime
+  # directory, which holds its listen socket, is mounted here.
+  runner-microvm:
+    address: unix:///run/runner-microvm/runner-microvm.sock
