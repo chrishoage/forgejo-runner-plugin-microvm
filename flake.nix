@@ -18,6 +18,11 @@
       };
       inherit (pkgs) lib;
 
+      # Podman from nixpkgs without the overlay: its runtime, crun, links
+      # libkrun, so the overlaid podman would miss the binary cache and
+      # rebuild libkrun. crun's libkrun is not the one the plugin loads.
+      podman = nixpkgs.legacyPackages.${system}.podman;
+
       # libkrun and libkrunfw side by side, in the one directory the plugin
       # will read them from (RUNNER_MICROVM_LIBDIR).
       libdir = pkgs.symlinkJoin {
@@ -72,6 +77,15 @@
           pkgs.buf
           pkgs.protoc-gen-go
           pkgs.protoc-gen-go-grpc
+          # The local harness (`just e2e`, docs/development.md): the Docker
+          # CLI with its compose plugin for `docker compose`, podman for
+          # `podman compose` with `docker-compose` on PATH as its provider,
+          # and curl and jq for Forgejo's API.
+          pkgs.docker-client
+          pkgs.docker-compose
+          podman
+          pkgs.curl
+          pkgs.jq
           # `go test -race` needs cgo, so the shell carries a C compiler
           # (mkShell's stdenv) even though the binary builds without it.
         ];
