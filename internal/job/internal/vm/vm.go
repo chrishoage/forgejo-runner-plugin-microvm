@@ -29,6 +29,9 @@ const AgentPath = "/.runner-microvm-agent"
 // agentEnv is the agent's whole environment.
 var agentEnv = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 
+// scratchBlockID is the scratch disk's block id in libkrun.
+const scratchBlockID = "scratch"
+
 // libkrun's log level: warnings and errors, on the VM child's stderr.
 const krunLogWarn = 2
 
@@ -86,6 +89,9 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		// SHORTCUT(#5): the root is a read-write host directory holding
 		// the flattened image.
 		{"krun_set_root", func() int32 { return lib.setRoot(ctx, spec.GetRootDir()) }},
+		// The scratch disk is the first block device, /dev/vda,
+		// read-write (VM-5).
+		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
 		// SHORTCUT(#7): provisional pick: no implicit vsock and no
 		// transparent socket impersonation, and no network device, so the
 		// guest has no network at all.

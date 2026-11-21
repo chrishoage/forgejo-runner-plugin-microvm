@@ -46,6 +46,11 @@ func Main(args []string) int {
 }
 
 func run(ctx context.Context, log *slog.Logger) error {
+	// A missing host tool stops startup before anything is written.
+	mkfs, err := lookMkfs()
+	if err != nil {
+		return err
+	}
 	dirs, err := DirsFromEnv(os.Getenv)
 	if err != nil {
 		return err
@@ -77,6 +82,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		Dirs:      dirs,
 		LibDir:    libDir,
 		JobBinary: jobBinary,
+		MkfsExt4:  mkfs,
 		Agent:     agent,
 		Cache:     imagecache.New(log),
 		Launcher:  joblaunch.New(log),
@@ -90,10 +96,20 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	defer closeLis()
 	log.Info("serving", "listen", dirs.Listen, "state", dirs.State, "cache", dirs.Cache, "runtime", dirs.Runtime,
-		"job_binary", jobBinary, "lib_dir", libDir)
+		"job_binary", jobBinary, "lib_dir", libDir, "mkfs_ext4", mkfs)
 	err = Serve(ctx, lis, srv)
 	// Every job's VM ends with the plugin.
 	return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
+}
+
+// lookMkfs finds the host's mkfs.ext4 on PATH. The job process formats each
+// VM's scratch disk with it, so without it no job could start (VM-5).
+func lookMkfs() (string, error) {
+	path, err := exec.LookPath("mkfs.ext4")
+	if err != nil {
+		return "", fmt.Errorf("mkfs.ext4 is not on PATH: runner-microvm formats each VM's scratch disk with it; install e2fsprogs: %w", err)
+	}
+	return filepath.Abs(path)
 }
 
 // LibDirEnv names the directory holding libkrun and libkrunfw (VM-10).

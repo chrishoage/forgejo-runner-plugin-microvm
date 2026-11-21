@@ -114,6 +114,14 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 - **A job whose Start failed is never started again.** A second Start fails with `FailedPrecondition`, naming the first failure: the failed Start left the VM's files half made, and the runner removes such a job rather than starting it again.
 - **Remove then only deletes files and frees queue places,** and does nothing harmful when the job process is already gone. A job's disks are still freed exactly once (QUE-7), and only after its group is gone.
 
+### The scratch disk
+
+- **The job process creates each VM's scratch disk in `<state>/jobs/<id>/<n>/`, before it starts the VM child: a sparse file of the VM's scratch size, mode 0600.** Its size is apparent, so the file grows only as the guest writes. The job spec already says the job process creates it, and it is the job's file, deleted with the job's state directory at Remove.
+- **It is formatted with the host's `mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1,root_owner=0:0`,** which takes about 50 ms and allocates about 4 MB. The plugin looks `mkfs.ext4` up on `PATH` at startup, stops with an error naming it when it is missing, and passes its path in the job spec, so the job process runs the binary startup checked. This makes e2fsprogs a host dependency (`docs/development.md`). Formatting in the guest would need a mkfs the image may not have, or an ext4 writer of our own; an embedded template would need `resize2fs` for each profile's size anyway.
+- **The file must not exist yet, and a disk that can't be made is deleted.** A failure is a `Failed` event naming the scratch disk (PROTO-10). A fresh file for each VM is why nothing written in one job is visible in the next (VM-5).
+- **It is the VM's first block device, `/dev/vda`, read-write.** It is not locked: no other process ever names it.
+- **Its size is the built-in 10 GiB until #8's profiles set it.**
+
 ## libkrun
 
 - **libkrun is bound with purego, not cgo, and only the VM child loads it.** With cgo, libkrun is linked when the binary loads, so `RUNNER_MICROVM_LIBDIR` (VM-10) would need `LD_LIBRARY_PATH` and a missing library couldn't give a clean error. purego `dlopen`s from the named directory, and the libkrun 1.x calls take only ints and strings. See [ADR 0004](adr/0004-libkrun-via-purego.md). The plugin makes a relative `RUNNER_MICROVM_LIBDIR` absolute at startup, because the VM child changes its working directory before it loads libkrun.

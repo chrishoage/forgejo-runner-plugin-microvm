@@ -161,6 +161,25 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 	}
 }
 
+// The plugin refuses to start without mkfs.ext4, naming it, before it
+// writes anything (VM-5).
+//
+// It is not parallel: it sets PATH and RUNNER_MICROVM_DIR.
+func TestStartupNeedsMkfsExt4(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "plugin")
+	t.Setenv(BaseDirEnv, base)
+	t.Setenv(LibDirEnv, "")
+	t.Setenv("PATH", t.TempDir())
+
+	err := run(t.Context(), discardLog())
+	if err == nil || !strings.Contains(err.Error(), "mkfs.ext4") {
+		t.Fatalf("err = %v, want one naming mkfs.ext4", err)
+	}
+	if _, err := os.Lstat(base); !os.IsNotExist(err) {
+		t.Errorf("the failed startup wrote %s: %v", base, err)
+	}
+}
+
 // withoutShared returns d with the directory shared replaced by a fresh one
 // of its own, so a test can retake the rest of d's locks.
 func (d Dirs) withoutShared(shared string) Dirs {

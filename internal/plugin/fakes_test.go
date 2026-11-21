@@ -41,6 +41,7 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 	srv, err := NewServer(discardLog(), Config{
 		Dirs:         dirs,
 		JobBinary:    "/fake/runner-microvm-job",
+		MkfsExt4:     "/fake/mkfs.ext4",
 		Agent:        []byte("agent binary"),
 		Cache:        cache,
 		Launcher:     launcher,

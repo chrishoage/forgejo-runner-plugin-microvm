@@ -28,6 +28,7 @@ type krun struct {
 	createCtx            func() int32
 	setVMConfig          func(ctx uint32, cpus uint8, memMiB uint32) int32
 	setRoot              func(ctx uint32, path string) int32
+	addDisk              func(ctx uint32, blockID, path string, readOnly bool) int32
 	disableImplicitVsock func(ctx uint32) int32
 	addVsock             func(ctx uint32, tsiFeatures uint32) int32
 	addVsockPort2        func(ctx uint32, port uint32, path string, listen bool) int32
@@ -58,6 +59,7 @@ func load(dir string) (krun, error) {
 		"krun_create_ctx":             &k.createCtx,
 		"krun_set_vm_config":          &k.setVMConfig,
 		"krun_set_root":               &k.setRoot,
+		"krun_add_disk":               &k.addDisk,
 		"krun_disable_implicit_vsock": &k.disableImplicitVsock,
 		"krun_add_vsock":              &k.addVsock,
 		"krun_add_vsock_port2":        &k.addVsockPort2,

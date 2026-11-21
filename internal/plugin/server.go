@@ -41,6 +41,8 @@ type Config struct {
 	LibDir string
 	// JobBinary is the extracted job binary's path.
 	JobBinary string
+	// MkfsExt4 is the host's mkfs.ext4, which formats each scratch disk.
+	MkfsExt4 string
 	// Agent is the agent binary, written into each VM's root.
 	Agent []byte
 	// Cache and Launcher are the plugin's two seams.
