@@ -414,7 +414,7 @@ func TestEvictionRacingAcquires(t *testing.T) {
 	// An eviction under a cap of 1 byte deletes every layer, and the
 	// image's config, and pruning its tag.
 	setCap(cache, 1)
-	cache.evict()
+	cache.evict(false)
 	emptyCache(t, cache)
 }
 
@@ -677,6 +677,6 @@ func TestRunningImagesKeepTheirConfigs(t *testing.T) {
 	unpinned(ctx, t, cache)
 	// Released, their configs are evicted like any other.
 	setCap(cache, 1)
-	cache.evict()
+	cache.evict(false)
 	emptyCache(t, cache)
 }
