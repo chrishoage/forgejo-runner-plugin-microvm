@@ -68,6 +68,14 @@ type Cache struct {
 	// tagMu makes record's compare and write of a tag file one step.
 	tagMu sync.Mutex
 
+	// lookups shares one lookup per reference, and layers one pull per
+	// layer, between the Acquires that need it at once (IMG-12).
+	lookups *sharedCalls[*resolved]
+	layers  *sharedCalls[*pulledLayer]
+	// running counts the shared calls running, the abandoned ones that
+	// still unwind included: tests wait on it.
+	running sync.WaitGroup
+
 	mu sync.Mutex
 	// acquiring counts each job's Acquires in flight, for Release.
 	acquiring map[string]*inFlight
@@ -102,7 +110,7 @@ func New(log *slog.Logger, dir string, opts ...remote.Option) (*Cache, error) {
 			return nil, fmt.Errorf("the image cache directory %s: %w", dir, err)
 		}
 	}
-	return &Cache{
+	c := &Cache{
 		log: log,
 		dir: dir,
 		opts: append([]remote.Option{
@@ -115,7 +123,10 @@ func New(log *slog.Logger, dir string, opts ...remote.Option) (*Cache, error) {
 		rename:     renameNoReplace,
 		limits:     tarLimits{entries: maxEntries, metadata: maxMetadata},
 		acquiring:  map[string]*inFlight{},
-	}, nil
+	}
+	c.lookups = newSharedCalls[*resolved](&c.running, nil)
+	c.layers = newSharedCalls(&c.running, (*pulledLayer).discard)
+	return c, nil
 }
 
 func (c *Cache) path(elem ...string) string {
@@ -124,8 +135,10 @@ func (c *Cache) path(elem ...string) string {
 
 // Acquire pulls and converts whatever layers of req.Ref the cache lacks, and
 // makes the VM's layer link directory, <cache>/jobs/<id>/<n>/. A failed
-// Acquire leaves no link directory and no partial file, and fails only this
-// call.
+// Acquire leaves no link directory and fails only this call; a pull it alone
+// waited on is cancelled, and deletes its temp file as it unwinds. Acquires
+// that need the same reference or layer at once share its lookup and pull
+// (IMG-12); a cancelled one returns ctx's error at once.
 func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	if err := checkName(req.Job); err != nil || req.VM < 0 {
 		return Image{}, fmt.Errorf("job %q, VM %d: not a job's VM", req.Job, req.VM)
@@ -135,11 +148,7 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	if err != nil {
 		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
 	}
-	// Every registry request ends with pctx: a layer that fails cancels
-	// the others.
-	pctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	r, err := c.resolve(pctx, ref, req.ForcePull)
+	r, err := c.lookup(ctx, ref, req.ForcePull)
 	if err != nil {
 		return Image{}, fmt.Errorf("pull %s: %w", req.Ref, err)
 	}
@@ -152,7 +161,7 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 			return Image{}, fmt.Errorf("pull %s: layer %d: %w", req.Ref, i, err)
 		}
 	}
-	if err := c.pull(pctx, cancel, diffIDs, c.layerSource(pctx, r)); err != nil {
+	if err := c.pull(ctx, diffIDs, c.layerSource(ctx, r)); err != nil {
 		return Image{}, fmt.Errorf("pull %s: %w", req.Ref, err)
 	}
 	linkDir, names, err := c.link(req, diffIDs)
@@ -167,26 +176,98 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	return Image{Digest: r.digest.String(), Env: r.config.Config.Env, LinkDir: linkDir, Layers: names}, nil
 }
 
+// lookup is resolve, shared by the Acquires that look ref up at once. The
+// lookup runs in a context of its own, and ends when the last of them leaves
+// it. Each Acquire gets a copy, so the copies' later changes are their own.
+func (c *Cache) lookup(ctx context.Context, ref name.Reference, force bool) (*resolved, error) {
+	// A force_pull lookup never hands its caller a cached tag, so it
+	// shares only with other force_pull lookups.
+	key := ref.Name()
+	if force {
+		key += " force"
+	}
+	r, release, err := c.lookups.do(ctx, key, func(ctx context.Context) (*resolved, error) {
+		return c.resolve(ctx, ref, force)
+	})
+	defer release()
+	if err != nil {
+		return nil, err
+	}
+	rr := *r
+	return &rr, nil
+}
+
+// fetchLayer is where an image's layer comes from, and how to fetch it.
+type fetchLayer struct {
+	// source is the layer's blob, registry/repository@digest.
+	source string
+	// fetch returns the layer as the registry serves it. Its reads end
+	// with ctx, the context of the layer's shared pull.
+	fetch func(ctx context.Context) (v1.Layer, error)
+}
+
+// pullError is a failed pull's error, with the source it pulled from.
+type pullError struct {
+	source string
+	err    error
+}
+
+func (e *pullError) Error() string { return e.err.Error() }
+func (e *pullError) Unwrap() error { return e.err }
+
+// fromSource reports whether err is the failure of a pull from source.
+func fromSource(err error, source string) bool {
+	var pe *pullError
+	return errors.As(err, &pe) && pe.source == source
+}
+
+// pulledLayer is a shared pull's result: a converted layer in tmp, until
+// the first Acquire that needs it stores it.
+type pulledLayer struct {
+	mu     sync.Mutex
+	tmp    string
+	stored bool
+}
+
+// discard deletes the temp file once nobody holds the pull: every Acquire
+// that waited on it stored it or failed.
+func (p *pulledLayer) discard() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.stored && p.tmp != "" {
+		_ = os.Remove(p.tmp)
+	}
+}
+
 // pull converts each layer the cache lacks, each once, however often the
 // image names it. All of them are converted before any is renamed into
 // place, so a layer that fails leaves nothing in the cache (IMG-10).
 //
-// SHORTCUT(#43): two Acquires that need the same missing layer each convert
-// it; the second to finish keeps the file the first one stored.
+// Each layer's pull is shared with every Acquire that needs that layer
+// while it runs (IMG-12), and runs in a context of its own. A cancelled ctx
+// returns its error at once; the first layer that fails stops this
+// Acquire's waits on the others. A pull ends when its last waiter leaves.
 //
-// layer returns the image's layer i as the registry serves it; pull calls it
-// only for the layers the cache lacks. The layers' reads end with ctx, which
-// cancel cancels: the first layer that fails stops the others.
-func (c *Cache) pull(ctx context.Context, cancel context.CancelFunc, diffIDs []v1.Hash, layer func(i int) (v1.Layer, error)) error {
+// A shared pull fetches from the source of the Acquire that started it. One
+// that fails from another source is tried once more from this Acquire's
+// own, shared with the other Acquires retrying from that source: an image
+// may name another image's layer's diffID for a blob of its own, and must
+// not fail the Starts that join its pull. A failure from this Acquire's own
+// source is final.
+//
+// layer returns how to fetch the image's layer i; pull calls it only for
+// the layers the cache lacks, all of them before any pull starts.
+func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error)) error {
 	type pending struct {
-		diffID v1.Hash
-		tmp    string
-		err    error
+		diffID  v1.Hash
+		fetch   fetchLayer
+		p       *pulledLayer
+		release func()
+		err     error
 	}
-	// Every layer is looked up before any conversion starts, so a lookup
-	// that fails returns with nothing running and nothing written.
+	// Every layer is looked up before any pull starts, so a lookup that
+	// fails returns with nothing running and nothing written.
 	var todo []*pending
-	var ls []v1.Layer
 	seen := map[v1.Hash]bool{}
 	for i, d := range diffIDs {
 		if seen[d] {
@@ -198,35 +279,39 @@ func (c *Cache) pull(ctx context.Context, cancel context.CancelFunc, diffIDs []v
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("layer %s: %w", d, err)
 		}
-		l, err := layer(i)
+		f, err := layer(i)
 		if err != nil {
 			return fmt.Errorf("layer %s: %w", d, err)
 		}
-		todo = append(todo, &pending{diffID: d})
-		ls = append(ls, l)
+		todo = append(todo, &pending{diffID: d, fetch: f})
 	}
+	// wctx ends this Acquire's waits: the first layer that fails cancels
+	// it.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var g sync.WaitGroup
-	for i, p := range todo {
-		l := ls[i]
+	for _, p := range todo {
 		g.Go(func() {
-			select {
-			case c.pulls <- struct{}{}:
-			case <-ctx.Done():
-				p.err = ctx.Err()
-				return
+			fn := func(pctx context.Context) (*pulledLayer, error) {
+				return c.pullLayer(pctx, p.diffID, p.fetch)
 			}
-			defer func() { <-c.pulls }()
-			if p.err = ctx.Err(); p.err != nil {
-				return
+			p.p, p.release, p.err = c.layers.do(wctx, p.diffID.String(), fn)
+			if p.err != nil && wctx.Err() == nil && !fromSource(p.err, p.fetch.source) {
+				p.release()
+				p.p, p.release, p.err = c.layers.do(wctx, p.diffID.String()+" "+p.fetch.source, fn)
 			}
-			p.tmp, p.err = c.convertLayer(l, p.diffID)
 			if p.err != nil {
 				cancel()
 			}
 		})
 	}
 	g.Wait()
-	// The layer that failed first is the cause; the layers it cancelled
+	defer func() {
+		for _, p := range todo {
+			p.release()
+		}
+	}()
+	// The layer that failed first is the cause; the waits it cancelled
 	// report only that.
 	err := ctx.Err()
 	for _, p := range todo {
@@ -235,21 +320,16 @@ func (c *Cache) pull(ctx context.Context, cancel context.CancelFunc, diffIDs []v
 		}
 	}
 	if err != nil {
-		for _, p := range todo {
-			if p.tmp != "" {
-				_ = os.Remove(p.tmp)
-			}
-		}
 		return err
 	}
-	for i, p := range todo {
-		if err := c.store(p.tmp, p.diffID); err != nil {
-			for _, q := range todo[i:] {
-				_ = os.Remove(q.tmp)
-			}
+	for _, p := range todo {
+		stored, err := c.store(p.p, p.diffID)
+		if err != nil {
 			return c.spaceError(err)
 		}
-		c.log.Info("converted", "layer", p.diffID.String())
+		if stored {
+			c.log.Info("converted", "layer", p.diffID.String())
+		}
 	}
 	if len(todo) > 0 {
 		return syncDir(c.path(layersDir))
@@ -257,22 +337,68 @@ func (c *Cache) pull(ctx context.Context, cancel context.CancelFunc, diffIDs []v
 	return nil
 }
 
-// store renames the complete temp file tmp into place as the layer diffID.
-// It never replaces a file already there: a layer another Acquire stored
-// first is the same content, and VMs may already link it.
+// pullLayer is one layer's shared pull: it fetches the layer and converts
+// it into a temp file, in ctx, the pull's own context. A layer stored since
+// its Acquires looked it up is not pulled again. Its errors name the source
+// it pulled from.
+func (c *Cache) pullLayer(ctx context.Context, diffID v1.Hash, from fetchLayer) (pl *pulledLayer, err error) {
+	defer func() {
+		if err != nil {
+			err = &pullError{source: from.source, err: err}
+		}
+	}()
+	if _, err := os.Stat(c.layerPath(diffID)); err == nil {
+		return &pulledLayer{stored: true}, nil
+	}
+	// A shared pull takes one place, whatever its number of waiters.
+	select {
+	case c.pulls <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-c.pulls }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l, err := from.fetch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("layer %s: %w", diffID, err)
+	}
+	tmp, err := c.convertLayer(l, diffID)
+	if err != nil {
+		return nil, err
+	}
+	return &pulledLayer{tmp: tmp}, nil
+}
+
+// store renames p's complete temp file into place as the layer diffID,
+// unless an Acquire sharing p stored it first, and reports whether it did.
+// It never replaces a file already there: a layer stored first is the same
+// content, and VMs may already link it.
 //
 // The cache's filesystem must support renameat2's RENAME_NOREPLACE
 // (docs/development.md); one that doesn't fails the Acquire, naming the
 // cache directory.
-func (c *Cache) store(tmp string, diffID v1.Hash) error {
-	err := c.rename(tmp, c.layerPath(diffID))
-	switch {
-	case errors.Is(err, unix.EEXIST):
-		return os.Remove(tmp)
-	case errors.Is(err, unix.EINVAL), errors.Is(err, unix.EOPNOTSUPP):
-		return fmt.Errorf("the image cache directory %s is on a filesystem without rename's RENAME_NOREPLACE, which the image cache needs: %w", c.dir, err)
+func (c *Cache) store(p *pulledLayer, diffID v1.Hash) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stored {
+		return false, nil
 	}
-	return err
+	err := c.rename(p.tmp, c.layerPath(diffID))
+	switch {
+	case err == nil:
+	case errors.Is(err, unix.EEXIST):
+		if err := os.Remove(p.tmp); err != nil {
+			return false, err
+		}
+	case errors.Is(err, unix.EINVAL), errors.Is(err, unix.EOPNOTSUPP):
+		return false, fmt.Errorf("the image cache directory %s is on a filesystem without rename's RENAME_NOREPLACE, which the image cache needs: %w", c.dir, err)
+	default:
+		return false, err
+	}
+	p.stored = true
+	return err == nil, nil
 }
 
 // renameNoReplace renames oldpath to newpath unless newpath exists.
