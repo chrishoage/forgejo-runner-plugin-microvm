@@ -64,7 +64,7 @@ nix develop -c just test       # go test -race ./...: no KVM, no root, no payloa
 nix develop -c just test-kvm   # go test -race -tags kvm,payload ./..., after just payload
 ```
 
-- **`just test-kvm` runs every test, the `kvm`-tagged ones included,** against the embedded payload. It needs `/dev/kvm` and the dev shell's libraries, and runs as a step of CI's `kvm` job. It includes the protocol test (`docs/architecture.md`, Tests), which pulls `e2e/image` from Docker Hub and boots one VM.
+- **`just test-kvm` runs every test, the `kvm`-tagged ones included,** against the embedded payload. It needs `/dev/kvm` and the dev shell's libraries, and runs as a step of CI's `kvm` job. It includes the protocol test (`docs/architecture.md`, Tests), which pulls `e2e/image` from Amazon ECR Public and boots one VM.
 - **The dependency test (`cmd/deps_test.go`) runs `go list -deps`,** so `go test` needs the `go` command on `PATH`, which `go test` provides.
 - **It lists each binary as it ships, not as the test process is built:** `CGO_ENABLED=0` for all three, `-tags payload` for the plugin, `GOOS=linux GOARCH=amd64`, and an empty `GOFLAGS`. Under `-race` the test process has cgo on and no tags, and a file behind `//go:build !cgo` or `payload` is only in one of those graphs. The pinned values are constants in the test, so go test's cache keys on them. It passes `-e` so it works before `just payload`; an embed pattern matching no file is the only error it accepts.
 
@@ -142,7 +142,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 ### The test image
 
 - **`e2e/image` holds the one image the slice runs: `alpine:3.24`, pinned by tag and digest, as one line.** Both the harness's runner label and the protocol test read it. A `run:` step needs only a shell, and alpine's `sh` is enough; at about 4 MB, the naive pull costs seconds. Nothing is built.
-- **It is pulled from Docker Hub on every run, in CI too, with no cache step.** If Docker Hub's anonymous limit bites CI, mirroring the same digest elsewhere is #5's.
+- **It is pulled from Amazon ECR Public's copy of the Docker official images (`public.ecr.aws/docker/library`), anonymously, on every run, in CI too, with no cache step.** Docker Hub allows 100 anonymous pulls per 6 hours per IPv4 address or IPv6 /64, and GitHub's hosted runners share their addresses, so other people's pulls count against that limit; ECR Public allows about one anonymous pull a second. It is a full copy with every tag, unlike `mirror.gcr.io`, a pull-through cache that may not hold a digest Renovate has just bumped to. The image and its digest are the same as on Docker Hub (#46).
 - **Renovate keeps its tag and digest current** (`docs/conventions.md`, Renovate).
 
 ### Versions
