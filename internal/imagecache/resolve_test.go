@@ -584,7 +584,7 @@ func tagDigest(t *testing.T, c *Cache, ref string) string {
 	if err != nil || b == nil {
 		t.Fatalf("tag file of %s: %q, %v", ref, b, err)
 	}
-	h, err := c.parseTag(r, b)
+	_, h, err := parseTagFile(filepath.Base(c.tagPath(r)), b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,36 +647,107 @@ func TestSlowAcquireKeepsNewerTag(t *testing.T) {
 	}
 }
 
-// A tag file that names another reference, or isn't JSON, fails Acquire
-// naming the file.
-func TestBadTagFileFailsAcquire(t *testing.T) {
+// A cached config or tag file whose content a lookup refuses (a config or
+// tag that isn't JSON, a tag naming another reference or no sha256 digest)
+// is deleted and logged, with the cache under its cap, and the Start goes
+// to the registry and writes it again. Every write is atomic, so no crash
+// left it, and keeping it would fail every Start of the image.
+func TestDamagedConfigOrTagIsFetchedAgain(t *testing.T) {
 	t.Parallel()
-	host := serveRegistry(t, nil)
-	ref := pushTo(t, host, image(t, headerLayer(t, file("f"))))
+	host, reqs := countingRegistry(t)
+	img := image(t, headerLayer(t, file("f")))
+	ref := pushTo(t, host, img)
 	r, err := name.ParseReference(ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, tt := range []struct{ name, content, want string }{
-		{"another reference", `{"reference":"` + host + `/test/other:1","digest":"sha256:` + strings.Repeat("0", 64) + `"}`, "names"},
-		{"not JSON", `{`, "unexpected end"},
+	raw, err := img.RawConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := `{"reference":"` + host + `/test/other:1","digest":"` + imageDigest(t, img).String() + `"}`
+	for _, tt := range []struct {
+		name        string
+		tag, config string
+	}{
+		{name: "tag names another reference", tag: other},
+		{name: "tag not JSON", tag: "{"},
+		{name: "tag digest not sha256", tag: `{"reference":"` + r.Name() + `","digest":"md5:00"}`},
+		{name: "config not JSON", config: "{"},
+		{name: "both", tag: "not json", config: "["},
 	} {
-		c := newCache(t)
-		ctx := testCtx(t)
-		if _, err := c.Acquire(ctx, Request{Job: "job-1", Ref: ref}); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(c.tagPath(r), []byte(tt.content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		job := "job-" + strconv.Itoa(i+2)
-		_, err := c.Acquire(ctx, Request{Job: job, Ref: ref})
-		if err == nil || !strings.Contains(err.Error(), c.tagPath(r)) || !strings.Contains(err.Error(), tt.want) {
-			t.Errorf("%s: Acquire: %v; want an error naming %s and %q", tt.name, err, c.tagPath(r), tt.want)
-		}
-		if _, err := os.Stat(c.path(jobsDir, job)); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("%s: the failed Acquire left a link directory: %v", tt.name, err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			c, log := cappedCache(t, 1<<40)
+			ctx := testCtx(t)
+			acquire(ctx, t, c, "job-1", ref)
+			var damaged []string
+			for p, b := range map[string]string{c.tagPath(r): tt.tag, c.imagePath(imageDigest(t, img)): tt.config} {
+				if b == "" {
+					continue
+				}
+				if err := os.WriteFile(p, []byte(b), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				damaged = append(damaged, p)
+			}
+			reqs.take()
+			acquire(ctx, t, c, "job-2", ref)
+			if len(reqs.take()) == 0 {
+				t.Error("the Acquire made no registry request")
+			}
+			for _, p := range damaged {
+				if !strings.Contains(log.String(), "deleted a damaged file") || !strings.Contains(log.String(), p) {
+					t.Errorf("no deletion of %s logged:\n%s", p, log)
+				}
+			}
+			if got := tagDigest(t, c, ref); got != imageDigest(t, img).String() {
+				t.Errorf("the tag file names %s, want %s", got, imageDigest(t, img))
+			}
+			if got, err := os.ReadFile(c.imagePath(imageDigest(t, img))); err != nil || !bytes.Equal(got, raw) {
+				t.Errorf("cached config %q, %v; want the image's", got, err)
+			}
+		})
+	}
+}
+
+// A cached config or tag file a lookup can't read fails that Start, naming
+// the file, and is kept: the next attempt may read it.
+func TestUnreadableConfigOrTagFailsAcquire(t *testing.T) {
+	t.Parallel()
+	host := serveRegistry(t, nil)
+	img := image(t, headerLayer(t, file("f")))
+	ref := pushTo(t, host, img)
+	r, err := name.ParseReference(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, which := range []string{"tag", "config"} {
+		t.Run(which, func(t *testing.T) {
+			c := newCache(t)
+			ctx := testCtx(t)
+			acquire(ctx, t, c, "job-1", ref)
+			p := c.tagPath(r)
+			if which == "config" {
+				p = c.imagePath(imageDigest(t, img))
+			}
+			if err := os.Chmod(p, 0); err != nil {
+				t.Fatal(err)
+			}
+			// Root reads a mode 0 file.
+			if _, err := os.ReadFile(p); err == nil {
+				t.Skip("a mode 0 file is readable here")
+			}
+			_, err := c.Acquire(ctx, Request{Job: "job-2", Ref: ref})
+			if !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), p) {
+				t.Errorf("Acquire: %v; want permission denied naming %s", err, p)
+			}
+			if _, err := os.Lstat(p); err != nil {
+				t.Errorf("the Acquire deleted the file it can't read: %v", err)
+			}
+			if _, err := os.Stat(c.path(jobsDir, "job-2")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the failed Acquire left a link directory: %v", err)
+			}
+		})
 	}
 }
 

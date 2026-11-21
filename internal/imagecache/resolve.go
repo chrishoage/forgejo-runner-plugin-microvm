@@ -102,7 +102,7 @@ func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*r
 	if r.raw, err = fetchConfig(r.remote); err != nil {
 		return nil, fmt.Errorf("config of %s: %w", r.digest, err)
 	}
-	if r.config, err = v1.ParseConfigFile(bytes.NewReader(r.raw)); err != nil {
+	if r.config, err = parseConfig(r.raw); err != nil {
 		return nil, fmt.Errorf("config of %s: %w", r.digest, err)
 	}
 	c.storeMu.Lock()
@@ -131,15 +131,17 @@ func (c *Cache) resolveCached(ref name.Reference, force bool) (r *resolved, foun
 		// An index's digest names no config of its own: its tag file
 		// names its platform image's.
 		if found, err = cached(h); !found && err == nil {
-			if r.seenTag, err = c.readTagFile(ref); err == nil {
-				found, err = c.cachedTag(ref, r.seenTag, cached)
+			var th v1.Hash
+			if r.seenTag, th, err = c.readTag(ref); err == nil && r.seenTag != nil {
+				found, err = cached(th)
 			}
 		}
 	case name.Tag:
 		r.tag = true
 		// With force, the tag file is read only for record to compare.
-		if r.seenTag, err = c.readTagFile(ref); err == nil && !force {
-			found, err = c.cachedTag(ref, r.seenTag, cached)
+		var th v1.Hash
+		if r.seenTag, th, err = c.readTag(ref); err == nil && r.seenTag != nil && !force {
+			found, err = cached(th)
 		}
 	}
 	if err != nil {
@@ -149,18 +151,22 @@ func (c *Cache) resolveCached(ref name.Reference, force bool) (r *resolved, foun
 }
 
 // cachedConfig reads the config cached for the manifest digest h into r, and
-// pins its layers, reporting whether the cache holds it. c.storeMu is held.
+// pins its layers, reporting whether the cache holds it. A config whose
+// content parseConfig refuses is deleted and logged, and counts as missing,
+// so the Start fetches it again; one it can't read fails the lookup and is
+// kept. c.storeMu is held.
 func (c *Cache) cachedConfig(r *resolved, h v1.Hash) (bool, error) {
-	raw, err := os.ReadFile(c.imagePath(h))
+	p := c.imagePath(h)
+	raw, err := os.ReadFile(p) //nolint:gosec // G304: a file in <cache>/images/, named by a checked digest
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	cfg, err := v1.ParseConfigFile(bytes.NewReader(raw))
+	cfg, err := parseConfig(raw)
 	if err != nil {
-		return false, fmt.Errorf("config of %s: %w", h, err)
+		return false, c.deleteDamaged(p, err)
 	}
 	r.digest, r.raw, r.config = h, raw, cfg
 	r.unpin = c.pinLocked(h, cfg.RootFS.DiffIDs)
@@ -346,17 +352,22 @@ func (c *Cache) record(r *resolved) error {
 	return c.writeFile(tagsDir, filepath.Base(c.tagPath(r.ref)), b)
 }
 
-// cachedTag looks the digest that ref's tag file b names up through cached;
-// b is nil when the cache has no tag file.
-func (c *Cache) cachedTag(ref name.Reference, b []byte, cached func(v1.Hash) (bool, error)) (bool, error) {
-	if b == nil {
-		return false, nil
+// readTag returns ref's tag file and the manifest digest it names, or a nil
+// file when the cache has none. A tag file whose content parseTagFile
+// refuses is deleted and logged, and counts as none, so the Start looks the
+// reference up again; one it can't read fails the lookup and is kept.
+// c.storeMu is held.
+func (c *Cache) readTag(ref name.Reference) ([]byte, v1.Hash, error) {
+	b, err := c.readTagFile(ref)
+	if err != nil || b == nil {
+		return nil, v1.Hash{}, err
 	}
-	h, err := c.parseTag(ref, b)
+	p := c.tagPath(ref)
+	_, h, err := parseTagFile(filepath.Base(p), b)
 	if err != nil {
-		return false, err
+		return nil, v1.Hash{}, c.deleteDamaged(p, err)
 	}
-	return cached(h)
+	return b, h, nil
 }
 
 // readTagFile returns ref's tag file, or nil when the cache has none.
@@ -368,24 +379,31 @@ func (c *Cache) readTagFile(ref name.Reference) ([]byte, error) {
 	return b, err
 }
 
-// parseTag returns the digest that b, ref's tag file, names.
-func (c *Cache) parseTag(ref name.Reference, b []byte) (v1.Hash, error) {
-	path := c.tagPath(ref)
+// parseTagFile returns the content of b, the tag file named name in
+// <cache>/tags/, and the manifest digest it names. It is the one check of a
+// tag file, for lookups and pruning alike: JSON whose reference is the one
+// the file is named for, and a sha256 digest. A tag file it refuses is
+// damaged: every write is atomic, so no crash left it.
+func parseTagFile(name string, b []byte) (tagFile, v1.Hash, error) {
 	var tf tagFile
 	if err := json.Unmarshal(b, &tf); err != nil {
-		return v1.Hash{}, fmt.Errorf("tag file %s: %w", path, err)
+		return tf, v1.Hash{}, err
 	}
-	if tf.Reference != ref.Name() {
-		return v1.Hash{}, fmt.Errorf("tag file %s names %q, not %q", path, tf.Reference, ref.Name())
+	if tagName(tf.Reference) != name {
+		return tf, v1.Hash{}, fmt.Errorf("it names %q, not the reference it is named for", tf.Reference)
 	}
 	digest, err := v1.NewHash(tf.Digest)
 	if err == nil {
 		err = checkDigest(digest)
 	}
-	if err != nil {
-		return v1.Hash{}, fmt.Errorf("tag file %s: %w", path, err)
-	}
-	return digest, nil
+	return tf, digest, err
+}
+
+// parseConfig is the one check of an image config's content, for lookups
+// and pruning alike, and for a config the registry serves. A cached config
+// it refuses is damaged: every write is atomic, so no crash left it.
+func parseConfig(raw []byte) (*v1.ConfigFile, error) {
+	return v1.ParseConfigFile(bytes.NewReader(raw))
 }
 
 // writeFile writes b to <cache>/<dir>/<name>: a temp file, fsync, rename
@@ -422,8 +440,14 @@ func (c *Cache) writeFile(dir, name string, b []byte) (err error) {
 // name, so a long repository path can't outgrow NAME_MAX and no escaping
 // rule is the cache's own.
 func (c *Cache) tagPath(ref name.Reference) string {
-	sum := sha256.Sum256([]byte(ref.Name()))
-	return c.path(tagsDir, hex.EncodeToString(sum[:]))
+	return c.path(tagsDir, tagName(ref.Name()))
+}
+
+// tagName is the name in <cache>/tags/ of the tag file for the normalised
+// reference.
+func tagName(reference string) string {
+	sum := sha256.Sum256([]byte(reference))
+	return hex.EncodeToString(sum[:])
 }
 
 // imagePath is where the config of the image with manifest digest is cached.
