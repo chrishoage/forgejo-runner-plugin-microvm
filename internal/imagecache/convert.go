@@ -3,6 +3,7 @@
 package imagecache
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -78,7 +79,10 @@ func (f *failWriter) Write(p []byte) (int, error) {
 // convertLayer converts l into a temp file in the cache's tmp directory and
 // returns its path. The layer's uncompressed content must hash to diffID,
 // since the file is cached under that name and shared by every image that
-// names it, and must stay within c.limits. The blob is decompressed in this
+// names it, and must stay within c.limits. Neither its uncompressed stream
+// nor its EROFS file may pass the cache's cap: a layer bigger than the cap
+// could never be kept, and an endless stream would fill the cache's
+// filesystem. The blob is decompressed in this
 // goroutine, so a panic in decompression or conversion fails only this layer
 // (IMG-11). On error nothing is left in tmp.
 func (c *Cache) convertLayer(l v1.Layer, diffID v1.Hash) (path string, err error) {
@@ -111,11 +115,19 @@ func (c *Cache) convertLayer(l v1.Layer, diffID v1.Hash) (path string, err error
 	tc := countTar(diffID, c.limits)
 	// Deferred too, for a panic: the counter's goroutine always ends.
 	defer func() { _ = tc.close() }()
-	src := io.TeeReader(rc, io.MultiWriter(h, tc))
-	if err := c.convert(f, src, tmpDir); err != nil {
-		// A layer over a limit fails tarconv's read with that limit;
-		// the limit is the cause.
-		if lerr := tc.close(); lerr != nil {
+	in := &capReader{r: rc, left: c.maxSize}
+	out := &capWriter{w: f, left: c.maxSize}
+	overCap := func() error {
+		if in.over || out.over {
+			return fmt.Errorf("layer %s is over %d bytes, the image cache's size cap, uncompressed or as EROFS: the cache could never keep it", diffID, c.maxSize)
+		}
+		return nil
+	}
+	src := io.TeeReader(in, io.MultiWriter(h, tc))
+	if err := c.convert(out, src, tmpDir); err != nil {
+		// A layer over a limit fails tarconv's read or write with that
+		// limit; the limit is the cause.
+		if lerr := cmp.Or(overCap(), tc.close()); lerr != nil {
 			return "", lerr
 		}
 		if strings.Contains(err.Error(), tarconvHardLink) {
@@ -125,6 +137,9 @@ func (c *Cache) convertLayer(l v1.Layer, diffID v1.Hash) (path string, err error
 	}
 	// tarconv reads the stream to its end; whatever it left counts too.
 	if _, err := io.Copy(io.Discard, src); err != nil {
+		if lerr := overCap(); lerr != nil {
+			return "", lerr
+		}
 		return "", errors.Join(tc.close(), fmt.Errorf("layer %s: %w", diffID, err))
 	}
 	if err := tc.close(); err != nil {
@@ -140,6 +155,51 @@ func (c *Cache) convertLayer(l v1.Layer, diffID v1.Hash) (path string, err error
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// errOverCap is what a capReader or capWriter returns past its cap.
+var errOverCap = errors.New("over the image cache's size cap")
+
+// capReader reads r until left bytes are read, then fails.
+type capReader struct {
+	r    io.Reader
+	left int64
+	// over is set once a read would pass left.
+	over bool
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.over {
+		return 0, errOverCap
+	}
+	// One byte past left tells a stream at the cap from one over it.
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	if c.left -= int64(n); c.left < 0 {
+		c.over = true
+		return n - 1, errOverCap
+	}
+	return n, err
+}
+
+// capWriter writes to w until left bytes are written, then fails.
+type capWriter struct {
+	w    io.Writer
+	left int64
+	// over is set once a write would pass left.
+	over bool
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if c.over || int64(len(p)) > c.left {
+		c.over = true
+		return 0, errOverCap
+	}
+	n, err := c.w.Write(p)
+	c.left -= int64(n)
+	return n, err
 }
 
 // spaceError names the cache directory when err is a full disk. Nothing

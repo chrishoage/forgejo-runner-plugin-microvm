@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -46,8 +47,6 @@ type resolved struct {
 	// remote is the image as the registry serves it, by digest; nil until
 	// Acquire needs the registry.
 	remote v1.Image
-	// cachedConfig is set when raw came from <cache>/images/.
-	cachedConfig bool
 	// tag is set when ref needs a tag file naming digest: a tag, or the
 	// digest of an index.
 	tag bool
@@ -56,6 +55,9 @@ type resolved struct {
 	// while it still holds this, so a slower Acquire can't put back an
 	// older digest that a later lookup replaced.
 	seenTag []byte
+	// unpin releases the pin on the image's layers that this resolved
+	// holds.
+	unpin func()
 }
 
 // resolve finds ref's manifest digest and config. A tag the cache holds, with
@@ -64,21 +66,59 @@ type resolved struct {
 // index, which never changes, resolves once through a tag file of its own. Each reference is
 // normalised to go-containerregistry's fully qualified name, so node:22 and
 // index.docker.io/library/node:22 are one tag (IMG-1).
+//
+// The result pins the image's layers, until its unpin is called. A config
+// read from the cache is read and pinned under c.storeMu, so no eviction
+// runs between the two: the layers the cache holds then stay, and with them
+// the config and tag, and the Acquire needs no registry request (IMG-7).
 func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*resolved, error) {
-	r := &resolved{ref: ref}
-	cached := func(h v1.Hash) (bool, error) {
-		raw, err := os.ReadFile(c.imagePath(h))
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		r.digest, r.raw, r.cachedConfig = h, raw, true
-		return true, nil
+	r, found, err := c.resolveCached(ref, force)
+	if err != nil || found {
+		return r, err
 	}
-	var found bool
-	var err error
+	// The registry resolves a tag, and an index to the host's platform
+	// (IMG-2).
+	img, err := remote.Image(ref, c.remoteOpts(ctx)...)
+	if err != nil {
+		return nil, err
+	}
+	if r.digest, err = img.Digest(); err != nil {
+		return nil, err
+	}
+	if err := checkDigest(r.digest); err != nil {
+		return nil, err
+	}
+	r.remote = img
+	// A digest reference needs a tag file only when it names an index.
+	if d, ok := ref.(name.Digest); ok {
+		r.tag = d.DigestStr() != r.digest.String()
+	}
+	c.storeMu.Lock()
+	found, err = c.cachedConfig(r, r.digest)
+	c.storeMu.Unlock()
+	if err != nil || found {
+		return r, err
+	}
+	if r.raw, err = fetchConfig(r.remote); err != nil {
+		return nil, fmt.Errorf("config of %s: %w", r.digest, err)
+	}
+	if r.config, err = v1.ParseConfigFile(bytes.NewReader(r.raw)); err != nil {
+		return nil, fmt.Errorf("config of %s: %w", r.digest, err)
+	}
+	c.storeMu.Lock()
+	r.unpin = c.pinLocked(r.digest, r.config.RootFS.DiffIDs)
+	c.storeMu.Unlock()
+	return r, nil
+}
+
+// resolveCached is resolve's look at the cache, before any registry request,
+// under c.storeMu. It reports whether the cache holds ref's config, and then
+// pins its layers. Otherwise r holds what resolve needs for the registry.
+func (c *Cache) resolveCached(ref name.Reference, force bool) (r *resolved, found bool, err error) {
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	r = &resolved{ref: ref}
+	cached := func(h v1.Hash) (bool, error) { return c.cachedConfig(r, h) }
 	switch ref := ref.(type) {
 	case name.Digest:
 		h, herr := v1.NewHash(ref.DigestStr())
@@ -86,7 +126,7 @@ func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*r
 			herr = checkDigest(h)
 		}
 		if herr != nil {
-			return nil, herr
+			return nil, false, herr
 		}
 		// An index's digest names no config of its own: its tag file
 		// names its platform image's.
@@ -103,40 +143,28 @@ func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*r
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if !found {
-		// The registry resolves a tag, and an index to the host's
-		// platform (IMG-2).
-		img, err := remote.Image(ref, c.remoteOpts(ctx)...)
-		if err != nil {
-			return nil, err
-		}
-		if r.digest, err = img.Digest(); err != nil {
-			return nil, err
-		}
-		if err := checkDigest(r.digest); err != nil {
-			return nil, err
-		}
-		r.remote = img
-		// A digest reference needs a tag file only when it names an
-		// index.
-		if d, ok := ref.(name.Digest); ok {
-			r.tag = d.DigestStr() != r.digest.String()
-		}
-		if found, err = cached(r.digest); err != nil {
-			return nil, err
-		}
+	return r, found, nil
+}
+
+// cachedConfig reads the config cached for the manifest digest h into r, and
+// pins its layers, reporting whether the cache holds it. c.storeMu is held.
+func (c *Cache) cachedConfig(r *resolved, h v1.Hash) (bool, error) {
+	raw, err := os.ReadFile(c.imagePath(h))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	if !found {
-		if r.raw, err = fetchConfig(r.remote); err != nil {
-			return nil, fmt.Errorf("config of %s: %w", r.digest, err)
-		}
+	if err != nil {
+		return false, err
 	}
-	if r.config, err = v1.ParseConfigFile(bytes.NewReader(r.raw)); err != nil {
-		return nil, fmt.Errorf("config of %s: %w", r.digest, err)
+	cfg, err := v1.ParseConfigFile(bytes.NewReader(raw))
+	if err != nil {
+		return false, fmt.Errorf("config of %s: %w", h, err)
 	}
-	return r, nil
+	r.digest, r.raw, r.config = h, raw, cfg
+	r.unpin = c.pinLocked(h, cfg.RootFS.DiffIDs)
+	return true, nil
 }
 
 // fetchConfig returns img's raw config, refusing one over maxConfigSize
@@ -277,17 +305,30 @@ func (r *declaredSizeReader) Close() error { return r.rc.Close() }
 
 // record writes the image's config and tag that the cache lacks. Acquire
 // calls it only once every layer is linked, so pruning, which deletes configs
-// with no cached layer, can't delete a config a cold Acquire just wrote.
+// with no cached layer, can't delete a config a cold Acquire just wrote. It
+// holds c.storeMu, so no pruning runs between its look at the config and its
+// write: a config read from the cache and pruned since is written again.
+// It sets the config's mtime, as link sets each layer's, so it records the
+// config's last use for eviction.
 //
 // The tag file is written only while it holds what resolve saw (none, or
 // the same file): otherwise an Acquire that resolved since, force_pull for
 // example, wrote a newer digest, and since tags never expire an older one
 // put back would stick.
 func (c *Cache) record(r *resolved) error {
-	if !r.cachedConfig {
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	p := c.imagePath(r.digest)
+	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
 		if err := c.writeFile(imagesDir, r.digest.Hex+".json", r.raw); err != nil {
 			return err
 		}
+	} else if err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := os.Chtimes(p, now, now); err != nil {
+		return err
 	}
 	if !r.tag {
 		return nil
@@ -296,10 +337,8 @@ func (c *Cache) record(r *resolved) error {
 	if err != nil {
 		return err
 	}
-	// Only this process writes tag files, so a lock of its own makes the
-	// compare and the write one step.
-	c.tagMu.Lock()
-	defer c.tagMu.Unlock()
+	// Only this process writes tag files, so c.storeMu makes the compare
+	// and the write one step.
 	cur, err := c.readTagFile(r.ref)
 	if err != nil || bytes.Equal(cur, b) || !bytes.Equal(cur, r.seenTag) {
 		return err

@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -139,6 +141,32 @@ func settle(ctx context.Context, t *testing.T, c *Cache) {
 		close(done)
 	}()
 	recv(ctx, t, done, "the pulls to end")
+}
+
+// unpinned waits until every pull and lookup c started has ended, and fails
+// t if any layer or config is still pinned: every Acquire has returned, so
+// every pin must be released. A config stays in use only by a job with a
+// layer link directory, one not yet released, and once for each of its VMs.
+func unpinned(ctx context.Context, t *testing.T, c *Cache) {
+	t.Helper()
+	settle(ctx, t, c)
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	if len(c.pinned) > 0 {
+		t.Errorf("layers still pinned with no Acquire in flight: %v", c.pinned)
+	}
+	if len(c.pinnedConfigs) > 0 {
+		t.Errorf("configs still pinned with no Acquire in flight: %v", c.pinnedConfigs)
+	}
+	for job, held := range c.jobConfigs {
+		vms, err := os.ReadDir(c.path(jobsDir, job))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(vms) != len(held) {
+			t.Errorf("job %s holds configs %v, but has %d layer link directories", job, held, len(vms))
+		}
+	}
 }
 
 func allOnes(n []int) bool {
@@ -481,6 +509,7 @@ func TestLookupSharing(t *testing.T) {
 		if got := reg.getsOf([]string{manifests}); got[0] != 1 {
 			t.Errorf("the manifest fetched %d times, want once", got[0])
 		}
+		unpinned(ctx, t, c)
 	})
 	t.Run("force_pull apart", func(t *testing.T) {
 		t.Parallel()
@@ -530,6 +559,7 @@ func TestLookupSharing(t *testing.T) {
 		if got := reg.getsOf([]string{manifests})[0] - before; got != 1 {
 			t.Errorf("the manifest fetched %d times, want once, by the force_pull Acquire", got)
 		}
+		unpinned(ctx, t, c)
 	})
 }
 

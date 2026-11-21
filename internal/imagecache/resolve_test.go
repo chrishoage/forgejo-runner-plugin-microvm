@@ -88,8 +88,8 @@ func withEnv(t *testing.T, img v1.Image, env ...string) v1.Image {
 type entry struct {
 	mode    fs.FileMode
 	content string
-	// mtime is kept for every file but a layer and its links, whose
-	// mtime is the layer's last use.
+	// mtime is kept for every file but a layer and its links, and an
+	// image config, whose mtime is its last use.
 	mtime int64
 }
 
@@ -117,7 +117,7 @@ func snapshot(t *testing.T, c *Cache) map[string]entry {
 			}
 			sum := sha256.Sum256(b)
 			e.content = hex.EncodeToString(sum[:])
-			if top := strings.SplitN(rel, "/", 2)[0]; top != layersDir && top != jobsDir {
+			if top := strings.SplitN(rel, "/", 2)[0]; top != layersDir && top != jobsDir && top != imagesDir {
 				e.mtime = fi.ModTime().UnixNano()
 			}
 		}
@@ -131,8 +131,8 @@ func snapshot(t *testing.T, c *Cache) map[string]entry {
 }
 
 // A second Acquire of a cached tag makes no registry request, and changes
-// nothing in the cache but its layers' mtimes and the new link directory
-// (IMG-6, IMG-7).
+// nothing in the cache but its layers' and config's mtimes and the new link
+// directory (IMG-6, IMG-7).
 func TestCachedTagMakesNoRequest(t *testing.T) {
 	t.Parallel()
 	host, reqs := countingRegistry(t)

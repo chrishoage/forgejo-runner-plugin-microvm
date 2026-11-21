@@ -86,7 +86,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	cache, err := imagecache.New(log, dirs.Cache)
+	cache, err := imagecache.New(log, dirs.Cache, imagecache.WithMaxSize(cacheMaxSize))
 	if err != nil {
 		return err
 	}
@@ -123,6 +123,10 @@ func lookMkfs() (string, error) {
 	}
 	return filepath.Abs(path)
 }
+
+// cacheMaxSize is the image cache's built-in size cap, 20 GiB (#1). #8 adds
+// the cache_max_gib key, which replaces it.
+const cacheMaxSize = 20 << 30
 
 // LibDirEnv names the directory holding libkrun and libkrunfw (VM-10).
 //
