@@ -64,7 +64,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	defer func() { _ = locks.Close() }()
 	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left,
-	// beyond the stale files in <state>/bin/.
+	// beyond the stale files in <state>/bin/ and the image cache's own
+	// (imagecache.New).
 	if err := joblaunch.SetSubreaper(); err != nil {
 		return err
 	}

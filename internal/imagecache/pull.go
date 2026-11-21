@@ -139,10 +139,13 @@ func WithMaxSize(bytes int64) Option {
 // library's own rule: a localhost, loopback or RFC 1918 registry is tried
 // over HTTPS, then HTTP; every other registry is HTTPS only.
 //
-// SHORTCUT(#45): New keeps whatever a crash left in <cache>/tmp/ and
-// <cache>/jobs/: temp files and link directories of jobs that no longer
-// exist stay until someone deletes them, and the layers they link stay with
-// them.
+// New is the cache side of startup cleanup (docs/architecture.md, Failure
+// handling and startup cleanup): it deletes everything in <cache>/jobs/ and
+// <cache>/tmp/ without inspecting it, then evicts and prunes once. The
+// directory lock proves no other plugin uses the cache, and no job process
+// outlives the plugin that started it, so every link directory and temp
+// file there is a crash's leftover. Eviction and pruning errors are logged,
+// as after a Release; a leftover New can't delete fails it.
 func New(log *slog.Logger, dir string, opts ...Option) (*Cache, error) {
 	for _, d := range []string{layersDir, imagesDir, tagsDir, tmpDir, jobsDir} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
@@ -175,7 +178,37 @@ func New(log *slog.Logger, dir string, opts ...Option) (*Cache, error) {
 	}
 	c.lookups = newSharedCalls(&c.running, func(r *resolved) { r.unpin() })
 	c.layers = newSharedCalls(&c.running, (*pulledLayer).discard)
+	jobs, err := emptyDir(c.path(jobsDir))
+	if err != nil {
+		return nil, fmt.Errorf("the image cache directory %s: startup cleanup: %w", dir, err)
+	}
+	tmp, err := emptyDir(c.path(tmpDir))
+	if err != nil {
+		return nil, fmt.Errorf("the image cache directory %s: startup cleanup: %w", dir, err)
+	}
+	if jobs > 0 || tmp > 0 {
+		log.Info("deleted crash leftovers", "cache", dir, "jobs", jobs, "temp_files", tmp)
+	}
+	// The link directories just deleted may have been all that kept
+	// layers in use, and a crash between an eviction and its pruning
+	// leaves configs with no layer: so prune whatever eviction deletes.
+	c.evict(true)
 	return c, nil
+}
+
+// emptyDir deletes everything in dir, keeping dir, and returns how many
+// entries it deleted.
+func emptyDir(dir string) (int, error) {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range es {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return 0, err
+		}
+	}
+	return len(es), nil
 }
 
 func (c *Cache) path(elem ...string) string {
@@ -571,7 +604,7 @@ func (c *Cache) Release(ctx context.Context, job string) error {
 	c.storeMu.Lock()
 	delete(c.jobConfigs, job)
 	c.storeMu.Unlock()
-	c.evict()
+	c.evict(false)
 	return err
 }
 

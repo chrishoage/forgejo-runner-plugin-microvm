@@ -85,19 +85,19 @@ func (c *Cache) configInUse(digest v1.Hash) bool {
 
 // evict deletes least-recently-used layers and image configs not in use,
 // oldest mtime first, until the allocated size of the cached layers, configs
-// and tags fits the cap, and then, if it deleted any, prunes the image
-// configs and tags (IMG-14). A layer is in use while a VM links it or an
-// Acquire in flight pins it, and a config from its Acquire's lookup to its
-// job's Release: neither is ever deleted, even over the cap. Errors are
-// logged: they are no job's.
-func (c *Cache) evict() {
+// and tags fits the cap, and then, if it deleted any or always is set,
+// prunes the image configs and tags (IMG-14). A layer is in use while a VM
+// links it or an Acquire in flight pins it, and a config from its Acquire's
+// lookup to its job's Release: neither is ever deleted, even over the cap.
+// Errors are logged: they are no job's.
+func (c *Cache) evict(always bool) {
 	c.storeMu.Lock()
 	deleted, err := c.evictLRU()
 	c.storeMu.Unlock()
 	if err != nil {
 		c.log.Error("eviction", "err", err)
 	}
-	if !deleted {
+	if !deleted && !always {
 		return
 	}
 	if err := c.prune(); err != nil {
