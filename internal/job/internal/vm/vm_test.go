@@ -24,10 +24,13 @@ func fakeKrun(calls *[]string, fail string) krun {
 		return 0
 	}
 	return krun{
-		setLogLevel:          func(l uint32) int32 { return rec("set_log_level", l) },
-		createCtx:            func() int32 { _ = rec("create_ctx"); return 7 },
-		setVMConfig:          func(c uint32, n uint8, m uint32) int32 { return rec("set_vm_config", c, n, m) },
-		setRoot:              func(c uint32, p string) int32 { return rec("set_root", c, p) },
+		setLogLevel: func(l uint32) int32 { return rec("set_log_level", l) },
+		createCtx:   func() int32 { _ = rec("create_ctx"); return 7 },
+		setVMConfig: func(c uint32, n uint8, m uint32) int32 { return rec("set_vm_config", c, n, m) },
+		setRoot:     func(c uint32, p string) int32 { return rec("set_root", c, p) },
+		addDisk: func(c uint32, id, p string, ro bool) int32 {
+			return rec("add_disk", c, id, p, ro)
+		},
 		disableImplicitVsock: func(c uint32) int32 { return rec("disable_implicit_vsock", c) },
 		addVsock:             func(c, tsi uint32) int32 { return rec("add_vsock", c, tsi) },
 		addVsockPort2: func(c, port uint32, p string, listen bool) int32 {
@@ -44,7 +47,7 @@ func fakeKrun(calls *[]string, fail string) krun {
 func testSpec() *vmv1.Spec {
 	return &vmv1.Spec{
 		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", Console: "/state/jobs/j/0/console",
-		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024,
+		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024, ScratchDisk: "/state/jobs/j/0/scratch.ext4",
 	}
 }
 
@@ -59,6 +62,7 @@ func TestBootConfiguresTheVM(t *testing.T) {
 		"create_ctx",
 		"set_vm_config 7 2 1024",
 		"set_root 7 /state/jobs/j/0/root",
+		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
 		"disable_implicit_vsock 7",
 		"add_vsock 7 0",
 		"add_vsock_port2 7 1024 agent.sock true",

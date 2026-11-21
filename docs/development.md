@@ -28,7 +28,7 @@ With direnv, `.envrc` (`use flake`) enters the dev shell on `cd`; then run `just
 - **The flake selects `go_1_26` explicitly,** so a change to nixpkgs' default `go` can't silently change the Go minor version. The shell's Go tools (golangci-lint, go-licenses, govulncheck) are built with that same Go, so they agree with `go` on the standard library; nixpkgs would otherwise build them with its latest Go.
 - **`go.mod` states the language minimum `go 1.26` (written `1.26.0` once a dependency requires that form), with no `toolchain` line, and the dev shell sets `GOTOOLCHAIN=local`,** so Go never downloads a toolchain of its own: the flake is the only source of Go.
 - **Go patch releases arrive through `flake.lock` updates.** A minor bump (1.27) is a deliberate change of `go.mod` and the flake together.
-- **The dev shell carries every tool the project's checks need:** Go, just, golangci-lint, go-licenses, govulncheck, cocogitto, and buf with protoc-gen-go and protoc-gen-go-grpc. It also carries a C compiler, because `go test -race` needs cgo even though the binary builds without it (`CGO_ENABLED=0`).
+- **The dev shell carries every tool the project's checks need:** Go, just, golangci-lint, go-licenses, govulncheck, cocogitto, and buf with protoc-gen-go and protoc-gen-go-grpc. It also carries e2fsprogs, for the plugin's one host dependency, `mkfs.ext4`. It also carries a C compiler, because `go test -race` needs cgo even though the binary builds without it (`CGO_ENABLED=0`).
 - **`.envrc` contains `use flake`,** so direnv users get the shell on `cd`.
 - **`just` is the task runner:** every routine command is a recipe, so the maintainer, agents and CI run the same commands.
 
@@ -55,6 +55,7 @@ RUNNER_MICROVM_DIR=/tmp/rm bin/runner-microvm   # listens on /tmp/rm/runtime/run
 
 - **`RUNNER_MICROVM_DIR=<base>` puts the state, cache and runtime directories under `<base>` (`<base>/state`, `<base>/cache`, `<base>/runtime`), with the listen socket in the runtime directory (`<base>/runtime/runner-microvm.sock`).** Without it, the built-in paths of #1 apply. An ordinary user can't write the built-in paths, and the tests need temporary directories; one variable is the least to throw away when the config file arrives. It is marked `SHORTCUT(#8)`: #8 replaces it with the config file's keys.
 - **The plugin takes no arguments yet, and SIGINT or SIGTERM stops it at once.**
+- **The host must have `mkfs.ext4` (e2fsprogs) on `PATH`.** The job process formats each VM's scratch disk with it (`docs/architecture.md`, The scratch disk). The plugin looks it up at startup and stops with an error naming it when it is missing, before it writes anything. The dev shell carries e2fsprogs, so the tests and the harness find it there. Formatting in the guest would need a mkfs the image may not have, or an ext4 writer of our own; an embedded template would need `resize2fs` for each profile's size anyway.
 - **The plugin addresses its unix sockets through an open directory, as `/proc/self/fd/<fd>/<name>`.** bind and connect take at most 107 bytes of path, which a checkout's `.e2e/plugin/runtime/` can outgrow on its own.
 
 ## Tests

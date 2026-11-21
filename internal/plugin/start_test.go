@@ -73,13 +73,15 @@ func TestStartBootsTheVM(t *testing.T) {
 		t.Errorf("agent in the root: %q, %v", b, err)
 	}
 	spec := launcher.specs[0]
-	if spec.GetJob() != id || spec.GetJobBinary() != "/fake/runner-microvm-job" || len(spec.GetVms()) != 1 {
+	if spec.GetJob() != id || spec.GetJobBinary() != "/fake/runner-microvm-job" || spec.GetMkfsExt4() != "/fake/mkfs.ext4" ||
+		len(spec.GetVms()) != 1 {
 		t.Fatalf("job spec = %v", spec)
 	}
 	vm := spec.GetVms()[0]
 	if vm.GetRootDir() != root || vm.GetAgentPort() != 1024 || vm.GetCpus() != 2 || vm.GetMemoryMib() != 1024 ||
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
-		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") {
+		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
+		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 {
 		t.Errorf("VM = %v", vm)
 	}
 	if launcher.logs[0] != filepath.Join(state, "job.log") {

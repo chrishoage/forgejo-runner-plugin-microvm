@@ -44,6 +44,9 @@ message Spec {
   // and the plugin dialling its agent. Where a service VM's shape and
   // storage come from is decided when services are.
   repeated VM vms = 5;
+  // The host's mkfs.ext4, which the plugin found at startup. The job process
+  // formats each VM's scratch disk with it (VM-5).
+  string mkfs_ext4 = 6;
 }
 
 // VM is one of the job's VMs, run by one VM child.
@@ -59,7 +62,9 @@ message VM {
   uint32 cpus = 2;
   uint32 memory_mib = 3;
   // The VM's scratch disk's file, created fresh by the job process in
-  // <state>/jobs/<id>/<n>/, and its size (VM-5).
+  // <state>/jobs/<id>/<n>/, and its size (VM-5): a sparse file of that
+  // apparent size, mode 0600, formatted as ext4. It is the VM's first block
+  // device, /dev/vda, read-write.
   string scratch_disk = 4;
   uint64 scratch_size_bytes = 5;
   // The VM log file (the VM child's stdout and stderr) and the console file,

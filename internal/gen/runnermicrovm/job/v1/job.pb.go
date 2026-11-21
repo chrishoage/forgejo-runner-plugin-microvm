@@ -63,7 +63,10 @@ type Spec struct {
 	// it is added fields and calls, for example its entrypoint and cmd at boot
 	// and the plugin dialling its agent. Where a service VM's shape and
 	// storage come from is decided when services are.
-	Vms           []*VM `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
+	Vms []*VM `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
+	// The host's mkfs.ext4, which the plugin found at startup. The job process
+	// formats each VM's scratch disk with it (VM-5).
+	MkfsExt4      string `protobuf:"bytes,6,opt,name=mkfs_ext4,json=mkfsExt4,proto3" json:"mkfs_ext4,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -133,6 +136,13 @@ func (x *Spec) GetVms() []*VM {
 	return nil
 }
 
+func (x *Spec) GetMkfsExt4() string {
+	if x != nil {
+		return x.MkfsExt4
+	}
+	return ""
+}
+
 // VM is one of the job's VMs, run by one VM child.
 type VM struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -147,7 +157,9 @@ type VM struct {
 	Cpus      uint32 `protobuf:"varint,2,opt,name=cpus,proto3" json:"cpus,omitempty"`
 	MemoryMib uint32 `protobuf:"varint,3,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"`
 	// The VM's scratch disk's file, created fresh by the job process in
-	// <state>/jobs/<id>/<n>/, and its size (VM-5).
+	// <state>/jobs/<id>/<n>/, and its size (VM-5): a sparse file of that
+	// apparent size, mode 0600, formatted as ext4. It is the VM's first block
+	// device, /dev/vda, read-write.
 	ScratchDisk      string `protobuf:"bytes,4,opt,name=scratch_disk,json=scratchDisk,proto3" json:"scratch_disk,omitempty"`
 	ScratchSizeBytes uint64 `protobuf:"varint,5,opt,name=scratch_size_bytes,json=scratchSizeBytes,proto3" json:"scratch_size_bytes,omitempty"`
 	// The VM log file (the VM child's stdout and stderr) and the console file,
@@ -922,14 +934,15 @@ var File_runnermicrovm_job_v1_job_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\n" +
-	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xb5\x01\n" +
+	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xd2\x01\n" +
 	"\x04Spec\x12\x10\n" +
 	"\x03job\x18\x01 \x01(\tR\x03job\x12\x1d\n" +
 	"\n" +
 	"job_binary\x18\x02 \x01(\tR\tjobBinary\x12\x17\n" +
 	"\alib_dir\x18\x03 \x01(\tR\x06libDir\x127\n" +
 	"\anetwork\x18\x04 \x01(\v2\x1d.runnermicrovm.job.v1.NetworkR\anetwork\x12*\n" +
-	"\x03vms\x18\x05 \x03(\v2\x18.runnermicrovm.job.v1.VMR\x03vms\"\xa8\x04\n" +
+	"\x03vms\x18\x05 \x03(\v2\x18.runnermicrovm.job.v1.VMR\x03vms\x12\x1b\n" +
+	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\"\xa8\x04\n" +
 	"\x02VM\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +

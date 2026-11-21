@@ -71,6 +71,9 @@
           goTools.govulncheck
           libdir
           pkgs.cocogitto
+          # mkfs.ext4, which formats each VM's scratch disk: a host
+          # dependency of the plugin (docs/development.md).
+          pkgs.e2fsprogs
           # Protocol codegen and lint, with local plugins: no Buf Schema
           # Registry, no account, no network. They generate code rather than
           # analyse it, so nixpkgs' builds are used as they are.

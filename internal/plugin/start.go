@@ -40,6 +40,8 @@ const (
 	agentPort = 1024
 	// The VM's name; GST-12's hostname rule is #6's.
 	vmName = "job"
+	// SHORTCUT(#8): the built-in scratch size, until profiles set it.
+	scratchSizeBytes = 10 << 30
 )
 
 // The most of a console or VM log a failed Start's error carries.
@@ -114,19 +116,22 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		return nil, fmt.Errorf("write the agent: %w", err)
 	}
 	vm := &jobv1.VM{
-		Name:        vmName,
-		Cpus:        vmCPUs,
-		MemoryMib:   vmMemoryMiB,
-		VmLog:       filepath.Join(vmState, "vm.log"),
-		Console:     filepath.Join(vmState, "console"),
-		AgentSocket: filepath.Join(vmRuntime, "agent.sock"),
-		AgentPort:   agentPort,
-		RootDir:     root,
+		Name:             vmName,
+		Cpus:             vmCPUs,
+		MemoryMib:        vmMemoryMiB,
+		ScratchDisk:      filepath.Join(vmState, "scratch.ext4"),
+		ScratchSizeBytes: scratchSizeBytes,
+		VmLog:            filepath.Join(vmState, "vm.log"),
+		Console:          filepath.Join(vmState, "console"),
+		AgentSocket:      filepath.Join(vmRuntime, "agent.sock"),
+		AgentPort:        agentPort,
+		RootDir:          root,
 	}
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
 		Job:       j.id,
 		JobBinary: s.cfg.JobBinary,
 		LibDir:    s.cfg.LibDir,
+		MkfsExt4:  s.cfg.MkfsExt4,
 		Vms:       []*jobv1.VM{vm},
 	}, filepath.Join(s.jobStateDir(j.id), "job.log"))
 	if err != nil {

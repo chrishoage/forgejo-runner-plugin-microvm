@@ -16,9 +16,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/encoding/protodelim"
@@ -98,11 +101,15 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) err
 // runVM starts VM 0's VM child, reports VMStarted, and waits for it to
 // exit. It returns the VM child's exit code, 128+n when signal n ended it.
 func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, log *slog.Logger) (int32, error) {
+	if err := createScratchDisk(ctx, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
+		return 0, fmt.Errorf("scratch disk %s: %w", v.GetScratchDisk(), err)
+	}
 	childSpec, err := specFile(&vmv1.Spec{
 		LibDir:      spec.GetLibDir(),
 		Cpus:        v.GetCpus(),
 		MemoryMib:   v.GetMemoryMib(),
 		RootDir:     v.GetRootDir(),
+		ScratchDisk: v.GetScratchDisk(),
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),
@@ -148,6 +155,41 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, lo
 		return 128 + int32(ws.Signal()), nil //nolint:gosec // G115: a signal number is below 65
 	}
 	return int32(ws.ExitStatus()), nil //nolint:gosec // G115: an exit status is 0 to 255
+}
+
+// mkfsArgs format a scratch disk quickly: the inode tables and journal are
+// initialised lazily by the guest, so formatting takes about 50 ms and
+// allocates about 4 MB, and the root directory is root's.
+var mkfsArgs = []string{"-q", "-F", "-E", "lazy_itable_init=1,lazy_journal_init=1,root_owner=0:0"}
+
+// createScratchDisk creates path as a sparse file of size bytes, mode 0600,
+// and formats it as ext4 with mkfs. The file must not exist: a scratch disk
+// is never reused, so nothing written in one job is visible in the next
+// (VM-5). A disk that can't be made is deleted.
+func createScratchDisk(ctx context.Context, mkfs, path string, size uint64) (err error) {
+	if size == 0 || size > math.MaxInt64 {
+		return fmt.Errorf("scratch size %d bytes", size)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the scratch disk the plugin named in the spec
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(path)
+		}
+	}()
+	err = f.Truncate(int64(size))
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	// mkfs is in the job process's group, so killing the job kills it.
+	cmd := exec.CommandContext(ctx, mkfs, append(mkfsArgs, path)...) //nolint:gosec // G204: the mkfs.ext4 the plugin found at startup
+	cmd.WaitDelay = time.Second
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w: %s", mkfs, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // specFile returns a memory file holding spec, length-delimited, to be read

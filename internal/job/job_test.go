@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,16 +34,30 @@ func fakeJobBinary(t *testing.T, script string) string {
 	return path
 }
 
+// fakeMkfs writes a shell script standing in for mkfs.ext4, doing script.
+func fakeMkfs(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mkfs.ext4")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// testJobSpec returns a spec of one VM whose scratch disk a fake mkfs.ext4
+// formats, doing nothing.
 func testJobSpec(t *testing.T, jobBinary string) *jobv1.Spec {
 	t.Helper()
 	dir := t.TempDir()
 	return &jobv1.Spec{
 		Job:       "job-1",
 		JobBinary: jobBinary,
+		MkfsExt4:  fakeMkfs(t, "exit 0"),
 		Vms: []*jobv1.VM{{
 			Name: "echo", Cpus: 2, MemoryMib: 1024,
 			VmLog: filepath.Join(dir, "vm.log"), Console: filepath.Join(dir, "console"),
 			AgentSocket: filepath.Join(dir, "agent.sock"), AgentPort: 1024, RootDir: filepath.Join(dir, "root"),
+			ScratchDisk: filepath.Join(dir, "scratch.ext4"), ScratchSizeBytes: 1 << 30,
 		}},
 	}
 }
@@ -106,6 +121,89 @@ func TestRunReportsASignal(t *testing.T) {
 	}
 	if len(events) != 2 || events[1].GetVmExited().GetExitCode() != 128+9 {
 		t.Fatalf("events = %v, want VMExited with 137", events)
+	}
+}
+
+// The scratch disk is a fresh, sparse ext4 file of the VM's scratch size,
+// formatted with the host's mkfs.ext4, before the VM child starts (VM-5).
+func TestRunCreatesTheScratchDisk(t *testing.T) {
+	t.Parallel()
+	mkfs, err := exec.LookPath("mkfs.ext4")
+	if err != nil {
+		t.Fatalf("the dev shell carries mkfs.ext4: %v", err)
+	}
+	spec := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	spec.MkfsExt4 = mkfs
+	v := spec.GetVms()[0]
+	v.ScratchSizeBytes = 10 << 30
+	if _, err := run(t, spec); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(v.GetScratchDisk())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != 10<<30 || fi.Mode().Perm() != 0o600 {
+		t.Errorf("scratch disk: size %d, mode %v; want 10 GiB, 0600", fi.Size(), fi.Mode().Perm())
+	}
+	// Sparse: only the filesystem's metadata is allocated.
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Blocks*512 > 64<<20 {
+		t.Errorf("scratch disk allocates %d bytes, want it sparse", st.Blocks*512)
+	}
+	// ext4's superblock starts at 1024, its magic 0xEF53 at offset 56.
+	f, err := os.Open(v.GetScratchDisk())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	magic := make([]byte, 2)
+	if _, err := f.ReadAt(magic, 1024+56); err != nil {
+		t.Fatal(err)
+	}
+	if magic[0] != 0x53 || magic[1] != 0xef {
+		t.Errorf("scratch disk magic = %x, want ext4's 53ef", magic)
+	}
+}
+
+// A scratch disk that can't be made fails the job, naming it, and leaves no
+// file behind; a file already there is never reused.
+func TestRunFailsOnTheScratchDisk(t *testing.T) {
+	t.Parallel()
+	failing := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	failing.MkfsExt4 = fakeMkfs(t, "echo 'bad superblock' >&2; exit 1")
+	noMkfs := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	noMkfs.MkfsExt4 = filepath.Join(t.TempDir(), "mkfs.ext4")
+	stale := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	if err := os.WriteFile(stale.GetVms()[0].GetScratchDisk(), []byte("old job"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		spec      *jobv1.Spec
+		want      string
+		leftAlone bool
+	}{
+		"mkfs fails":   {spec: failing, want: "bad superblock"},
+		"no mkfs":      {spec: noMkfs, want: "mkfs.ext4"},
+		"a stale file": {spec: stale, want: "exists", leftAlone: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			disk := tt.spec.GetVms()[0].GetScratchDisk()
+			events, err := run(t, tt.spec)
+			if err == nil || !strings.Contains(err.Error(), "scratch disk "+disk) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want one naming the scratch disk and %q", err, tt.want)
+			}
+			if len(events) != 1 || !strings.Contains(events[0].GetFailed().GetReason(), "scratch disk") {
+				t.Fatalf("events = %v, want one Failed naming the scratch disk", events)
+			}
+			_, err = os.Stat(disk)
+			if tt.leftAlone && err != nil {
+				t.Errorf("the file already there was deleted: %v", err)
+			}
+			if !tt.leftAlone && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("a failed scratch disk is left behind: %v", err)
+			}
+		})
 	}
 }
 
