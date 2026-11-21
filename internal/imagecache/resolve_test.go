@@ -3,6 +3,8 @@
 package imagecache
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -253,6 +256,80 @@ func TestMissingLayerIsFetchedByDigest(t *testing.T) {
 		if _, err := os.Stat(c.layerPath(diffID(t, b))); err != nil {
 			t.Errorf("by digest %v: layer b is not cached again: %v", byDigest, err)
 		}
+	}
+}
+
+// A layer's blob is read only up to the size its manifest declares: a
+// registry that sends the blob and then endless empty gzip members, with no
+// Content-Length, fails the Start at once, as does one that ends the blob
+// short. Neither leaves anything in the cache.
+func TestLayerBlobIsBoundToItsManifestSize(t *testing.T) {
+	t.Parallel()
+	l := headerLayer(t, file("f"))
+	digest, err := l.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := l.Compressed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var member bytes.Buffer
+	if err := gzip.NewWriter(&member).Close(); err != nil {
+		t.Fatal(err)
+	}
+	members := bytes.Repeat(member.Bytes(), 64<<10/member.Len())
+	for name, tt := range map[string]struct {
+		endless bool
+		want    string
+	}{
+		"endless": {endless: true, want: "runs past the " + strconv.Itoa(len(blob)) + " bytes its manifest declares"},
+		"short":   {want: "short of the " + strconv.Itoa(len(blob)) + " its manifest declares"},
+	} {
+		var served atomic.Int64
+		host := serveRegistry(t, func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != blobPath(digest) {
+					h.ServeHTTP(w, r)
+					return
+				}
+				// Flushing before the body is done makes it chunked,
+				// with no Content-Length.
+				f := w.(http.Flusher)
+				if !tt.endless {
+					_, _ = w.Write(blob[:len(blob)-1])
+					f.Flush()
+					return
+				}
+				if _, err := w.Write(blob); err != nil {
+					return
+				}
+				f.Flush()
+				for r.Context().Err() == nil {
+					n, err := w.Write(members)
+					served.Add(int64(n))
+					if err != nil {
+						return
+					}
+					f.Flush()
+				}
+			})
+		})
+		c := newCache(t)
+		_, err := c.Acquire(testCtx(t), Request{Job: "job-1", Ref: pushTo(t, host, image(t, l))})
+		if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), diffID(t, l).String()) {
+			t.Fatalf("%s: err = %v, want one naming the layer with %q", name, err, tt.want)
+		}
+		// Past what the connection buffers, the registry is no longer
+		// read.
+		if n := served.Load(); n > 64<<20 {
+			t.Errorf("%s: the registry served %d bytes past the blob", name, n)
+		}
+		emptyCache(t, c)
 	}
 }
 

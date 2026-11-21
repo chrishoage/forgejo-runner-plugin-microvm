@@ -170,37 +170,110 @@ func fetchConfig(img v1.Image) ([]byte, error) {
 	return raw, nil
 }
 
-// layerSource returns, for each index into the image's layers, the layer as
-// the registry serves it, by its blob digest. The first call fetches the
-// manifest by digest, never by tag, and checks that it names the config
-// Acquire holds.
-func (c *Cache) layerSource(ctx context.Context, r *resolved) func(i int) (v1.Layer, error) {
+// layerSource returns, for each index into the image's layers, its blob and
+// how to fetch the layer as the registry serves it, by that digest, in the
+// context of the layer's shared pull. The first call fetches the manifest by
+// digest, never by tag, in ctx, and checks that it names the config Acquire
+// holds.
+func (c *Cache) layerSource(ctx context.Context, r *resolved) func(i int) (fetchLayer, error) {
 	var m *v1.Manifest
-	return func(i int) (v1.Layer, error) {
+	return func(i int) (fetchLayer, error) {
 		if m == nil {
 			if r.remote == nil {
 				img, err := remote.Image(r.ref.Context().Digest(r.digest.String()), c.remoteOpts(ctx)...)
 				if err != nil {
-					return nil, err
+					return fetchLayer{}, err
 				}
 				r.remote = img
 			}
 			mf, err := r.remote.Manifest()
 			if err != nil {
-				return nil, err
+				return fetchLayer{}, err
 			}
 			sum := sha256.Sum256(r.raw)
 			if mf.Config.Digest.Algorithm != "sha256" || mf.Config.Digest.Hex != hex.EncodeToString(sum[:]) {
-				return nil, fmt.Errorf("manifest %s names config %s, not the one cached", r.digest, mf.Config.Digest)
+				return fetchLayer{}, fmt.Errorf("manifest %s names config %s, not the one cached", r.digest, mf.Config.Digest)
 			}
 			if len(mf.Layers) != len(r.config.RootFS.DiffIDs) {
-				return nil, fmt.Errorf("manifest %s has %d layers, its config %d", r.digest, len(mf.Layers), len(r.config.RootFS.DiffIDs))
+				return fetchLayer{}, fmt.Errorf("manifest %s has %d layers, its config %d", r.digest, len(mf.Layers), len(r.config.RootFS.DiffIDs))
 			}
 			m = mf
 		}
-		return r.remote.LayerByDigest(m.Layers[i].Digest)
+		desc := m.Layers[i]
+		if desc.Size < 0 {
+			return fetchLayer{}, fmt.Errorf("manifest %s gives layer blob %s %d bytes", r.digest, desc.Digest, desc.Size)
+		}
+		blob := r.ref.Context().Digest(desc.Digest.String())
+		return fetchLayer{source: blob.Name(), fetch: func(ctx context.Context) (v1.Layer, error) {
+			l, err := remote.Layer(blob, c.remoteOpts(ctx)...)
+			if err != nil {
+				return nil, err
+			}
+			return declaredSizeLayer{Layer: l, digest: desc.Digest, size: desc.Size}, nil
+		}}, nil
 	}
 }
+
+// declaredSizeLayer is a layer whose blob is read only up to the size its
+// manifest declares. remote.Layer fetches a blob by digest alone with no
+// size, and checks the digest only at its end, so a registry could otherwise
+// send one without end, endless empty gzip members for example, and keep its
+// Start pulling until the job's deadline. remote.Image's layers do check the
+// declared size, but an image keeps the context it was made with, so each
+// shared pull, running in its own context, would fetch the manifest again.
+type declaredSizeLayer struct {
+	v1.Layer
+	digest v1.Hash
+	size   int64
+}
+
+func (l declaredSizeLayer) Compressed() (io.ReadCloser, error) {
+	rc, err := l.Layer.Compressed()
+	if err != nil {
+		return nil, err
+	}
+	return &declaredSizeReader{rc: rc, digest: l.digest, size: l.size}, nil
+}
+
+// declaredSizeReader reads a blob of the given size, failing one that runs
+// past it or ends short of it.
+type declaredSizeReader struct {
+	rc     io.ReadCloser
+	digest v1.Hash
+	size   int64
+	n      int64
+}
+
+func (r *declaredSizeReader) Read(p []byte) (int, error) {
+	// One byte more than the size is read, to see a blob that runs past
+	// it.
+	if left := r.size - r.n + 1; int64(len(p)) > left {
+		p = p[:left]
+	}
+	n, err := r.rc.Read(p)
+	r.n += int64(n)
+	switch {
+	case r.n > r.size:
+		return 0, fmt.Errorf("layer blob %s runs past the %d bytes its manifest declares", r.digest, r.size)
+	case errors.Is(err, io.EOF) && r.n < r.size:
+		return n, r.short(nil)
+	case err != nil && r.n < r.size && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
+		// go-containerregistry reports a blob that ends short as a
+		// digest mismatch.
+		return n, r.short(err)
+	}
+	return n, err
+}
+
+func (r *declaredSizeReader) short(err error) error {
+	msg := fmt.Sprintf("layer blob %s ends after %d bytes, short of the %d its manifest declares", r.digest, r.n, r.size)
+	if err == nil {
+		return errors.New(msg)
+	}
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
+func (r *declaredSizeReader) Close() error { return r.rc.Close() }
 
 // record writes the image's config and tag that the cache lacks. Acquire
 // calls it only once every layer is linked, so pruning, which deletes configs
