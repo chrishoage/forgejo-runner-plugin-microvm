@@ -581,7 +581,7 @@ func TestLayerLookupFailureStartsNothing(t *testing.T) {
 		layers := []v1.Layer{a, b}
 		err := c.pull(t.Context(), []v1.Hash{diffID(t, a), diffID(t, b)}, func(i int) (fetchLayer, error) {
 			return fetchLayer{source: fmt.Sprint(i), fetch: func(context.Context) (v1.Layer, error) { return layers[i], nil }}, nil
-		})
+		}, false)
 		if !errors.Is(err, syscall.ELOOP) {
 			t.Errorf("pull: %v, want ELOOP", err)
 		}
