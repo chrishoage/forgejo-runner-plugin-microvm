@@ -27,7 +27,7 @@ type krun struct {
 	setLogLevel          func(level uint32) int32
 	createCtx            func() int32
 	setVMConfig          func(ctx uint32, cpus uint8, memMiB uint32) int32
-	setRoot              func(ctx uint32, path string) int32
+	addVirtiofs3         func(ctx uint32, tag, path string, shmSize uint64, readOnly bool) int32
 	addDisk              func(ctx uint32, blockID, path string, readOnly bool) int32
 	disableImplicitVsock func(ctx uint32) int32
 	addVsock             func(ctx uint32, tsiFeatures uint32) int32
@@ -58,7 +58,7 @@ func load(dir string) (krun, error) {
 		"krun_set_log_level":          &k.setLogLevel,
 		"krun_create_ctx":             &k.createCtx,
 		"krun_set_vm_config":          &k.setVMConfig,
-		"krun_set_root":               &k.setRoot,
+		"krun_add_virtiofs3":          &k.addVirtiofs3,
 		"krun_add_disk":               &k.addDisk,
 		"krun_disable_implicit_vsock": &k.disableImplicitVsock,
 		"krun_add_vsock":              &k.addVsock,

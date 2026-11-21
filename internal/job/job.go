@@ -110,6 +110,7 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, lo
 		MemoryMib:   v.GetMemoryMib(),
 		RootDir:     v.GetRootDir(),
 		ScratchDisk: v.GetScratchDisk(),
+		LayerDir:    v.GetLayerDir(),
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),

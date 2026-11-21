@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -62,16 +63,23 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = locks.Close() }()
-	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left.
+	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left,
+	// beyond the stale files in <state>/bin/.
 	if err := joblaunch.SetSubreaper(); err != nil {
 		return err
 	}
-	jobBinary, err := writeJobBinary(ctx, filepath.Join(dirs.State, "bin"))
+	bin := filepath.Join(dirs.State, "bin")
+	jobBinary, err := writeJobBinary(ctx, bin)
 	if err != nil {
 		return err
 	}
-	agent, err := payload.Agent()
+	agent, err := writeAgent(bin)
 	if err != nil {
+		return err
+	}
+	// The locks prove no other plugin uses bin/, so every other file there
+	// is a stale hash or a crashed write's temp file.
+	if err := pruneDir(bin, jobBinary, agent); err != nil {
 		return err
 	}
 	libDir, err := libDirFromEnv(os.Getenv)
@@ -100,7 +108,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	defer closeLis()
 	log.Info("serving", "listen", dirs.Listen, "state", dirs.State, "cache", dirs.Cache, "runtime", dirs.Runtime,
-		"job_binary", jobBinary, "lib_dir", libDir, "mkfs_ext4", mkfs)
+		"job_binary", jobBinary, "agent", agent, "lib_dir", libDir, "mkfs_ext4", mkfs)
 	err = Serve(ctx, lis, srv)
 	// Every job's VM ends with the plugin.
 	return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
@@ -149,9 +157,8 @@ func writeJobBinary(ctx context.Context, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(bin)
-	path := filepath.Join(dir, "runner-microvm-job-"+hex.EncodeToString(sum[:])[:12])
-	if err := writeFileAtomic(dir, path, bin); err != nil {
+	path := hashedPath(dir, "runner-microvm-job", bin)
+	if err := writeFileAtomic(dir, path, bin, 0o700); err != nil {
 		return "", fmt.Errorf("write the job binary: %w", err)
 	}
 	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -164,9 +171,49 @@ func writeJobBinary(ctx context.Context, dir string) (string, error) {
 	return path, nil
 }
 
-// writeFileAtomic writes path in dir so that a crash leaves either the old
-// file or the whole new one.
-func writeFileAtomic(dir, path string, data []byte) error {
+// writeAgent writes the embedded agent to
+// <dir>/runner-microvm-agent-<first 12 hex of its sha256>, always afresh, the
+// same way as the job binary. Each VM's boot root holds a hard link to it, so
+// it is written once per plugin, not once per VM.
+func writeAgent(dir string) (string, error) {
+	agent, err := payload.Agent()
+	if err != nil {
+		return "", err
+	}
+	path := hashedPath(dir, "runner-microvm-agent", agent)
+	// Executable by the guest's root, which runs it from the boot root.
+	if err := writeFileAtomic(dir, path, agent, 0o755); err != nil {
+		return "", fmt.Errorf("write the agent: %w", err)
+	}
+	return path, nil
+}
+
+// hashedPath is <dir>/<name>-<first 12 hex of data's sha256>: the content
+// hash makes upgrades clean.
+func hashedPath(dir, name string, data []byte) string {
+	sum := sha256.Sum256(data)
+	return filepath.Join(dir, name+"-"+hex.EncodeToString(sum[:])[:12])
+}
+
+// pruneDir deletes everything in dir but the files keep names.
+func pruneDir(dir string, keep ...string) error {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range es {
+		p := filepath.Join(dir, e.Name())
+		if !slices.Contains(keep, p) {
+			errs = append(errs, os.RemoveAll(p))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// writeFileAtomic writes path in dir with mode perm so that a crash leaves
+// either the old file or the whole new one.
+func writeFileAtomic(dir, path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return err
@@ -174,7 +221,7 @@ func writeFileAtomic(dir, path string, data []byte) error {
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	_, err = tmp.Write(data)
 	if err == nil {
-		err = tmp.Chmod(0o700)
+		err = tmp.Chmod(perm)
 	}
 	if err == nil {
 		err = tmp.Sync()

@@ -34,6 +34,16 @@ func Main(args []string) int {
 		log.Error("the agent takes no arguments", "args", args)
 		return 2
 	}
+	cfg, err := readBootConfig(BootConfigPath)
+	if err != nil {
+		log.Error("boot", "err", err)
+		return 1
+	}
+	if err := boot(kernel{}, cfg); err != nil {
+		log.Error("boot", "err", err)
+		return 1
+	}
+	log.Info("booted", "layers", len(cfg.GetLayers()))
 	lis, err := listenVsock(Port)
 	if err != nil {
 		log.Error("listen", "err", err)

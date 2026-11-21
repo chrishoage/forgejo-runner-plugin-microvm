@@ -1,10 +1,11 @@
 # Architecture
 
-How `runner-microvm` is put together: its processes, what flows between them, where code goes and which imports are forbidden, what it leaves on disk, how it fails and how each part is tested. Each decision carries its reason. The terms are the glossary's (`GLOSSARY.md`). The three decisions that are hardest to reverse also have an ADR:
+How `runner-microvm` is put together: its processes, what flows between them, where code goes and which imports are forbidden, what it leaves on disk, how it fails and how each part is tested. Each decision carries its reason. The terms are the glossary's (`GLOSSARY.md`). The decisions that are hardest to reverse also have an ADR:
 
 - [ADR 0002](adr/0002-job-process-with-vm-child.md): a job process per job, with libkrun in a VM child.
 - [ADR 0003](adr/0003-plugin-talks-to-agent-directly.md): the plugin talks to the agent directly.
 - [ADR 0004](adr/0004-libkrun-via-purego.md): libkrun is bound with purego.
+- [ADR 0005](adr/0005-image-layers-are-erofs-files-on-one-virtiofs-share.md): image layers are EROFS files shared over one virtiofs share.
 
 When the code and this document disagree, the same PR fixes one or the other.
 
@@ -134,10 +135,10 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 
 ## Extracting the job binary and agent
 
-- **The plugin writes the job binary to `<state>/bin/runner-microvm-job-<first 12 hex of its sha256>`.** The state directory is less often `noexec` than `/run`. The content hash makes upgrades clean: stale hashes are deleted at startup, once the plugin holds every directory lock.
-- **It always rewrites the job binary at startup, even when a file of that name exists:** a temp file in `<state>/bin/`, fsync, rename, then fsync of `<state>/bin/`. A file is never trusted by its name: a power loss after a rename without those fsyncs can leave an empty file under the right name, and `version` would then fail with a misleading error.
+- **The plugin writes the job binary to `<state>/bin/runner-microvm-job-<first 12 hex of its sha256>`, and the agent to `<state>/bin/runner-microvm-agent-<first 12 hex of its sha256>`.** The state directory is less often `noexec` than `/run`. The content hash makes upgrades clean: once both are written, every other file in `<state>/bin/` (stale hashes, a crashed write's temp files) is deleted, since the plugin holds every directory lock.
+- **It always rewrites both at startup, even when a file of that name exists:** a temp file in `<state>/bin/`, fsync, rename, then fsync of `<state>/bin/`. A file is never trusted by its name: a power loss after a rename without those fsyncs can leave an empty file under the right name, and `version` would then fail with a misleading error.
 - **At startup the plugin runs the extracted job binary once, with `version`.** If that fails, startup stops with an error naming the directory and its config key. There is no fallback: a `memfd` exec can be blocked by sysctl hardening, and it is more code.
-- Where the agent is written for the VM's root is #6's.
+- **The agent is written once per plugin, and each VM's boot root holds a hard link to it, not a copy** (The boot root, below). The state directory is one filesystem, so the link always works.
 
 ### The embedded payload
 
@@ -147,6 +148,24 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 - **`just build` always builds the job binary and the agent first, with `-trimpath -buildvcs=false`,** so the plugin binary is reproducible under Nix.
 - **The built payload is not committed.**
 
+## The boot root and the guest's root
+
+[ADR 0005](adr/0005-image-layers-are-erofs-files-on-one-virtiofs-share.md) records why the guest's root is built this way.
+
+- **Each VM boots from its own small boot root, `<state>/jobs/<id>/<n>/root/`, which libkrun shares read-only as the VM's root** (`krun_add_virtiofs3` with the root tag `/dev/root`). It holds empty `proc`, `sys` and `dev` mount points, so libkrun's init can mount them and images without them boot (GST-2). It also holds the agent, as a hard link, and the agent's boot config. It is the bottom layer of the guest's root, so the agent and its config stay visible in the job's root.
+- **The boot config is a file in the boot root, `/.runner-microvm-boot`: the agent protocol's `BootConfig` message, as binary protobuf, mode 0600.** The agent is at `/.runner-microvm-agent`. Both names and the encoding are provisional picks, marked `SHORTCUT(#6)`, for #6 to settle with the rest of the agent's startup. The file holds the image's environment, which may carry values.
+- **The VM gets two read-only virtiofs shares: its boot root as its root, and its layer link directory, under the tag `layers`** (provisional, `SHORTCUT(#6)`). Read-only is enforced on the host by libkrun's flag, so the guest can't write a layer even after remounting the share read-write (IMG-9). Each VM can read only its own image's layers, because its share is its own link directory (IMG-8). The layers take one share, not one device each: libkrun allows 3 mounts plus disks per VM on x86_64, which rules out a block device per layer, and flattening the image would lose sharing between images.
+- **The agent builds the root at boot,** in `/dev/.runner-microvm/`, because devtmpfs is the one writable place before the root exists:
+  1. It mounts the scratch disk (ext4).
+  2. It mounts the layer share read-only, at the boot config's `layer_dir`.
+  3. It mounts each layer file as a file-backed EROFS (`source=` the file, no loop device). This needs `EROFS_FS_BACKED_BY_FILE`, which libkrunfw 5.6.4 has.
+  4. It builds an overlay with `fsopen` and one `lowerdir+` per layer, top layer first, with the boot root (the VM's `/` at boot) at the bottom. `upperdir` and `workdir` go on the scratch disk. Overlay's stacking limit, 500, covers GST-3's 120 layers, and the image cache refuses an image of more than 499. `lowerdir+` needs kernel 6.8 or later; libkrunfw 5.6.4 is 6.12. Unlike `mount(2)`'s option string, it has no page-size limit on the layer list.
+  5. It makes its mounts in the new root: `proc`, `sysfs`, `cgroup2`, `devtmpfs`, `devpts` (`gid=5,mode=620,ptmxmode=666`) and a `tmpfs` on `/dev/shm`, all `nosuid`, most `nodev,noexec` (#1's prototype set, provisional for #6), creating each mount point in the overlay if the image lacks it.
+  6. It moves the overlay to `/` and chroots. The boot root, the shares and the layers stay mounted beneath it, out of the job's reach.
+
+  The layer list and the scratch device come from the boot config fields the agent protocol already defines. The agent's new mount API calls are raw system calls, because the agent may not import `golang.org/x/sys`.
+- **A failure to build the root ends the agent, so the VM exits during boot,** and Start fails with its console tail (VM-8).
+
 ## On-disk layout
 
 `<state>`, `<cache>` and `<runtime>` are the plugin's directories, and `<listen>` is the directory holding its listen socket; each has its own config key (CFG-9). `<id>` is the job's environment id, and `<n>` is the VM's index in the job spec's VMs: 0 for the job's container, then each service in order. Today the job's container is the only VM, because the plugin protocol passes no VM options for services. A VM's directories are named by its index, never by its name, because the workflow chooses a service's name (One job process runs all of a job's VMs, above). Each VM gets its own directories, so a job's VMs never share a file by accident; the job process log is the job's, so it stays at the job's level.
@@ -154,10 +173,10 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 | Path | Holds |
 |---|---|
 | `<state>/lock`, `<cache>/lock`, `<runtime>/lock`, `<listen>/lock` | the directory locks |
-| `<state>/bin/` | the job binary |
+| `<state>/bin/` | the job binary and the agent |
 | `<state>/jobs/<id>/` | the job process log |
 | `<state>/jobs/<id>/<n>/` | the VM's scratch disk, VM log and console |
-| `<state>/jobs/<id>/<n>/root/` | today, the VM's root: its image flattened into a read-write directory, with the agent written into it, until #5's layer link directory replaces it |
+| `<state>/jobs/<id>/<n>/root/` | the VM's boot root: `proc`, `sys` and `dev` mount points, a hard link to the agent, and the boot config |
 | `<state>/logs/<id>/` | kept logs (whether to keep them is #11's) |
 | `<runtime>/<id>/<n>/` | the VM's agent socket |
 | `<listen>/` | the listen socket |
@@ -205,7 +224,7 @@ The plugin process pulls and converts images, each layer pull in its own gorouti
 - **The lock files are opened close-on-exec,** so no job process inherits one and keeps a directory locked after the plugin dies.
 - **At startup, after taking every directory lock, the plugin deletes `<state>/jobs/*`, `<state>/bin/*` (stale job binaries and leftover temp files; it then writes the job binary afresh), `<runtime>/*` except `<runtime>/lock` and, when `<listen>` is `<runtime>`, the listen socket, `<cache>/jobs/*` and `<cache>/tmp/*`, without inspecting them.** The locks prove no other plugin uses these directories. The liveness pipe and Pdeathsig mean no old job process outlives the plugin. So everything per-job is leftover. Cleanup never deletes a `lock` file: deleting a held lock file would let a second plugin lock a new file at the same path.
 - **A VM child of the previous plugin still dying at that moment can at worst fail one job.** It was reparented to init, not to the new plugin, so the new plugin can't reap it. The disk `flock` is non-blocking (STO-7), so while the dying VM child still holds it, the first job on that disk fails Start with `disk <source> is in use by another process`. A read-write disk is never shared, so nothing is corrupted.
-- #11 implements startup cleanup; #5 handles the cache side.
+- #11 implements startup cleanup; #5 handles the cache side. Today the plugin deletes only the stale files in `<state>/bin/` at startup.
 - **A job's failure costs that job, never the plugin.** Everything that can hang (the job process, its VMs, the agent) is in a child process or behind a call with a context, and ending the job process ends all of it.
 
 ## Logging
@@ -298,7 +317,7 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
 
 - **The `.proto` files define every field #1's behaviours need, not only #4's.** Later epics only add fields.
 - **The job spec is job-wide fields plus a list of VMs; the VM child spec is one VM.** The job process starts one VM child for each entry, and status events name the VM by its index (One job process runs all of a job's VMs, above). Today the list always holds one VM, the job's container, because the plugin protocol passes no VM options for services.
-- **The agent's boot config is part of the agent protocol's package,** because the agent may import only its own generated package. The plugin builds it, the job spec and the VM child spec carry it unopened, and how it reaches the agent inside the VM is #6's.
+- **The agent's boot config is part of the agent protocol's package,** because the agent may import only its own generated package. The plugin builds it, the job spec and the VM child spec carry it unopened, and it reaches the agent as a file in the VM's boot root (The boot root, above), a provisional pick for #6.
 
 ## Tests
 
@@ -307,7 +326,7 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
   - the agent's Exec and Copy are tested on the host in temporary directories;
   - the job network is tested in-process, with a test peer on the frame socket;
   - the plugin is tested with fakes for its two seams.
-- **Tests that boot VMs carry `//go:build kvm`, and `just test-kvm` runs them** with `-tags kvm,payload`, in the `kvm` CI job. That covers the VM child, the job process, the agent's boot mounts, and the protocol test.
+- **Tests that boot VMs carry `//go:build kvm`, and `just test-kvm` runs them** with `-tags kvm,payload`, in the `kvm` CI job. That covers the VM child, the job process, the agent's boot mounts, and the protocol test. The tests of the guest's root (`cmd/layers_test.go`: 120 layers, an image without `/proc`, `/sys` or `/dev`, the read-only layer share, a fresh root for each job) build their images in Go on top of `e2e/image` and serve them from go-containerregistry's in-process registry in the test process.
 - **The protocol test (`cmd/protocol_test.go`) runs `e2e/workflows/echo.yml` through forgejo-runner's own job executor (`act/runner`), with no Forgejo and no runner daemon.** `act/runner` is the code inside forgejo-runner that calls plugins, through `act/plugin`, so the plugin sees exactly the runner's calls at the pinned version, and a runner bump re-runs the real sequence with nothing recorded to redo.
   - Its config maps the workflow's `microvm` label to `runner-microvm://<the image in e2e/image>`, and the `runner-microvm` plugin to the listen socket of the plugin under test.
   - Its work directory is a fresh, empty git repository, so `act/runner`'s git lookups don't fail noisily.

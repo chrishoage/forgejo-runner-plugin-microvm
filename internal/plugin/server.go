@@ -43,8 +43,9 @@ type Config struct {
 	JobBinary string
 	// MkfsExt4 is the host's mkfs.ext4, which formats each scratch disk.
 	MkfsExt4 string
-	// Agent is the agent binary, written into each VM's root.
-	Agent []byte
+	// Agent is the agent's path in <state>/bin/, which each VM's boot
+	// root hard-links.
+	Agent string
 	// Cache and Launcher are the plugin's two seams.
 	Cache    ImageCache
 	Launcher JobLauncher

@@ -91,6 +91,9 @@ _Avoid_: download
 **Layer link directory**:
 A VM's view of the image cache, holding exactly the layers of that VM's image.
 
+**Boot root**:
+The small read-only directory a VM boots from, holding the agent and its boot config, and the bottom layer of the VM's root filesystem.
+
 **Mount**:
 A host directory shared into a VM. Today only the label's profile names mounts, for the job's container, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 

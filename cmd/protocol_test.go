@@ -33,9 +33,21 @@ const (
 // real plugin through the runner's plugin client, and the plugin boots the
 // image in e2e/image as a real VM. No Forgejo, no runner daemon.
 func TestEchoWorkflow(t *testing.T) {
-	image := readImage(t)
-	sock := startPlugin(t, buildPlugin(t))
+	log, err := runWorkflow(t, workflow, map[string]string{"microvm": readImage(t)})
+	if err != nil {
+		t.Fatalf("the workflow failed: %v", err)
+	}
+	if !strings.Contains(log, stepOut) {
+		t.Fatalf("the job log does not show the step's output %q", stepOut)
+	}
+}
 
+// runWorkflow runs the workflow file through act/runner against a fresh
+// plugin, with each label in images mapped to its image, and returns the
+// job log and the executor's error.
+func runWorkflow(t *testing.T, workflow string, images map[string]string) (string, error) {
+	t.Helper()
+	sock := startPlugin(t, buildPlugin(t))
 	planner, err := model.NewWorkflowPlanner(workflow, true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +56,10 @@ func TestEchoWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	platforms := map[string]string{}
+	for label, image := range images {
+		platforms[label] = "runner-microvm://" + image
+	}
 	level := logrus.InfoLevel
 	r, err := runner.New(&runner.Config{
 		JobLoggerLevel:       &level,
@@ -51,7 +67,7 @@ func TestEchoWorkflow(t *testing.T) {
 		EventName:            "workflow_dispatch",
 		LogOutput:            true,
 		ContainerMaxLifetime: 10 * time.Minute,
-		Platforms:            map[string]string{"microvm": "runner-microvm://" + image},
+		Platforms:            platforms,
 		Plugins:              map[string]runner.PluginConfig{"runner-microvm": {Address: "unix://" + sock}},
 	})
 	if err != nil {
@@ -63,12 +79,7 @@ func TestEchoWorkflow(t *testing.T) {
 	ctx = runner.WithJobLoggerFactory(ctx, jobLogger{log})
 	err = r.NewPlanExecutor(plan)(ctx)
 	t.Logf("job log:\n%s", log.String())
-	if err != nil {
-		t.Fatalf("the workflow failed: %v", err)
-	}
-	if !strings.Contains(log.String(), stepOut) {
-		t.Fatalf("the job log does not show the step's output %q", stepOut)
-	}
+	return log.String(), err
 }
 
 // readImage returns the image e2e/image pins.

@@ -29,6 +29,15 @@ const AgentPath = "/.runner-microvm-agent"
 // agentEnv is the agent's whole environment.
 var agentEnv = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 
+// rootTag is the virtiofs tag libkrun boots from (KRUN_FS_ROOT_TAG).
+const rootTag = "/dev/root"
+
+// layerTag is the virtiofs tag of the VM's layer link directory.
+//
+// SHORTCUT(#6): provisional pick, and the same tag is what the agent mounts
+// (internal/agent's layerTag); the protocol test fails if they part.
+const layerTag = "layers"
+
 // scratchBlockID is the scratch disk's block id in libkrun.
 const scratchBlockID = "scratch"
 
@@ -86,9 +95,12 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		call func() int32
 	}{
 		{"krun_set_vm_config", func() int32 { return lib.setVMConfig(ctx, vcpus, spec.GetMemoryMib()) }},
-		// SHORTCUT(#5): the root is a read-write host directory holding
-		// the flattened image.
-		{"krun_set_root", func() int32 { return lib.setRoot(ctx, spec.GetRootDir()) }},
+		// The boot root is the VM's root, and the layer link directory
+		// a share of its own, both read-only on the host's side, so the
+		// guest can't write them even after remounting them read-write
+		// (IMG-9). No DAX window.
+		{"krun_add_virtiofs3 " + rootTag, func() int32 { return lib.addVirtiofs3(ctx, rootTag, spec.GetRootDir(), 0, true) }},
+		{"krun_add_virtiofs3 " + layerTag, func() int32 { return lib.addVirtiofs3(ctx, layerTag, spec.GetLayerDir(), 0, true) }},
 		// The scratch disk is the first block device, /dev/vda,
 		// read-write (VM-5).
 		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
