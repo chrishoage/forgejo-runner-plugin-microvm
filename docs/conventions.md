@@ -115,6 +115,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 ### What it updates
 
 - **Go modules, with `go mod tidy` after every update and import paths rewritten on major bumps** (`gomodTidy`, `gomodUpdateImportPaths`). The protocol test imports the runner from `code.forgejo.org/forgejo/runner/v13/...`, and a major bump changes that path.
+- **Modules pinned to pseudo-versions, go-erofs and continuity (for `tarconv`, which is unreleased), are updated as digests,** to the latest commit of their default branch, in the same automerging Go group. A pseudo-version has no release to wait for, and CI is the gate.
 - **Not the `go` directive in `go.mod`:** a Go minor bump is a deliberate change of `go.mod` and the flake together, and patch releases arrive through `flake.lock` (see `docs/development.md`).
 - **GitHub Actions, pinned to commit digests with the version as a comment** (`helpers:pinGitHubActionDigests`). A digest can't be moved under us the way a tag can.
 - **Flake inputs, through weekly `flake.lock` maintenance only,** never as a PR per input. This is how Go patch releases and tool updates arrive. The `nix` manager is off by default in Renovate, so the config enables it.

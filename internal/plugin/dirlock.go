@@ -37,7 +37,9 @@ func lockDirs(dirs Dirs) (*dirLocks, error) {
 		path string
 		mode os.FileMode
 	}
-	order := []dir{{dirs.State, 0o700}, {dirs.Cache, 0o755}, {dirs.Runtime, 0o755}}
+	// The cache holds image configs, whose environment may carry values,
+	// so it is the plugin user's alone, like the state directory.
+	order := []dir{{dirs.State, 0o700}, {dirs.Cache, 0o700}, {dirs.Runtime, 0o755}}
 	if listen := filepath.Dir(dirs.Listen); filepath.Clean(listen) != filepath.Clean(dirs.Runtime) {
 		order = append(order, dir{listen, 0o755})
 	}

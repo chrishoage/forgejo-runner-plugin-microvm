@@ -80,6 +80,14 @@ A fresh disk for each VM that holds every change the job makes to that VM's root
 The plugin's on-host store of image layers, shared by all jobs.
 _Avoid_: image store, registry
 
+**Layer**:
+One image layer as the image cache stores it, converted once and shared by every image and VM that uses it.
+_Avoid_: blob
+
+**Pull**:
+Fetching an image's missing layers and converting them into the image cache.
+_Avoid_: download
+
 **Layer link directory**:
 A VM's view of the image cache, holding exactly the layers of that VM's image.
 

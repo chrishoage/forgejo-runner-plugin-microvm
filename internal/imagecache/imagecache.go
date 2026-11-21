@@ -37,7 +37,9 @@ type Image struct {
 	// order.
 	Env []string
 	// LinkDir is the VM's layer link directory, <cache>/jobs/<id>/<n>/:
-	// hard links to exactly the layers of the VM's image. Empty until #5:
-	// the image is in Request.Root instead.
+	// hard links to exactly the layers of the VM's image.
 	LinkDir string
+	// Layers are the image's layers as file names in LinkDir, bottom layer
+	// first: 0.erofs, 1.erofs, and so on.
+	Layers []string
 }
