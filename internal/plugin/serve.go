@@ -50,21 +50,13 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	for _, d := range []struct {
-		path string
-		mode os.FileMode
-	}{
-		{dirs.State, 0o700},
-		{dirs.Cache, 0o755},
-		{dirs.Runtime, 0o755},
-		{filepath.Dir(dirs.Listen), 0o755},
-	} {
-		if err := os.MkdirAll(d.path, d.mode); err != nil {
-			return err
-		}
+	// The locks come before anything else writes to the directories, and
+	// are held until the plugin exits.
+	locks, err := lockDirs(dirs)
+	if err != nil {
+		return err
 	}
-	// SHORTCUT(#5): no directory locks, so nothing stops a second plugin
-	// from using the same directories.
+	defer func() { _ = locks.Close() }()
 	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left.
 	if err := joblaunch.SetSubreaper(); err != nil {
 		return err
