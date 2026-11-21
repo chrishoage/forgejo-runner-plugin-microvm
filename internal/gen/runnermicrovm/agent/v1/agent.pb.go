@@ -559,13 +559,17 @@ func (*FlushResponse) Descriptor() ([]byte, []int) {
 // BootConfig is everything the agent needs to prepare the guest before it
 // serves: its root filesystem, mounts, disks, network and the image's
 // defaults for Exec. The plugin builds it; the job spec and the VM child spec
-// carry it unopened. How it reaches the agent inside the VM is #6's.
+// carry it unopened. It reaches the agent as a file in the VM's boot root,
+// binary protobuf, which is a provisional pick for #6 to settle.
 type BootConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The guest directory where the VM's layer link directory is shared.
+	// The guest directory where the agent mounts the VM's layer link
+	// directory's share.
 	LayerDir string `protobuf:"bytes,1,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
-	// The image's layers as file names in layer_dir, bottom layer first. They
-	// are mounted read-only under a writable layer on the scratch disk (GST-2).
+	// The image's layers as file names in layer_dir, bottom layer first. Each
+	// is mounted as a file-backed EROFS, and the agent stacks them in one
+	// overlay over the boot root, with a writable layer on the scratch disk
+	// (GST-2).
 	Layers []string `protobuf:"bytes,2,rep,name=layers,proto3" json:"layers,omitempty"`
 	// The scratch disk's guest block device, for example /dev/vda.
 	ScratchDevice string `protobuf:"bytes,3,opt,name=scratch_device,json=scratchDevice,proto3" json:"scratch_device,omitempty"`

@@ -75,7 +75,9 @@ message VM {
   // dials, in <runtime>/<id>/<n>/. The port is #6's.
   string agent_socket = 8;
   uint32 agent_port = 9;
-  // The host directory libkrun shares as the VM's root. What it holds is #6's.
+  // The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares
+  // read-only as the VM's root: empty proc, sys and dev mount points, the
+  // agent and its boot config. It is the bottom layer of the guest's root.
   string root_dir = 10;
   // The VM's layer link directory, <cache>/jobs/<id>/<n>/, shared into the
   // VM read-only (IMG-8, IMG-9).

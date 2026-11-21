@@ -16,18 +16,30 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
+	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
 )
 
-// agentPath is where Start writes the agent in the VM's root.
+// The boot root's files, by their names in it, and where the agent mounts
+// the layer share.
 //
-// SHORTCUT(#6): provisional pick, and the same path is what the VM child
-// starts (internal/job/internal/vm's AgentPath); the protocol test fails if
-// they part.
-const agentPath = ".runner-microvm-agent"
+// SHORTCUT(#6): provisional picks. The agent's path is the one the VM child
+// starts (internal/job/internal/vm's AgentPath), the boot config's name the
+// one the agent reads (internal/agent's BootConfigPath), and the layer
+// directory is under the agent's staging directory; the protocol test fails
+// if they part.
+const (
+	agentPath      = ".runner-microvm-agent"
+	bootConfigPath = ".runner-microvm-boot"
+	guestLayerDir  = "/dev/.runner-microvm/layers"
+	// The scratch disk is the VM's first block device.
+	scratchDevice = "/dev/vda"
+)
 
 // The job's container's fixed shape and its agent's vsock port.
 //
@@ -107,13 +119,19 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 			return nil, err
 		}
 	}
-	root := filepath.Join(vmState, "root")
-	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, Root: root})
+	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image})
 	if err != nil {
 		return nil, fmt.Errorf("image %s: %w", j.image, err)
 	}
-	if err := writeAgent(root, s.cfg.Agent); err != nil {
-		return nil, fmt.Errorf("write the agent: %w", err)
+	boot := &agentv1.BootConfig{
+		LayerDir:      guestLayerDir,
+		Layers:        img.Layers,
+		ScratchDevice: scratchDevice,
+		Image:         &agentv1.Image{Env: img.Env},
+	}
+	root := filepath.Join(vmState, "root")
+	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
+		return nil, fmt.Errorf("boot root %s: %w", root, err)
 	}
 	vm := &jobv1.VM{
 		Name:             vmName,
@@ -126,6 +144,8 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		AgentSocket:      filepath.Join(vmRuntime, "agent.sock"),
 		AgentPort:        agentPort,
 		RootDir:          root,
+		LayerDir:         img.LinkDir,
+		Boot:             boot,
 	}
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
 		Job:       j.id,
@@ -233,24 +253,30 @@ func envMap(env []string) map[string]string {
 	return m
 }
 
-// writeAgent writes the agent into the VM's root. The root holds the
-// image, which is untrusted, so the write goes through an os.Root: a symlink
-// the image put at the agent's path can't redirect it.
-func writeAgent(root string, agent []byte) error {
-	r, err := os.OpenRoot(root)
+// makeBootRoot makes the VM's boot root at root: empty proc, sys and dev
+// mount points, so images without them boot (GST-2), a hard link to the
+// agent, not a copy, and the agent's boot config as a file. libkrun shares it
+// read-only as the VM's root, and it is the bottom layer of the guest's root,
+// so the agent and its config stay visible in the job's root.
+func makeBootRoot(root, agent string, boot *agentv1.BootConfig) error {
+	b, err := proto.Marshal(boot)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = r.Close() }()
-	if err := r.RemoveAll(agentPath); err != nil {
+	if err := os.Mkdir(root, 0o755); err != nil { //nolint:gosec // G301: the guest's /, which every guest user must traverse
 		return err
 	}
-	f, err := r.OpenFile(agentPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-	if err != nil {
+	for _, d := range []string{"proc", "sys", "dev"} {
+		if err := os.Mkdir(filepath.Join(root, d), 0o755); err != nil { //nolint:gosec // G301: guest mount points
+			return err
+		}
+	}
+	if err := os.Link(agent, filepath.Join(root, agentPath)); err != nil {
 		return err
 	}
-	_, err = f.Write(agent)
-	return errors.Join(err, f.Close())
+	// The boot config holds the image's environment, which may carry
+	// values.
+	return os.WriteFile(filepath.Join(root, bootConfigPath), b, 0o600)
 }
 
 // removeTree deletes dir and everything in it, also directories the image or

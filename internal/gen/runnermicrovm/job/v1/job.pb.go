@@ -170,7 +170,9 @@ type VM struct {
 	// dials, in <runtime>/<id>/<n>/. The port is #6's.
 	AgentSocket string `protobuf:"bytes,8,opt,name=agent_socket,json=agentSocket,proto3" json:"agent_socket,omitempty"`
 	AgentPort   uint32 `protobuf:"varint,9,opt,name=agent_port,json=agentPort,proto3" json:"agent_port,omitempty"`
-	// The host directory libkrun shares as the VM's root. What it holds is #6's.
+	// The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares
+	// read-only as the VM's root: empty proc, sys and dev mount points, the
+	// agent and its boot config. It is the bottom layer of the guest's root.
 	RootDir string `protobuf:"bytes,10,opt,name=root_dir,json=rootDir,proto3" json:"root_dir,omitempty"`
 	// The VM's layer link directory, <cache>/jobs/<id>/<n>/, shared into the
 	// VM read-only (IMG-8, IMG-9).

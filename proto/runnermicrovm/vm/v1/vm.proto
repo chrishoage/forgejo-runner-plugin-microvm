@@ -27,7 +27,9 @@ message Spec {
   // The VM's shape (VM-4).
   uint32 cpus = 2;
   uint32 memory_mib = 3;
-  // The host directory libkrun shares as the VM's root. What it holds is #6's.
+  // The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares
+  // read-only as the VM's root: empty proc, sys and dev mount points, the
+  // agent and its boot config. It is the bottom layer of the guest's root.
   string root_dir = 4;
   // The scratch disk's file, already created by the job process (VM-5).
   string scratch_disk = 5;

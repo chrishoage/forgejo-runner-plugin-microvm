@@ -38,11 +38,19 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 	if err := os.MkdirAll(dirs.Runtime, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The agent, as startup writes it, on the state directory's filesystem.
+	agent := filepath.Join(dirs.State, "bin", "runner-microvm-agent-0")
+	if err := os.MkdirAll(filepath.Dir(agent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agent, []byte("agent binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	srv, err := NewServer(discardLog(), Config{
 		Dirs:         dirs,
 		JobBinary:    "/fake/runner-microvm-job",
 		MkfsExt4:     "/fake/mkfs.ext4",
-		Agent:        []byte("agent binary"),
+		Agent:        agent,
 		Cache:        cache,
 		Launcher:     launcher,
 		ReadyTimeout: 5 * time.Second,
@@ -65,8 +73,6 @@ type fakeCache struct {
 	// block makes Acquire wait for its context, after closing entered.
 	block   bool
 	entered chan struct{}
-	// agentSymlink puts a symlink at the agent's path in the root.
-	agentSymlink string
 
 	mu       sync.Mutex
 	acquired []imagecache.Request
@@ -85,15 +91,12 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 	if c.err != nil {
 		return imagecache.Image{}, c.err
 	}
-	if err := os.MkdirAll(filepath.Join(req.Root, "bin"), 0o755); err != nil {
-		return imagecache.Image{}, err
-	}
-	if c.agentSymlink != "" {
-		if err := os.Symlink(c.agentSymlink, filepath.Join(req.Root, agentPath)); err != nil {
-			return imagecache.Image{}, err
-		}
-	}
-	return imagecache.Image{Digest: "sha256:0", Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}}, nil
+	return imagecache.Image{
+		Digest:  "sha256:0",
+		Env:     []string{"PATH=/usr/bin:/bin", "A=b=c"},
+		LinkDir: "/cache/jobs/" + req.Job + "/0",
+		Layers:  []string{"0.erofs", "1.erofs"},
+	}, nil
 }
 
 func (c *fakeCache) Release(_ context.Context, job string) error {

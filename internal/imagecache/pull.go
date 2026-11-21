@@ -18,7 +18,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"golang.org/x/sys/unix"
 )
@@ -164,15 +163,6 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	linkDir, names, err := c.link(req, diffIDs)
 	if err != nil {
 		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
-	}
-	if req.Root != "" {
-		fs := mutate.Extract(img)
-		err = extract(fs, req.Root)
-		// Closing the reader ends Extract's goroutine, also when extract
-		// stopped early.
-		if err = errors.Join(err, fs.Close()); err != nil {
-			return Image{}, errors.Join(fmt.Errorf("pull %s: %w", req.Ref, err), os.RemoveAll(linkDir))
-		}
 	}
 	c.log.Info("acquired", "job", req.Job, "vm", req.VM, "image", req.Ref, "digest", digest.String(), "layers", len(names))
 	return Image{Digest: digest.String(), Env: config.Config.Env, LinkDir: linkDir, Layers: names}, nil

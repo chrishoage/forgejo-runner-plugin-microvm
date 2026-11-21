@@ -27,7 +27,9 @@ func fakeKrun(calls *[]string, fail string) krun {
 		setLogLevel: func(l uint32) int32 { return rec("set_log_level", l) },
 		createCtx:   func() int32 { _ = rec("create_ctx"); return 7 },
 		setVMConfig: func(c uint32, n uint8, m uint32) int32 { return rec("set_vm_config", c, n, m) },
-		setRoot:     func(c uint32, p string) int32 { return rec("set_root", c, p) },
+		addVirtiofs3: func(c uint32, tag, p string, shm uint64, ro bool) int32 {
+			return rec("add_virtiofs3", c, tag, p, shm, ro)
+		},
 		addDisk: func(c uint32, id, p string, ro bool) int32 {
 			return rec("add_disk", c, id, p, ro)
 		},
@@ -46,7 +48,7 @@ func fakeKrun(calls *[]string, fail string) krun {
 
 func testSpec() *vmv1.Spec {
 	return &vmv1.Spec{
-		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", Console: "/state/jobs/j/0/console",
+		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", LayerDir: "/cache/jobs/j/0", Console: "/state/jobs/j/0/console",
 		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024, ScratchDisk: "/state/jobs/j/0/scratch.ext4",
 	}
 }
@@ -61,7 +63,8 @@ func TestBootConfiguresTheVM(t *testing.T) {
 		"set_log_level 2",
 		"create_ctx",
 		"set_vm_config 7 2 1024",
-		"set_root 7 /state/jobs/j/0/root",
+		"add_virtiofs3 7 /dev/root /state/jobs/j/0/root 0 true",
+		"add_virtiofs3 7 layers /cache/jobs/j/0 0 true",
 		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
 		"disable_implicit_vsock 7",
 		"add_vsock 7 0",
@@ -79,9 +82,9 @@ func TestBootConfiguresTheVM(t *testing.T) {
 func TestBootStopsAtAFailedCall(t *testing.T) {
 	t.Parallel()
 	var calls []string
-	err := boot(fakeKrun(&calls, "set_root"), testSpec())
-	if err == nil || !strings.Contains(err.Error(), "krun_set_root") || !errors.Is(err, syscall.EINVAL) {
-		t.Fatalf("err = %v, want krun_set_root's EINVAL", err)
+	err := boot(fakeKrun(&calls, "add_virtiofs3"), testSpec())
+	if err == nil || !strings.Contains(err.Error(), "krun_add_virtiofs3 /dev/root") || !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("err = %v, want the root share's EINVAL", err)
 	}
 	if slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "start_enter") }) {
 		t.Error("the VM was started after a failed call")

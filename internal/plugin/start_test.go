@@ -16,8 +16,10 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
+	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 )
 
 // create creates a job on c and returns its environment id.
@@ -66,11 +68,35 @@ func TestStartBootsTheVM(t *testing.T) {
 	}
 	state := filepath.Join(srv.cfg.Dirs.State, "jobs", id)
 	root := filepath.Join(state, "0", "root")
-	if req := cache.acquired[0]; req.Job != id || req.VM != 0 || req.Ref != testImage || req.Root != root {
+	if req := cache.acquired[0]; req.Job != id || req.VM != 0 || req.Ref != testImage {
 		t.Errorf("Acquire(%+v)", req)
 	}
-	if b, err := os.ReadFile(filepath.Join(root, ".runner-microvm-agent")); err != nil || string(b) != "agent binary" {
-		t.Errorf("agent in the root: %q, %v", b, err)
+	// The boot root: mount points, a hard link to the agent, and the boot
+	// config.
+	if got := names(t, root); strings.Join(got, " ") != ".runner-microvm-agent .runner-microvm-boot dev proc sys" {
+		t.Errorf("the boot root holds %v", got)
+	}
+	agent, err := os.Stat(srv.cfg.Agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked, err := os.Stat(filepath.Join(root, ".runner-microvm-agent")); err != nil || !os.SameFile(agent, linked) {
+		t.Errorf("the boot root's agent is not a hard link to %s: %v", srv.cfg.Agent, err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".runner-microvm-boot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot := &agentv1.BootConfig{}
+	if err := proto.Unmarshal(b, boot); err != nil {
+		t.Fatal(err)
+	}
+	wantBoot := &agentv1.BootConfig{
+		LayerDir: "/dev/.runner-microvm/layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
+		Image: &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+	}
+	if !proto.Equal(boot, wantBoot) {
+		t.Errorf("boot config = %v, want %v", boot, wantBoot)
 	}
 	spec := launcher.specs[0]
 	if spec.GetJob() != id || spec.GetJobBinary() != "/fake/runner-microvm-job" || spec.GetMkfsExt4() != "/fake/mkfs.ext4" ||
@@ -81,7 +107,8 @@ func TestStartBootsTheVM(t *testing.T) {
 	if vm.GetRootDir() != root || vm.GetAgentPort() != 1024 || vm.GetCpus() != 2 || vm.GetMemoryMib() != 1024 ||
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
 		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
-		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 {
+		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 ||
+		vm.GetLayerDir() != "/cache/jobs/"+id+"/0" || !proto.Equal(vm.GetBoot(), wantBoot) {
 		t.Errorf("VM = %v", vm)
 	}
 	if launcher.logs[0] != filepath.Join(state, "job.log") {
@@ -107,6 +134,20 @@ func TestStartBootsTheVM(t *testing.T) {
 	if len(cache.released) != 1 || cache.released[0] != id {
 		t.Errorf("released %v", cache.released)
 	}
+}
+
+// names lists dir.
+func names(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	return out
 }
 
 func TestStartUnknownJob(t *testing.T) {
@@ -198,22 +239,6 @@ func TestCancelledStartKillsTheJobProcess(t *testing.T) {
 	}
 	if launcher.kills != 1 {
 		t.Errorf("%d kills, want 1", launcher.kills)
-	}
-}
-
-// The image can't redirect the agent's write through a symlink.
-func TestStartWritesTheAgentInsideTheRoot(t *testing.T) {
-	t.Parallel()
-	outside := filepath.Join(t.TempDir(), "outside")
-	if err := os.WriteFile(outside, []byte("host file"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{agentSymlink: outside}, &fakeLauncher{})))
-	if _, err := start(testContext(t), c, create(t, c)); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(outside); string(b) != "host file" {
-		t.Errorf("the host file was overwritten: %q", b)
 	}
 }
 
@@ -327,5 +352,23 @@ func TestLibDirFromEnv(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("%s=%q: %q, %v; want %q", LibDirEnv, env, got, err, want)
 		}
+	}
+}
+
+// Startup deletes everything in <state>/bin/ but the job binary and agent it
+// just wrote: stale hashes and a crashed write's temp files.
+func TestPruneDirKeepsOnlyTheCurrentFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, n := range []string{"runner-microvm-job-new", "runner-microvm-agent-new", "runner-microvm-agent-old", ".tmp-123"} {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pruneDir(dir, filepath.Join(dir, "runner-microvm-job-new"), filepath.Join(dir, "runner-microvm-agent-new")); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(names(t, dir), " "); got != "runner-microvm-agent-new runner-microvm-job-new" {
+		t.Errorf("bin/ holds %s", got)
 	}
 }

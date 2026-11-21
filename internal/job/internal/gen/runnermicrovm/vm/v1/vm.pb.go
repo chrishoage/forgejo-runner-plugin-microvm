@@ -47,7 +47,9 @@ type Spec struct {
 	// The VM's shape (VM-4).
 	Cpus      uint32 `protobuf:"varint,2,opt,name=cpus,proto3" json:"cpus,omitempty"`
 	MemoryMib uint32 `protobuf:"varint,3,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"`
-	// The host directory libkrun shares as the VM's root. What it holds is #6's.
+	// The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares
+	// read-only as the VM's root: empty proc, sys and dev mount points, the
+	// agent and its boot config. It is the bottom layer of the guest's root.
 	RootDir string `protobuf:"bytes,4,opt,name=root_dir,json=rootDir,proto3" json:"root_dir,omitempty"`
 	// The scratch disk's file, already created by the job process (VM-5).
 	ScratchDisk string `protobuf:"bytes,5,opt,name=scratch_disk,json=scratchDisk,proto3" json:"scratch_disk,omitempty"`
