@@ -64,9 +64,28 @@ type Cache struct {
 	rename func(oldpath, newpath string) error
 	// limits bounds each layer's tar stream; tests lower them.
 	limits tarLimits
+	// maxSize is the cap on the allocated size of the cached layers,
+	// image configs and tags, in bytes. No layer converts past it.
+	maxSize int64
 
-	// tagMu makes record's compare and write of a tag file one step.
-	tagMu sync.Mutex
+	// storeMu is held by linking, eviction and pruning, and by record's
+	// writes of configs and tags, so an eviction can't delete a layer
+	// between an Acquire's conversion and its link, or a config while a
+	// Start writes it. It also makes record's compare and write of a tag
+	// file one step.
+	storeMu sync.Mutex
+	// pinned counts, for each layer, the Acquires in flight that need it;
+	// eviction skips a layer pinned. Held by storeMu.
+	pinned map[v1.Hash]int
+	// pinnedConfigs counts, for each image config by manifest digest,
+	// the Acquires in flight that looked it up; eviction and pruning skip
+	// a config pinned. Held by storeMu.
+	pinnedConfigs map[v1.Hash]int
+	// jobConfigs lists, for each job, the image config of each of its
+	// VMs' Acquires that succeeded, by manifest digest: a config is in use
+	// from its Acquire to its job's Release, like the layers its VM links,
+	// and eviction and pruning skip it. Held by storeMu.
+	jobConfigs map[string][]v1.Hash
 
 	// lookups shares one lookup per reference, and layers one pull per
 	// layer, between the Acquires that need it at once (IMG-12).
@@ -79,6 +98,16 @@ type Cache struct {
 	mu sync.Mutex
 	// acquiring counts each job's Acquires in flight, for Release.
 	acquiring map[string]*inFlight
+	// afterLookup, when set, is called as Acquire's lookup returns: a
+	// test's view of it. Nil outside tests.
+	afterLookup func()
+	// beforeLink, when set, is called as Acquire starts linking: a test's
+	// view of it. Nil outside tests.
+	beforeLink func()
+	// pruneScanned, when set, is called once pruning has read the
+	// configs, before it takes storeMu: a test's view of it. Nil outside
+	// tests.
+	pruneScanned func()
 	// releaseWaits, when set, is called when Release starts waiting for
 	// an Acquire: a test's view of it. Nil outside tests.
 	releaseWaits func()
@@ -89,6 +118,16 @@ type inFlight struct {
 	n int
 	// idle is closed when n drops to zero.
 	idle chan struct{}
+}
+
+// Option configures the image cache that New returns.
+type Option func(*Cache)
+
+// WithMaxSize sets the image cache's size cap: the allocated size, in bytes,
+// that eviction keeps its layers, image configs and tags under, and that no
+// layer's conversion may pass. New requires it.
+func WithMaxSize(bytes int64) Option {
+	return func(c *Cache) { c.maxSize = bytes }
 }
 
 // New returns the image cache in dir, the plugin's cache directory, which
@@ -104,7 +143,7 @@ type inFlight struct {
 // <cache>/jobs/: temp files and link directories of jobs that no longer
 // exist stay until someone deletes them, and the layers they link stay with
 // them.
-func New(log *slog.Logger, dir string, opts ...remote.Option) (*Cache, error) {
+func New(log *slog.Logger, dir string, opts ...Option) (*Cache, error) {
 	for _, d := range []string{layersDir, imagesDir, tagsDir, tmpDir, jobsDir} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, fmt.Errorf("the image cache directory %s: %w", dir, err)
@@ -113,18 +152,28 @@ func New(log *slog.Logger, dir string, opts ...remote.Option) (*Cache, error) {
 	c := &Cache{
 		log: log,
 		dir: dir,
-		opts: append([]remote.Option{
+		opts: []remote.Option{
 			remote.WithAuthFromKeychain(authn.DefaultKeychain),
 			remote.WithPlatform(v1.Platform{OS: "linux", Architecture: runtime.GOARCH}),
-		}, opts...),
+		},
 		pulls:      make(chan struct{}, maxPulls),
 		convert:    convert,
 		decompress: decompress,
 		rename:     renameNoReplace,
 		limits:     tarLimits{entries: maxEntries, metadata: maxMetadata},
 		acquiring:  map[string]*inFlight{},
+		pinned:     map[v1.Hash]int{},
+
+		pinnedConfigs: map[v1.Hash]int{},
+		jobConfigs:    map[string][]v1.Hash{},
 	}
-	c.lookups = newSharedCalls[*resolved](&c.running, nil)
+	for _, o := range opts {
+		o(c)
+	}
+	if c.maxSize <= 0 {
+		return nil, fmt.Errorf("the image cache %s: no size cap", dir)
+	}
+	c.lookups = newSharedCalls(&c.running, func(r *resolved) { r.unpin() })
 	c.layers = newSharedCalls(&c.running, (*pulledLayer).discard)
 	return c, nil
 }
@@ -148,9 +197,15 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	if err != nil {
 		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
 	}
+	// From the lookup to the link, the image's layers are pinned, so an
+	// eviction can't delete one this Acquire found cached or stored.
 	r, err := c.lookup(ctx, ref, req.ForcePull)
 	if err != nil {
 		return Image{}, fmt.Errorf("pull %s: %w", req.Ref, err)
+	}
+	defer r.unpin()
+	if c.afterLookup != nil {
+		c.afterLookup()
 	}
 	diffIDs := r.config.RootFS.DiffIDs
 	if len(diffIDs) > maxLayers {
@@ -164,6 +219,9 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	if err := c.pull(ctx, diffIDs, c.layerSource(ctx, r)); err != nil {
 		return Image{}, fmt.Errorf("pull %s: %w", req.Ref, err)
 	}
+	if c.beforeLink != nil {
+		c.beforeLink()
+	}
 	linkDir, names, err := c.link(req, diffIDs)
 	if err != nil {
 		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
@@ -172,13 +230,20 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 		_ = os.RemoveAll(linkDir)
 		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
 	}
+	// Nothing fails from here on: the job holds the config until its
+	// Release, and this Acquire's own pin, released as it returns, covers
+	// it until then.
+	c.useConfig(req.Job, r.digest)
 	c.log.Info("acquired", "job", req.Job, "vm", req.VM, "image", req.Ref, "digest", r.digest.String(), "layers", len(names))
 	return Image{Digest: r.digest.String(), Env: r.config.Config.Env, LinkDir: linkDir, Layers: names}, nil
 }
 
 // lookup is resolve, shared by the Acquires that look ref up at once. The
 // lookup runs in a context of its own, and ends when the last of them leaves
-// it. Each Acquire gets a copy, so the copies' later changes are their own.
+// it. Each Acquire gets a copy, so the copies' later changes are their own,
+// with a pin of its own on the image's layers, which it unpins. The shared
+// result's pin, taken as resolve read the cache, is held until every Acquire
+// has its own, so no eviction finds the layers unpinned in between.
 func (c *Cache) lookup(ctx context.Context, ref name.Reference, force bool) (*resolved, error) {
 	// A force_pull lookup never hands its caller a cached tag, so it
 	// shares only with other force_pull lookups.
@@ -194,6 +259,7 @@ func (c *Cache) lookup(ctx context.Context, ref name.Reference, force bool) (*re
 		return nil, err
 	}
 	rr := *r
+	rr.unpin = c.pin(r.digest, r.config.RootFS.DiffIDs)
 	return &rr, nil
 }
 
@@ -409,8 +475,11 @@ func renameNoReplace(oldpath, newpath string) error {
 // link makes the VM's layer link directory: one hard link per layer of its
 // image, named by its position, bottom layer first, since an image may hold
 // one layer twice. Each layer's mtime is set as it is linked, so its last use
-// is recorded. On error the directory is deleted.
+// is recorded. On error the directory is deleted. It holds c.storeMu, so no
+// eviction runs while it links.
 func (c *Cache) link(req Request, diffIDs []v1.Hash) (dir string, names []string, err error) {
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
 	jobDir := c.path(jobsDir, req.Job)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {
 		return "", nil, err
@@ -443,6 +512,14 @@ func (c *Cache) link(req Request, diffIDs []v1.Hash) (dir string, names []string
 	return vmDir, names, nil
 }
 
+// useConfig marks the image config cached under digest as in use by job,
+// until job's Release.
+func (c *Cache) useConfig(job string, digest v1.Hash) {
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	c.jobConfigs[job] = append(c.jobConfigs[job], digest)
+}
+
 // begin counts an Acquire of job in flight until the returned func is called.
 func (c *Cache) begin(job string) func() {
 	c.mu.Lock()
@@ -465,7 +542,10 @@ func (c *Cache) begin(job string) func() {
 
 // Release deletes the layer link directories of every VM of job, once every
 // Acquire of job in flight has returned, so a cancelled Acquire can't finish
-// a link directory after it is deleted. A job with none is not an error.
+// a link directory after it is deleted, and ends job's use of its image
+// configs. A job with none is not an error. Then it evicts: its layers and
+// configs may no longer be in use. An eviction's errors
+// are logged, not returned: they are no job's.
 func (c *Cache) Release(ctx context.Context, job string) error {
 	if err := checkName(job); err != nil {
 		return err
@@ -487,7 +567,12 @@ func (c *Cache) Release(ctx context.Context, job string) error {
 			return ctx.Err()
 		}
 	}
-	return os.RemoveAll(c.path(jobsDir, job))
+	err := os.RemoveAll(c.path(jobsDir, job))
+	c.storeMu.Lock()
+	delete(c.jobConfigs, job)
+	c.storeMu.Unlock()
+	c.evict()
+	return err
 }
 
 // checkName refuses a job id that is not one path component.

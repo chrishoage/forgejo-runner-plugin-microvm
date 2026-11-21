@@ -89,8 +89,12 @@ Fetching an image's missing layers and converting them into the image cache.
 _Avoid_: download
 
 **Tag file**:
-The image cache's record of what a tag, or a multi-platform index's digest, resolved to: the normalised reference and the platform image's manifest digest. It is kept until the image's config is pruned; `force_pull` looks the tag up again.
+The image cache's record of what a tag, or a multi-platform index's digest, resolved to: the normalised reference and the platform image's manifest digest. It is kept until the image's config is evicted or pruned; `force_pull` looks the tag up again.
 _Avoid_: tag cache, index
+
+**Eviction**:
+Deleting least-recently-used layers no VM is using, and image configs no job is using, until the image cache fits its cap. A config is in use from its Start's lookup to its job's Release, like its layers.
+_Avoid_: GC, prune. Pruning means cleaning up configs and tags only.
 
 **Layer link directory**:
 A VM's view of the image cache, holding exactly the layers of that VM's image.

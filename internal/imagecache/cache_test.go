@@ -37,7 +37,7 @@ import (
 
 func newCache(t *testing.T) *Cache {
 	t.Helper()
-	c, err := New(slog.New(slog.DiscardHandler), t.TempDir())
+	c, err := New(slog.New(slog.DiscardHandler), t.TempDir(), WithMaxSize(1<<40))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,6 +436,7 @@ func TestBadLayerFailsOnlyItsAcquire(t *testing.T) {
 			t.Errorf("%s: err = %v, want it to name the cache directory", name, err)
 		}
 		emptyCache(t, c)
+		unpinned(ctx, t, c)
 	}
 	c.convert, c.decompress = convert, decompress
 	if _, err := c.Acquire(ctx, Request{Job: "job-1", Ref: push(t, image(t, good))}); err != nil {
@@ -707,5 +708,65 @@ func TestDecompress(t *testing.T) {
 	c := newCache(t)
 	if _, err := c.Acquire(testCtx(t), Request{Job: "job-1", Ref: push(t, image(t, l))}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// zeros is an endless stream of zero bytes.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// A layer whose uncompressed stream, or EROFS file, is over the cache's cap
+// fails only its Acquire, naming the cap, and leaves nothing in the cache:
+// the cache could never keep it, and a gzip bomb or an endless stream would
+// otherwise fill the cache's filesystem.
+func TestLayerOverTheCapIsRefused(t *testing.T) {
+	t.Parallel()
+	layer := sizedLayer(t, "big")
+	rc, err := layer.Uncompressed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarSize, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		cap int64
+		set func(c *Cache)
+	}{
+		// One byte over the cap.
+		"uncompressed": {cap: tarSize - 1},
+		// A tar's end, then zeros without end: the stream is drained
+		// past the archive to hash all of it.
+		"endless stream": {cap: 1 << 20, set: func(c *Cache) {
+			c.decompress = func(io.Reader) (io.ReadCloser, error) { return io.NopCloser(zeros{}), nil }
+		}},
+		// A conversion that writes twice the cap.
+		"EROFS file": {cap: 1 << 20, set: func(c *Cache) {
+			c.convert = func(out io.Writer, r io.Reader, _ string) error {
+				for range 2 << 20 >> 12 {
+					if _, err := out.Write(make([]byte, 4096)); err != nil {
+						return err
+					}
+				}
+				_, err := io.Copy(io.Discard, r)
+				return err
+			}
+		}},
+	} {
+		c, _ := cappedCache(t, tt.cap)
+		if tt.set != nil {
+			tt.set(c)
+		}
+		_, err := c.Acquire(testCtx(t), Request{Job: "job-1", Ref: push(t, image(t, layer))})
+		want := fmt.Sprintf("is over %d bytes, the image cache's size cap", tt.cap)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want one with %q", name, err, want)
+		}
+		emptyCache(t, c)
 	}
 }
