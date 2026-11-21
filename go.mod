@@ -6,9 +6,12 @@ go 1.26.0
 
 require (
 	code.forgejo.org/forgejo/runner/v13 v13.2.2
+	github.com/containerd/continuity v0.5.1-0.20261030182838-ff9c0aa2d518
 	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/ebitengine/purego v0.11.3
+	github.com/erofs/go-erofs v0.3.3-0.20261119203624-a77c5a9afdb2
 	github.com/google/go-containerregistry v0.22.1
+	github.com/klauspost/compress v1.20.2
 	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.85.0
@@ -47,7 +50,6 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/linuxkit/virtsock v0.0.0-20220523201153-1a23e78aa7a2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

@@ -9,7 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -195,9 +195,26 @@ func layer(t *testing.T, entries ...entry) v1.Layer {
 // push serves img from an in-process registry and returns its reference.
 func push(t *testing.T, img v1.Image) string {
 	t.Helper()
-	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
+	return pushTo(t, serveRegistry(t, nil), img)
+}
+
+// serveRegistry serves an in-process registry, through wrap when it is set,
+// and returns its host.
+func serveRegistry(t *testing.T, wrap func(http.Handler) http.Handler) string {
+	t.Helper()
+	h := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	if wrap != nil {
+		h = wrap(h)
+	}
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	ref := strings.TrimPrefix(srv.URL, "http://") + "/test/image:1"
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// pushTo pushes img to the registry at host and returns its reference.
+func pushTo(t *testing.T, host string, img v1.Image) string {
+	t.Helper()
+	ref := host + "/test/image:1"
 	r, err := name.ParseReference(ref)
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +242,7 @@ func TestAcquireFlattensLayers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	root := filepath.Join(t.TempDir(), "root")
-	c := New(slog.New(slog.DiscardHandler))
+	c := newCache(t)
 	got, err := c.Acquire(ctx, Request{Job: "job-1", Ref: ref, Root: root})
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +280,7 @@ func TestAcquireFlattensLayers(t *testing.T) {
 
 func TestAcquireFails(t *testing.T) {
 	t.Parallel()
-	c := New(slog.New(slog.DiscardHandler))
+	c := newCache(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
@@ -274,7 +291,7 @@ func TestAcquireFails(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := c.Acquire(ctx, Request{Ref: ref, Root: filepath.Join(t.TempDir(), "root")}); err == nil {
+			if _, err := c.Acquire(ctx, Request{Job: "job-1", Ref: ref, Root: filepath.Join(t.TempDir(), "root")}); err == nil {
 				t.Fatal("Acquire succeeded")
 			}
 		})
@@ -282,7 +299,7 @@ func TestAcquireFails(t *testing.T) {
 	// A cancelled pull returns.
 	cctx, ccancel := context.WithCancel(ctx)
 	ccancel()
-	if _, err := c.Acquire(cctx, Request{Ref: strings.TrimPrefix(srv.URL, "http://") + "/x:1", Root: filepath.Join(t.TempDir(), "root")}); err == nil {
+	if _, err := c.Acquire(cctx, Request{Job: "job-2", Ref: strings.TrimPrefix(srv.URL, "http://") + "/x:1", Root: filepath.Join(t.TempDir(), "root")}); err == nil {
 		t.Fatal("a cancelled Acquire succeeded")
 	}
 }

@@ -78,13 +78,17 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	cache, err := imagecache.New(log, dirs.Cache)
+	if err != nil {
+		return err
+	}
 	srv, err := NewServer(log, Config{
 		Dirs:      dirs,
 		LibDir:    libDir,
 		JobBinary: jobBinary,
 		MkfsExt4:  mkfs,
 		Agent:     agent,
-		Cache:     imagecache.New(log),
+		Cache:     cache,
 		Launcher:  joblaunch.New(log),
 	})
 	if err != nil {
