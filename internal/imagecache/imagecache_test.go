@@ -28,13 +28,20 @@ func push(t *testing.T, img v1.Image) string {
 // and returns its host.
 func serveRegistry(t *testing.T, wrap func(http.Handler) http.Handler) string {
 	t.Helper()
+	return strings.TrimPrefix(newRegistry(t, wrap).URL, "http://")
+}
+
+// newRegistry serves an in-process registry, through wrap when it is set.
+// It is closed when the test ends, if not before.
+func newRegistry(t *testing.T, wrap func(http.Handler) http.Handler) *httptest.Server {
+	t.Helper()
 	h := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
 	if wrap != nil {
 		h = wrap(h)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://")
+	return srv
 }
 
 // pushTo pushes img to the registry at host and returns its reference.
