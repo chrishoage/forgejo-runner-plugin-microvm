@@ -331,11 +331,11 @@ func TestFailedLinkDeletesLinkDir(t *testing.T) {
 	}
 }
 
-// emptyCache fails t unless the cache's layers/ and tmp/ are empty and no
-// job has a link directory.
+// emptyCache fails t unless the cache holds no layer, image config, tag or
+// temp file, and no job has a link directory.
 func emptyCache(t *testing.T, c *Cache) {
 	t.Helper()
-	for _, d := range []string{layersDir, tmpDir, jobsDir} {
+	for _, d := range []string{layersDir, imagesDir, tagsDir, tmpDir, jobsDir} {
 		if got := names(t, c.path(d)); len(got) != 0 {
 			t.Errorf("%s/ holds %v", d, got)
 		}
@@ -578,7 +578,8 @@ func TestLayerLookupFailureStartsNothing(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		err := c.pull(ctx, cancel, []v1.Layer{a, b}, []v1.Hash{diffID(t, a), diffID(t, b)})
+		layers := []v1.Layer{a, b}
+		err := c.pull(ctx, cancel, []v1.Hash{diffID(t, a), diffID(t, b)}, func(i int) (v1.Layer, error) { return layers[i], nil })
 		if !errors.Is(err, syscall.ELOOP) {
 			t.Errorf("pull: %v, want ELOOP", err)
 		}

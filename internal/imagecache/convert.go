@@ -159,8 +159,13 @@ func (c *Cache) layerPath(diffID v1.Hash) string {
 // checkDiffID refuses a diffID that can't name a cached layer. It comes from
 // the image config, which is untrusted, and it becomes a file name.
 func checkDiffID(h v1.Hash) error {
-	if h.Algorithm != "sha256" || len(h.Hex) != 64 || strings.Trim(h.Hex, "0123456789abcdef") != "" {
+	if !isSHA256Hex(h) {
 		return fmt.Errorf("layer diffID %q: not a sha256 digest", h)
 	}
 	return nil
+}
+
+// isSHA256Hex reports whether h is a sha256 digest in lowercase hex.
+func isSHA256Hex(h v1.Hash) bool {
+	return h.Algorithm == "sha256" && len(h.Hex) == 64 && strings.Trim(h.Hex, "0123456789abcdef") == ""
 }
