@@ -89,7 +89,7 @@ Fetching an image's missing layers and converting them into the image cache.
 _Avoid_: download
 
 **Tag file**:
-The image cache's record of what a tag resolved to: the normalised reference and the image's manifest digest. It is kept until the image's config is pruned; `force_pull` looks the tag up again.
+The image cache's record of what a tag, or a multi-platform index's digest, resolved to: the normalised reference and the platform image's manifest digest. It is kept until the image's config is pruned; `force_pull` looks the tag up again.
 _Avoid_: tag cache, index
 
 **Layer link directory**:

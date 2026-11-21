@@ -218,6 +218,10 @@ func TestMissingLayerIsFetchedByDigest(t *testing.T) {
 		if r := reqs.take(); len(r) != 0 {
 			t.Errorf("by digest %v: the cached image made registry requests: %v", byDigest, r)
 		}
+		// An image's own digest needs no tag file.
+		if got := names(t, c.path(tagsDir)); byDigest && len(got) != 0 {
+			t.Errorf("tags/ holds %v for an image's digest", got)
+		}
 
 		if err := os.Remove(c.layerPath(diffID(t, b))); err != nil {
 			t.Fatal(err)
@@ -300,7 +304,8 @@ func TestReferencesAreNormalised(t *testing.T) {
 	}
 }
 
-// A multi-platform index resolves to linux/<GOARCH> (IMG-2).
+// A multi-platform index resolves to linux/<GOARCH> (IMG-2), by tag or by
+// the index's digest, and the index's digest resolves once.
 func TestIndexResolvesToHostPlatform(t *testing.T) {
 	t.Parallel()
 	other := "arm64"
@@ -322,7 +327,7 @@ func TestIndexResolvesToHostPlatform(t *testing.T) {
 			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: runtime.GOARCH}},
 		},
 	)
-	host, _ := countingRegistry(t)
+	host, reqs := countingRegistry(t)
 	ref := host + "/test/image:1"
 	r, err := name.ParseReference(ref)
 	if err != nil {
@@ -331,12 +336,26 @@ func TestIndexResolvesToHostPlatform(t *testing.T) {
 	if err := remote.WriteIndex(r, idx); err != nil {
 		t.Fatal(err)
 	}
-	got, err := newCache(t).Acquire(testCtx(t), Request{Job: "job-1", Ref: ref})
+	idxDigest, err := idx.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Digest != imageDigest(t, want).String() || !slices.Equal(got.Env, []string{"PLATFORM=host"}) {
-		t.Errorf("digest %s, env %q; want linux/%s's %s", got.Digest, got.Env, runtime.GOARCH, imageDigest(t, want))
+	c := newCache(t)
+	ctx := testCtx(t)
+	byDigest := host + "/test/image@" + idxDigest.String()
+	for _, job := range []struct{ id, ref string }{{"job-1", ref}, {"job-2", byDigest}, {"job-3", byDigest}} {
+		reqs.take()
+		got, err := c.Acquire(ctx, Request{Job: job.id, Ref: job.ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Digest != imageDigest(t, want).String() || !slices.Equal(got.Env, []string{"PLATFORM=host"}) {
+			t.Errorf("%s: digest %s, env %q; want linux/%s's %s", job.ref, got.Digest, got.Env, runtime.GOARCH, imageDigest(t, want))
+		}
+	}
+	// The index's digest resolved once, like a tag.
+	if r := reqs.take(); len(r) != 0 {
+		t.Errorf("the index's digest, resolved before, made registry requests: %v", r)
 	}
 }
 

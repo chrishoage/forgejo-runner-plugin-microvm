@@ -22,7 +22,9 @@ import (
 )
 
 // tagFile is what <cache>/tags/<sha256 hex of the reference> holds: the
-// normalised reference and the manifest digest it resolved to.
+// normalised reference and the manifest digest it resolved to. A tag has
+// one, and so does the digest of a multi-platform index, which resolves to
+// its platform image's manifest digest.
 type tagFile struct {
 	Reference string `json:"reference"`
 	Digest    string `json:"digest"`
@@ -46,7 +48,8 @@ type resolved struct {
 	remote v1.Image
 	// cachedConfig is set when raw came from <cache>/images/.
 	cachedConfig bool
-	// tag is set when the tag file must name digest.
+	// tag is set when ref needs a tag file naming digest: a tag, or the
+	// digest of an index.
 	tag bool
 	// seenTag is ref's tag file as resolve read it, before any registry
 	// request; nil when there was none. record writes the tag file only
@@ -57,7 +60,8 @@ type resolved struct {
 
 // resolve finds ref's manifest digest and config. A tag the cache holds, with
 // its config, and a digest whose config the cache holds, need no registry
-// request; with force, a tag is looked up again (IMG-6). Each reference is
+// request; with force, a tag is looked up again (IMG-6). The digest of an
+// index, which never changes, resolves once through a tag file of its own. Each reference is
 // normalised to go-containerregistry's fully qualified name, so node:22 and
 // index.docker.io/library/node:22 are one tag (IMG-1).
 func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*resolved, error) {
@@ -84,7 +88,13 @@ func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*r
 		if herr != nil {
 			return nil, herr
 		}
-		found, err = cached(h)
+		// An index's digest names no config of its own: its tag file
+		// names its platform image's.
+		if found, err = cached(h); !found && err == nil {
+			if r.seenTag, err = c.readTagFile(ref); err == nil {
+				found, err = c.cachedTag(ref, r.seenTag, cached)
+			}
+		}
 	case name.Tag:
 		r.tag = true
 		// With force, the tag file is read only for record to compare.
@@ -109,6 +119,11 @@ func (c *Cache) resolve(ctx context.Context, ref name.Reference, force bool) (*r
 			return nil, err
 		}
 		r.remote = img
+		// A digest reference needs a tag file only when it names an
+		// index.
+		if d, ok := ref.(name.Digest); ok {
+			r.tag = d.DigestStr() != r.digest.String()
+		}
 		if found, err = cached(r.digest); err != nil {
 			return nil, err
 		}
