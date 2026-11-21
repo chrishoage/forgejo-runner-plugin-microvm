@@ -249,15 +249,9 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 			return Image{}, fmt.Errorf("pull %s: layer %d: %w", req.Ref, i, err)
 		}
 	}
-	if err := c.pull(ctx, diffIDs, c.layerSource(ctx, r)); err != nil {
-		return Image{}, fmt.Errorf("pull %s: %w", req.Ref, err)
-	}
-	if c.beforeLink != nil {
-		c.beforeLink()
-	}
-	linkDir, names, err := c.link(req, diffIDs)
+	linkDir, names, err := c.pullAndLink(ctx, req, diffIDs, c.layerSource(ctx, r))
 	if err != nil {
-		return Image{}, fmt.Errorf("image %s: %w", req.Ref, err)
+		return Image{}, err
 	}
 	if err := c.record(r); err != nil {
 		_ = os.RemoveAll(linkDir)
@@ -270,6 +264,45 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	c.log.Info("acquired", "job", req.Job, "vm", req.VM, "image", req.Ref, "digest", r.digest.String(), "layers", len(names))
 	return Image{Digest: r.digest.String(), Env: r.config.Config.Env, LinkDir: linkDir, Layers: names}, nil
 }
+
+// pullAndLink pulls the layers the cache lacks and links them. A layer
+// deleted from under the cache since pull looked (IMG-15), by something
+// other than the plugin since it is pinned, is pulled and converted again,
+// once: one retry covers a single deletion, and a loop could spin against
+// something that keeps deleting. A second miss fails, naming the layer and
+// the cache directory.
+func (c *Cache) pullAndLink(ctx context.Context, req Request, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error)) (string, []string, error) {
+	for retry := false; ; retry = true {
+		if err := c.pull(ctx, diffIDs, layer, retry); err != nil {
+			return "", nil, fmt.Errorf("pull %s: %w", req.Ref, err)
+		}
+		if c.beforeLink != nil {
+			c.beforeLink()
+		}
+		linkDir, names, err := c.link(req, diffIDs)
+		var missing *missingLayerError
+		if errors.As(err, &missing) && !retry {
+			c.log.Warn("layer deleted from the cache, converting it again", "job", req.Job, "vm", req.VM, "layer", missing.diffID.String(), "cache", c.dir)
+			continue
+		}
+		if errors.As(err, &missing) {
+			return "", nil, fmt.Errorf("image %s: layer %s was deleted from the image cache %s, converted again, and deleted again: %w", req.Ref, missing.diffID, c.dir, missing.err)
+		}
+		if err != nil {
+			return "", nil, fmt.Errorf("image %s: %w", req.Ref, err)
+		}
+		return linkDir, names, nil
+	}
+}
+
+// missingLayerError is link's error for a layer missing from <cache>/layers/.
+type missingLayerError struct {
+	diffID v1.Hash
+	err    error
+}
+
+func (e *missingLayerError) Error() string { return fmt.Sprintf("layer %s: %v", e.diffID, e.err) }
+func (e *missingLayerError) Unwrap() error { return e.err }
 
 // lookup is resolve, shared by the Acquires that look ref up at once. The
 // lookup runs in a context of its own, and ends when the last of them leaves
@@ -356,7 +389,11 @@ func (p *pulledLayer) discard() {
 //
 // layer returns how to fetch the image's layer i; pull calls it only for
 // the layers the cache lacks, all of them before any pull starts.
-func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error)) error {
+//
+// A retry, after a layer was deleted from under the cache, shares its pulls
+// only with other retries: a pull another Acquire still holds may have
+// stored the layer that was deleted, and joining it would store nothing.
+func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error), retry bool) error {
 	type pending struct {
 		diffID  v1.Hash
 		fetch   fetchLayer
@@ -394,10 +431,14 @@ func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (
 			fn := func(pctx context.Context) (*pulledLayer, error) {
 				return c.pullLayer(pctx, p.diffID, p.fetch)
 			}
-			p.p, p.release, p.err = c.layers.do(wctx, p.diffID.String(), fn)
+			key := p.diffID.String()
+			if retry {
+				key += " retry"
+			}
+			p.p, p.release, p.err = c.layers.do(wctx, key, fn)
 			if p.err != nil && wctx.Err() == nil && !fromSource(p.err, p.fetch.source) {
 				p.release()
-				p.p, p.release, p.err = c.layers.do(wctx, p.diffID.String()+" "+p.fetch.source, fn)
+				p.p, p.release, p.err = c.layers.do(wctx, key+" "+p.fetch.source, fn)
 			}
 			if p.err != nil {
 				cancel()
@@ -508,8 +549,9 @@ func renameNoReplace(oldpath, newpath string) error {
 // link makes the VM's layer link directory: one hard link per layer of its
 // image, named by its position, bottom layer first, since an image may hold
 // one layer twice. Each layer's mtime is set as it is linked, so its last use
-// is recorded. On error the directory is deleted. It holds c.storeMu, so no
-// eviction runs while it links.
+// is recorded. On error the directory is deleted; a layer missing from the
+// cache is a *missingLayerError. It holds c.storeMu, so no eviction runs
+// while it links.
 func (c *Cache) link(req Request, diffIDs []v1.Hash) (dir string, names []string, err error) {
 	c.storeMu.Lock()
 	defer c.storeMu.Unlock()
@@ -530,14 +572,17 @@ func (c *Cache) link(req Request, diffIDs []v1.Hash) (dir string, names []string
 	now := time.Now()
 	for i, d := range diffIDs {
 		src := c.layerPath(d)
-		// SHORTCUT(#45): a layer deleted from the cache since it was
-		// converted fails the Acquire instead of being converted again
-		// (IMG-15).
-		if err := os.Chtimes(src, now, now); err != nil {
+		// A layer missing here was deleted from under the cache:
+		// eviction skips pinned layers.
+		if err := os.Chtimes(src, now, now); errors.Is(err, fs.ErrNotExist) {
+			return "", nil, &missingLayerError{diffID: d, err: err}
+		} else if err != nil {
 			return "", nil, fmt.Errorf("layer %s: %w", d, err)
 		}
 		n := strconv.Itoa(i) + ".erofs"
-		if err := os.Link(src, filepath.Join(vmDir, n)); err != nil {
+		if err := os.Link(src, filepath.Join(vmDir, n)); errors.Is(err, fs.ErrNotExist) {
+			return "", nil, &missingLayerError{diffID: d, err: err}
+		} else if err != nil {
 			return "", nil, fmt.Errorf("layer %s: %w", d, err)
 		}
 		names = append(names, n)
