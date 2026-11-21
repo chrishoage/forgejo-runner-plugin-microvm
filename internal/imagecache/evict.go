@@ -3,11 +3,8 @@
 package imagecache
 
 import (
-	"bytes"
 	"cmp"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -227,8 +224,12 @@ func scanFile(p string) (scannedFile, []byte, error) {
 // prune deletes every image config with no cached layer left and not in
 // use, then every tag whose config is gone. An image with some of its
 // layers left, or whose config is in use, keeps both: its next Start
-// fetches the missing layers by digest. A config or tag file it
-// can't read is kept, and named in the error.
+// fetches the missing layers by digest.
+//
+// A config or tag file whose content a lookup refuses (parseConfig,
+// parseTagFile) is deleted too, and logged, as a lookup deletes it. One it
+// can't read is kept, and named in the error. A file in <cache>/tags/ not
+// named like a tag file is not the cache's, and is kept.
 //
 // It reads and parses the files without c.storeMu, so a Start's link and
 // record never wait on the parse of every config, which may be up to
@@ -241,6 +242,8 @@ func (c *Cache) prune() error {
 		scannedFile
 		digest  v1.Hash
 		diffIDs []v1.Hash
+		// damaged is parseConfig's error.
+		damaged error
 	}
 	es, err := os.ReadDir(c.path(imagesDir))
 	if err != nil {
@@ -260,27 +263,29 @@ func (c *Cache) prune() error {
 			errs = append(errs, err)
 			continue
 		}
-		cfg, err := v1.ParseConfigFile(bytes.NewReader(raw))
-		if err != nil {
-			errs = append(errs, &fs.PathError{Op: "parse", Path: s.path, Err: err})
-			continue
+		cf := config{scannedFile: s, digest: digest}
+		if cfg, err := parseConfig(raw); err != nil {
+			cf.damaged = err
+		} else {
+			cf.diffIDs = cfg.RootFS.DiffIDs
 		}
-		configs = append(configs, config{scannedFile: s, digest: digest, diffIDs: cfg.RootFS.DiffIDs})
+		configs = append(configs, cf)
 	}
 	if c.pruneScanned != nil {
 		c.pruneScanned()
 	}
 	c.storeMu.Lock()
 	for _, cf := range configs {
-		if c.configInUse(cf.digest) {
-			continue
-		}
-		cached, err := c.anyLayerCached(cf.diffIDs)
-		if err == nil && !cached {
-			var same bool
-			if same, err = cf.unchanged(); err == nil && same {
-				err = os.Remove(cf.path)
-				if err == nil {
+		same, err := cf.unchanged()
+		switch {
+		case err != nil || !same:
+		case cf.damaged != nil:
+			err = c.deleteDamaged(cf.path, cf.damaged)
+		case c.configInUse(cf.digest):
+		default:
+			var cached bool
+			if cached, err = c.anyLayerCached(cf.diffIDs); err == nil && !cached {
+				if err = os.Remove(cf.path); err == nil {
 					c.log.Info("pruned", "config", cf.digest.String())
 				}
 			}
@@ -295,6 +300,8 @@ func (c *Cache) prune() error {
 		scannedFile
 		tf     tagFile
 		digest v1.Hash
+		// damaged is parseTagFile's error.
+		damaged error
 	}
 	es, err = os.ReadDir(c.path(tagsDir))
 	if err != nil {
@@ -302,6 +309,9 @@ func (c *Cache) prune() error {
 	}
 	var tags []tag
 	for _, e := range es {
+		if !isSHA256Hex(v1.Hash{Algorithm: "sha256", Hex: e.Name()}) {
+			continue
+		}
 		s, b, err := scanFile(c.path(tagsDir, e.Name()))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -310,33 +320,21 @@ func (c *Cache) prune() error {
 			errs = append(errs, err)
 			continue
 		}
-		var tf tagFile
-		if err := json.Unmarshal(b, &tf); err != nil {
-			errs = append(errs, fmt.Errorf("tag file %s: %w", s.path, err))
-			continue
-		}
-		digest, err := v1.NewHash(tf.Digest)
-		if err == nil {
-			err = checkDigest(digest)
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("tag file %s: %w", s.path, err))
-			continue
-		}
-		tags = append(tags, tag{scannedFile: s, tf: tf, digest: digest})
+		t := tag{scannedFile: s}
+		t.tf, t.digest, t.damaged = parseTagFile(e.Name(), b)
+		tags = append(tags, t)
 	}
 	c.storeMu.Lock()
 	defer c.storeMu.Unlock()
 	for _, t := range tags {
-		_, err := os.Stat(c.imagePath(t.digest))
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			var same bool
-			if same, err = t.unchanged(); err == nil && same {
-				err = os.Remove(t.path)
-				if err == nil {
+		same, err := t.unchanged()
+		switch {
+		case err != nil || !same:
+		case t.damaged != nil:
+			err = c.deleteDamaged(t.path, t.damaged)
+		default:
+			if _, err = os.Stat(c.imagePath(t.digest)); errors.Is(err, fs.ErrNotExist) {
+				if err = os.Remove(t.path); err == nil {
 					c.log.Info("pruned", "tag", t.tf.Reference)
 				}
 			}
@@ -346,6 +344,17 @@ func (c *Cache) prune() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// deleteDamaged deletes the config or tag file at p, whose content
+// parseConfig or parseTagFile refused with err, and logs it. It returns
+// only a failure to delete. c.storeMu is held.
+func (c *Cache) deleteDamaged(p string, err error) error {
+	if rerr := os.Remove(p); rerr != nil {
+		return rerr
+	}
+	c.log.Warn("deleted a damaged file", "path", p, "err", err)
+	return nil
 }
 
 // anyLayerCached reports whether the cache holds any of the layers diffIDs,

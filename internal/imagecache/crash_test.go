@@ -247,6 +247,73 @@ func TestLayerDeletedTwiceFailsAcquire(t *testing.T) {
 	unpinned(ctx, t, c)
 }
 
+// Pruning deletes a config or tag file whose content a lookup refuses, so
+// the next Start fetches it again, and keeps one it can't read, logging it.
+// Every write is atomic, so neither is a crash's: something else damaged
+// it. A tag file naming a reference other than the one it is named for is
+// damaged too, even when the config it names is kept.
+func TestPruningDeletesDamagedFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	before, _ := reopen(t, dir, 1<<40)
+	ctx := testCtx(t)
+	ref := push(t, image(t, headerLayer(t, file("kept"))))
+	img := acquire(ctx, t, before, "job-1", ref)
+	release(ctx, t, before, "job-1")
+	r, err := name.ParseReference(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hex := strings.Repeat("ab", 32)
+	damaged := map[string][]byte{
+		before.path(imagesDir, hex+".json"):            []byte("{"),
+		before.path(tagsDir, strings.Repeat("cd", 32)): []byte("not json"),
+		before.path(tagsDir, strings.Repeat("ef", 32)): []byte(`{"reference":"x","digest":"md5:00"}`),
+		before.path(tagsDir, tagName("other")):         []byte(`{"reference":"` + r.Name() + `","digest":"` + img.Digest + `"}`),
+	}
+	for p, b := range damaged {
+		write(t, p, b)
+	}
+	unreadable := before.path(tagsDir, strings.Repeat("01", 32))
+	write(t, unreadable, []byte(`{"reference":"x","digest":"sha256:`+hex+`"}`))
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Root reads a mode 0 file, so there the unreadable case is left out.
+	_, err = os.ReadFile(unreadable)
+	denied := err != nil
+	if !denied {
+		t.Log("a mode 0 file is readable here: not testing a file pruning can't read")
+		if err := os.Remove(unreadable); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, log := reopen(t, dir, 1<<40)
+	for p := range damaged {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("pruning kept %s", p)
+		}
+		if !strings.Contains(log.String(), filepath.Base(p)) {
+			t.Errorf("no deletion of %s logged:\n%s", filepath.Base(p), log)
+		}
+	}
+	for _, p := range []string{before.tagPath(r), before.path(imagesDir, strings.TrimPrefix(img.Digest, "sha256:")+".json")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("pruning deleted the image's own %s: %v", p, err)
+		}
+	}
+	if !denied {
+		return
+	}
+	if _, err := os.Lstat(unreadable); err != nil {
+		t.Errorf("pruning deleted the tag file it can't read: %v", err)
+	}
+	if !strings.Contains(log.String(), "permission denied") {
+		t.Errorf("the tag file it can't read is not logged:\n%s", log)
+	}
+}
+
 // A retry after a layer was deleted from under the cache never joins a
 // pull another Acquire still holds (IMG-15). Acquires A and C share the pull
 // of layer x; A stores x and returns, while C still holds that pull, waiting
