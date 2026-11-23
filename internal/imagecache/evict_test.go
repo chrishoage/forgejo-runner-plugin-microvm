@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -679,4 +680,58 @@ func TestRunningImagesKeepTheirConfigs(t *testing.T) {
 	setCap(cache, 1)
 	cache.evict(false)
 	emptyCache(t, cache)
+}
+
+// A cap of 0 is taken literally (cache_max_gib: 0): a Start still pulls and
+// converts its layers, which no cap bounds then, and its VM uses them; once
+// its job is released the cache keeps no layer, config or tag that no VM is
+// using.
+func TestACapOfZeroKeepsNothingUnused(t *testing.T) {
+	t.Parallel()
+	a, b := sizedLayer(t, "a"), sizedLayer(t, "b")
+	refA, refB := push(t, image(t, a)), push(t, image(t, b))
+	cache, _ := cappedCache(t, 0)
+	ctx := testCtx(t)
+	running := acquire(ctx, t, cache, "job-a", refA)
+	acquire(ctx, t, cache, "job-b", refB)
+	release(ctx, t, cache, "job-b")
+	if got, want := cachedLayers(t, cache), diffIDs(t, a); !slices.Equal(got, want) {
+		t.Fatalf("layers/ holds %v, want only a, which job-a uses: %v", got, want)
+	}
+	if _, err := os.ReadFile(filepath.Join(running.LinkDir, running.Layers[0])); err != nil {
+		t.Errorf("job-a's layer: %v", err)
+	}
+	release(ctx, t, cache, "job-a")
+	for _, d := range []string{layersDir, imagesDir, tagsDir} {
+		if got := names(t, cache.path(d)); len(got) != 0 {
+			t.Errorf("with nothing in use, %s/ holds %v", d, got)
+		}
+	}
+}
+
+// New requires a cap: without WithMaxSize, or with a negative one, it fails
+// and returns no cache.
+func TestNewRequiresACap(t *testing.T) {
+	t.Parallel()
+	for name, opts := range map[string][]Option{
+		"none":     nil,
+		"negative": {WithMaxSize(-1)},
+	} {
+		c, err := New(slog.New(slog.DiscardHandler), t.TempDir(), opts...)
+		if err == nil || !strings.Contains(err.Error(), "size cap") {
+			t.Errorf("%s: New = %v, %v; want an error naming the size cap", name, c, err)
+		}
+	}
+}
+
+// A cap as large as an int64 holds bounds a layer's conversion without
+// overflowing: the layer is kept.
+func TestTheLargestCapConverts(t *testing.T) {
+	t.Parallel()
+	a := sizedLayer(t, "a")
+	cache, _ := cappedCache(t, math.MaxInt64)
+	acquire(testCtx(t), t, cache, "job-a", push(t, image(t, a)))
+	if got, want := cachedLayers(t, cache), diffIDs(t, a); !slices.Equal(got, want) {
+		t.Errorf("layers/ holds %v, want %v", got, want)
+	}
 }

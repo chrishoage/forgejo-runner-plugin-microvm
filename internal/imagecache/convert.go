@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,8 +116,14 @@ func (c *Cache) convertLayer(l v1.Layer, diffID v1.Hash) (path string, err error
 	tc := countTar(diffID, c.limits)
 	// Deferred too, for a panic: the counter's goroutine always ends.
 	defer func() { _ = tc.close() }()
-	in := &capReader{r: rc, left: c.maxSize}
-	out := &capWriter{w: f, left: c.maxSize}
+	// A cap of 0 keeps no layer that no VM uses, so it bounds no
+	// conversion: only the cache's filesystem does (spaceError).
+	limit := c.maxSize
+	if limit == 0 {
+		limit = math.MaxInt64
+	}
+	in := &capReader{r: rc, left: limit}
+	out := &capWriter{w: f, left: limit}
 	overCap := func() error {
 		if in.over || out.over {
 			return fmt.Errorf("layer %s is over %d bytes, the image cache's size cap, uncompressed or as EROFS: the cache could never keep it", diffID, c.maxSize)
@@ -173,7 +180,7 @@ func (c *capReader) Read(p []byte) (int, error) {
 		return 0, errOverCap
 	}
 	// One byte past left tells a stream at the cap from one over it.
-	if int64(len(p)) > c.left+1 {
+	if int64(len(p))-1 > c.left {
 		p = p[:c.left+1]
 	}
 	n, err := c.r.Read(p)
