@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
@@ -56,7 +57,7 @@ func startGuest(t *testing.T) *guest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vmEnd, err := n.Attach()
+	vmEnd, err := n.Attach(vmMAC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +287,243 @@ func TestGuestCantReachHostLoopback(t *testing.T) {
 	}
 }
 
+// A packet a root guest crafts itself, to 0.0.0.0, which a host dial or send
+// takes as its own loopback, or to a loopback address, reaches no listener
+// on the host's 127.0.0.1, over TCP or UDP (NET-4): the guard keeps every
+// destination that isn't outside unicast from the gateway's forwarders. The
+// same packets to the host's non-loopback address are the positive control.
+func TestGuardKeepsTheForwardersOffTheHostsLoopback(t *testing.T) {
+	t.Parallel()
+	host := hostAddr(t)
+	lo, ctl := listen(t, netip.MustParseAddr("127.0.0.1")), listen(t, host)
+	loUDP, ctlUDP := listenUDP(t, netip.MustParseAddr("127.0.0.1")), listenUDP(t, host)
+	vmEnd := attachRaw(t)
+	for _, to := range []string{"0.0.0.0", "127.0.0.1"} {
+		for _, f := range [][]byte{syn(to, lo.port()), datagram(to, loUDP.port())} {
+			if _, err := vmEnd.Write(f); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, f := range [][]byte{syn(host.String(), ctl.port()), datagram(host.String(), ctlUDP.port())} {
+		if _, err := vmEnd.Write(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, seen := range map[string]chan struct{}{"TCP": ctl.seen, "UDP": ctlUDP.seen} {
+		select {
+		case <-seen:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the %s control reached no listener", name)
+		}
+	}
+	waitLoopback(lo.seen, loUDP.seen)
+	if from := lo.accepted(); len(from) != 0 {
+		t.Errorf("the loopback TCP listener accepted from %v", from)
+	}
+	if from := loUDP.received(); len(from) != 0 {
+		t.Errorf("the loopback UDP listener received from %v", from)
+	}
+}
+
+// An echo request to the gateway gets one echo reply, the guard's, and the
+// gateway's stack never sees it: the stack would ask the VM for its MAC
+// first, and its ICMP forwarder would ping the gateway's address from the
+// host.
+func TestGatewayAnswersAnEchoItself(t *testing.T) {
+	t.Parallel()
+	vm, err := net.FileConn(attachRaw(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = vm.Close() })
+	req := frame(gwMAC, gateway.String(), header.ICMPv4ProtocolNumber, icmp(header.ICMPv4Echo))
+	ip := header.IPv4(req[header.EthernetMinimumSize:])
+	ip.SetChecksum(^ip.CalculateChecksum())
+	echo := header.ICMPv4(ip.Payload())
+	echo.SetChecksum(^checksum.Checksum(echo, 0))
+	if _, err := vm.Write(req); err != nil {
+		t.Fatal(err)
+	}
+	var got []header.ICMPv4Type
+	buf := make([]byte, 1500)
+	// One reply is written before Write returns; a second frame, from the
+	// stack, would follow within a millisecond.
+	if err := vm.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		n, err := vm.Read(buf)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		eth := header.Ethernet(buf[:n])
+		if eth.Type() != header.IPv4ProtocolNumber {
+			t.Errorf("the VM got a frame of type %#x", eth.Type())
+			continue
+		}
+		got = append(got, header.ICMPv4(header.IPv4(buf[header.EthernetMinimumSize:n]).Payload()).Type())
+	}
+	if !slices.Equal(got, []header.ICMPv4Type{header.ICMPv4EchoReply}) {
+		t.Errorf("the VM got ICMP %v, want one echo reply", got)
+	}
+}
+
+// waitLoopback waits for either loopback listener to see a packet sent before
+// the controls, which have arrived. The switch hands the VM's frames to the
+// gateway in order, but the gateway's forwarders dial each one's
+// destination in a goroutine of their own, and the listeners record what
+// they see in theirs: a control arriving doesn't mean a dial for an earlier
+// packet has finished. A dial or send to the host's loopback, had one been
+// made, finishes in well under a millisecond, so one still to come shows up
+// within loopbackWindow of the controls, which is far longer.
+func waitLoopback(tcp, udp chan struct{}) {
+	const loopbackWindow = 2 * time.Second
+	select {
+	case <-tcp:
+	case <-udp:
+	case <-time.After(loopbackWindow):
+	}
+}
+
+// attachRaw starts a job network and returns the VM's end of its frame
+// socket, for a test that writes frames itself, as a root guest can.
+func attachRaw(t *testing.T) *os.File {
+	t.Helper()
+	n, err := New(testConfig(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vmEnd, err := n.Attach(vmMAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = vmEnd.Close()
+		if err := n.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return vmEnd
+}
+
+// syn returns a frame from the VM to the gateway's MAC holding a TCP SYN to
+// dst:port, with valid checksums.
+func syn(dst string, port uint16) []byte {
+	b := frame(gwMAC, dst, header.TCPProtocolNumber, tcpSegment(port, header.TCPFlagSyn))
+	ip := header.IPv4(b[header.EthernetMinimumSize:])
+	ip.SetChecksum(^ip.CalculateChecksum())
+	seg := header.TCP(ip.Payload())
+	xsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, ip.SourceAddress(), ip.DestinationAddress(), uint16(len(seg)))
+	seg.SetChecksum(^seg.CalculateChecksum(xsum))
+	return b
+}
+
+// datagram returns a frame from the VM to the gateway's MAC holding a UDP
+// datagram to dst:port, with a valid IPv4 checksum and none for UDP, which
+// IPv4 allows.
+func datagram(dst string, port uint16) []byte {
+	payload := []byte("probe")
+	d := make([]byte, header.UDPMinimumSize+len(payload))
+	header.UDP(d).Encode(&header.UDPFields{SrcPort: 40000, DstPort: port, Length: uint16(len(d))})
+	copy(d[header.UDPMinimumSize:], payload)
+	b := frame(gwMAC, dst, header.UDPProtocolNumber, d)
+	ip := header.IPv4(b[header.EthernetMinimumSize:])
+	ip.SetChecksum(^ip.CalculateChecksum())
+	return b
+}
+
+// udpListener is a UDP socket on the host that records whom it received
+// datagrams from.
+type udpListener struct {
+	conn net.PacketConn
+	mu   sync.Mutex
+	from []netip.Addr
+	seen chan struct{}
+}
+
+func listenUDP(t *testing.T, at netip.Addr) *udpListener {
+	t.Helper()
+	conn, err := new(net.ListenConfig).ListenPacket(t.Context(), "udp4", netip.AddrPortFrom(at, 0).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &udpListener{conn: conn, seen: make(chan struct{}, 1)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1500)
+		for {
+			_, from, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			l.mu.Lock()
+			l.from = append(l.from, from.(*net.UDPAddr).AddrPort().Addr().Unmap())
+			l.mu.Unlock()
+			select {
+			case l.seen <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	t.Cleanup(func() { _ = conn.Close(); <-done })
+	return l
+}
+
+func (l *udpListener) port() uint16 { return l.conn.LocalAddr().(*net.UDPAddr).AddrPort().Port() }
+
+func (l *udpListener) received() []netip.Addr {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.from)
+}
+
+// Every TCP port on the gateway refuses, except the DNS server's 53
+// (NET-6).
+func TestGatewayRefusesEveryTCPPortButDNS(t *testing.T) {
+	t.Parallel()
+	g := startGuest(t)
+	c, err := g.dial(t, netip.AddrPortFrom(gateway, 53), 10*time.Second)
+	if err != nil {
+		t.Fatalf("port 53: %v", err)
+	}
+	_ = c.Close()
+	ports := make(chan uint16)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var open []uint16
+	for range 64 {
+		wg.Go(func() {
+			for p := range ports {
+				c, err := g.dial(t, netip.AddrPortFrom(gateway, p), 10*time.Second)
+				if err == nil {
+					_ = c.Close()
+				}
+				if !isRefused(err) {
+					mu.Lock()
+					open = append(open, p)
+					mu.Unlock()
+				}
+			}
+		})
+	}
+	for p := 1; p <= 65535; p++ {
+		if p != 53 {
+			ports <- uint16(p)
+		}
+	}
+	close(ports)
+	wg.Wait()
+	if len(open) > 0 {
+		slices.Sort(open)
+		t.Errorf("%d gateway ports did not refuse, the first %v", len(open), open[:min(len(open), 10)])
+	}
+}
+
 // isRefused reports whether err is a refused connection.
 func isRefused(err error) bool {
 	var op *net.OpError
@@ -386,7 +624,7 @@ func TestCloseStopsServing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vmEnd, err := n.Attach()
+	vmEnd, err := n.Attach(vmMAC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,8 +635,22 @@ func TestCloseStopsServing(t *testing.T) {
 	if _, err := vmEnd.Write(make([]byte, 60)); err == nil {
 		t.Error("the switch's end still takes frames after Close")
 	}
-	if f, err := n.Attach(); err == nil {
+	if f, err := n.Attach(vmMAC); err == nil {
 		_ = f.Close()
 		t.Error("Attach after Close succeeded")
+	}
+}
+
+// Only a VM of the config attaches, by its MAC.
+func TestAttachRefusesAnUnknownMAC(t *testing.T) {
+	t.Parallel()
+	n, err := New(testConfig(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	if f, err := n.Attach(gwMAC); err == nil {
+		_ = f.Close()
+		t.Error("the gateway's MAC attached")
 	}
 }

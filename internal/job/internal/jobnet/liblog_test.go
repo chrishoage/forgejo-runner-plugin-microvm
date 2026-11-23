@@ -60,7 +60,7 @@ func TestCloseLogsNoError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vmEnd, err := nw.Attach()
+	vmEnd, err := nw.Attach(vmMAC)
 	if err != nil {
 		_ = nw.Close()
 		t.Fatal(err)
