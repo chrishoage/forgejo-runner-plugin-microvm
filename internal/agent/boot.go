@@ -47,6 +47,9 @@ type mounter interface {
 	// bindScratch makes dir on the scratch disk, with t's owner and mode,
 	// and bind-mounts it over t's place in the job's root at root.
 	bindScratch(root, dir string, t scratchTarget) error
+	// makeDir creates guestPath in the job's root at root, with mode, unless
+	// the image has something there.
+	makeDir(root, guestPath string, mode uint32) error
 	// moveRoot moves the mount at root to / and chroots into it.
 	moveRoot(root string) error
 }
@@ -91,10 +94,15 @@ func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 //     VM's / at boot, with its upper and work directories on the scratch
 //     disk;
 //  5. it makes the API mounts in it;
-//  6. it resolves every scratch path in it, then makes each one, parents
+//  6. it creates the act path, tool cache and temp directory the image
+//     lacks (PROTO-7), so a scratch path on one finds its mode;
+//  7. it resolves every scratch path in it, then makes each one, parents
 //     first, a fresh directory on the scratch disk, named by its position
 //     in the list;
-//  7. it moves it to / and chroots.
+//  8. it creates the act path, tool cache and temp directory again, so one
+//     at or below a scratch path, hidden by its fresh directory, is made on
+//     the scratch disk; elsewhere they are there now, and left alone;
+//  9. it moves it to / and chroots.
 //
 // The host enforces read-only on both shares, so the guest can't write a
 // layer even after remounting one read-write (IMG-9).
@@ -135,14 +143,21 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 			func() error { return m.mount(a.source, target, a.fstype, a.flags, a.data) },
 		)
 	}
-	// SHORTCUT(#53): the act path, tool cache and temp directory are not
-	// made before the scratch paths yet, so a scratch path on an image's
-	// missing /tmp is 0755, not 1777.
+	guestDirs := func() error {
+		for _, d := range cfg.GetGuestDirs() {
+			if err := m.makeDir(root, d.GetPath(), d.GetMode()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	steps = append(steps, guestDirs)
 	if paths := cfg.GetScratchPaths(); len(paths) > 0 {
 		dirs := scratch + "/paths"
 		steps = append(steps,
 			func() error { return m.mkdirAll(dirs) },
 			func() error { return makeScratchPaths(m, root, dirs, paths) },
+			guestDirs,
 		)
 	}
 	steps = append(steps, func() error { return m.moveRoot(root) })
@@ -182,10 +197,8 @@ func makeScratchPaths(m mounter, root, dirs string, paths []string) error {
 		if err != nil {
 			return err
 		}
-		for _, api := range apiMountRoots {
-			if t.resolved == api || strings.HasPrefix(t.resolved, api+"/") {
-				return fmt.Errorf("scratch path %s: lands at %s, in %s", p, t.resolved, api)
-			}
+		if api, ok := inAPIMount(t.resolved); ok {
+			return fmt.Errorf("scratch path %s: lands at %s, in %s", p, t.resolved, api)
 		}
 		for _, prev := range targets[:i] {
 			if prev.resolved == t.resolved {
@@ -231,8 +244,9 @@ func parentsFirst(targets []scratchTarget) []int {
 }
 
 // checkBootConfig refuses a config whose layer names would leave the layer
-// share, that names no scratch device or vsock port, or whose scratch paths
-// aren't absolute, clean paths below /.
+// share, that names no scratch device or vsock port, whose scratch paths or
+// guest directories aren't absolute, clean paths below /, or whose guest
+// directory's mode isn't permission bits.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
 	if cfg.GetVsockPort() == 0 {
 		return fmt.Errorf("boot config: no vsock port")
@@ -249,9 +263,22 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 		}
 	}
 	for _, p := range cfg.GetScratchPaths() {
-		if !path.IsAbs(p) || path.Clean(p) != p || p == "/" || strings.ContainsRune(p, 0) {
+		if !belowRoot(p) {
 			return fmt.Errorf("boot config: scratch path %q is not an absolute, clean path below /", p)
 		}
 	}
+	for _, d := range cfg.GetGuestDirs() {
+		if !belowRoot(d.GetPath()) {
+			return fmt.Errorf("boot config: directory %q is not an absolute, clean path below /", d.GetPath())
+		}
+		if d.GetMode() > 0o7777 {
+			return fmt.Errorf("boot config: directory %s: mode %o is more than permission bits", d.GetPath(), d.GetMode())
+		}
+	}
 	return nil
+}
+
+// belowRoot reports whether p is an absolute, clean path below /.
+func belowRoot(p string) bool {
+	return path.IsAbs(p) && path.Clean(p) == p && p != "/" && !strings.ContainsRune(p, 0)
 }
