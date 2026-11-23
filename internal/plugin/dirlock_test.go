@@ -151,7 +151,7 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 	}
 	t.Setenv(LibDirEnv, "")
 
-	err := run(t.Context(), discardLog(), configOf(dirs))
+	err := run(t.Context(), discardLog(), configOf(dirs), nil)
 	if err == nil {
 		t.Fatal("the second startup ran")
 	}
@@ -174,7 +174,7 @@ func TestStartupNeedsMkfsExt4(t *testing.T) {
 	t.Setenv(LibDirEnv, "")
 	t.Setenv("PATH", t.TempDir())
 
-	err := run(t.Context(), discardLog(), configOf(testDirs(base)))
+	err := run(t.Context(), discardLog(), configOf(testDirs(base)), nil)
 	if err == nil || !strings.Contains(err.Error(), "mkfs.ext4") {
 		t.Fatalf("err = %v, want one naming mkfs.ext4", err)
 	}
