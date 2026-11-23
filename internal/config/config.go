@@ -16,9 +16,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/sys/unix"
 )
 
 // DefaultPath is the config file read when PathEnv is unset.
@@ -52,6 +54,11 @@ type Config struct {
 	MaxMemoryMiB uint64
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
+
+	// path is the absolute path Load resolved, which Reload reads again,
+	// and named says whether PathEnv named it.
+	path  string
+	named bool
 }
 
 // DefaultProfile is the profile a label that names none uses (CFG-4).
@@ -127,18 +134,61 @@ func Load(getenv func(string) string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s=%s: %w", PathEnv, path, err)
 	}
-	return load(abs, named)
+	return load(abs, named, nil)
+}
+
+// Change is a plugin-level key whose value in the config file differs, at a
+// reload, from the value the plugin runs with. Running and File are its two
+// values, as the file would write them.
+type Change struct {
+	Key, Running, File string
+}
+
+// Reload reads the config file again for a plugin running with c: the same
+// absolute path Load resolved, under the same rules, without reading PathEnv
+// again. The whole file is validated, and its profiles are checked against
+// c's plugin-level values, which a reload never changes (CFG-7, CFG-8). It
+// returns a new config: c with the file's profiles in place of c's, and the
+// plugin-level keys whose value in the file is not c's, which keep c's value
+// until a restart. On any error it returns only the error, every one as
+// Load reports them, and c is left as it is.
+func (c *Config) Reload() (*Config, []Change, error) {
+	f, err := load(c.path, c.named, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	var changes []Change
+	for _, k := range []struct {
+		key           string
+		running, file string
+	}{
+		{"listen", "unix://" + c.Listen, "unix://" + f.Listen},
+		{"state_dir", c.StateDir, f.StateDir},
+		{"cache_dir", c.CacheDir, f.CacheDir},
+		{"runtime_dir", c.RuntimeDir, f.RuntimeDir},
+		{"max_memory_mib", strconv.FormatUint(c.MaxMemoryMiB, 10), strconv.FormatUint(f.MaxMemoryMiB, 10)},
+	} {
+		if k.running != k.file {
+			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
+		}
+	}
+	next := *c
+	next.File, next.Profiles = f.File, f.Profiles
+	return &next, changes, nil
 }
 
 // load reads the config file at path, which is absolute. named says whether
-// PathEnv named it, so that a missing file is an error.
-func load(path string, named bool) (*Config, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator's config file
+// PathEnv named it, so that a missing file is an error. running is the
+// config a reload replaces, or nil at startup: a reload checks the file's
+// profiles against running's plugin-level values, which stay in effect.
+func load(path string, named bool, running *Config) (*Config, error) {
+	data, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) && !named {
 		if !noFile(path) {
 			return nil, fmt.Errorf("config %s: a symlink on the path points to nothing: %w", path, err)
 		}
 		c := builtin()
+		c.path = path
 		if err := c.checkDirs(fmt.Sprintf("config %s (no file: built-in values): ", path), nil, nil); err != nil {
 			return nil, err
 		}
@@ -147,9 +197,9 @@ func load(path string, named bool) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
-	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}}
+	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}, running: running}
 	c := builtin()
-	c.File = path
+	c.File, c.path, c.named = path, path, named
 	if d.decode(c, data) {
 		d.errs = append(d.errs, c.checkDirs(d.prefix, d.lines, d.invalid))
 	}
@@ -159,7 +209,28 @@ func load(path string, named bool) (*Config, error) {
 	return c, nil
 }
 
-// noFile reports whether nothing is at path, which ReadFile found missing:
+// readFile reads the config file at path, which must be a regular file. It
+// opens it without blocking and refuses anything else before reading, so a
+// FIFO with no writer, or a device, can't hang startup or a reload: that
+// would leave a reload nobody can stop, and serve waits for it as it exits.
+// A stalled network mount can still block the read.
+func readFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY, 0) //nolint:gosec // G304: the operator's config file
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (%s)", fi.Mode().Type())
+	}
+	return io.ReadAll(f)
+}
+
+// noFile reports whether nothing is at path, which readFile found missing:
 // the deepest part of it that exists is a directory, or a symlink to one. A
 // symlink whose target is gone, at path or on the way to it, is a file that
 // can't be read, not a missing one.
@@ -210,6 +281,8 @@ type decoder struct {
 	// set on, or else its name's line, in the file's order, for the check
 	// against max_memory_mib.
 	memLines []profileLine
+	// running is the config a reload replaces, or nil at startup.
+	running *Config
 }
 
 // profileLine is a line in the profile name.
@@ -278,7 +351,20 @@ func (d *decoder) decode(c *Config, data []byte) bool {
 // The implicit default profile isn't checked: the file doesn't define it.
 // Nothing refuses a job on it yet; #10's admission check will, at Create
 // (Admission, docs/architecture.md).
+//
+// At a reload, the limit is the running plugin's: a max_memory_mib the file
+// changes applies only at a restart.
 func (d *decoder) checkMemory(c *Config) {
+	if d.running != nil {
+		limit := d.running.MaxMemoryMiB
+		for _, pl := range d.memLines {
+			if mem := uint64(c.Profiles[pl.name].MemoryMiB); limit != 0 && mem > limit {
+				d.errorf(pl.line, inProfile(pl.name), "memory_mib", "%d is more than max_memory_mib in effect, %d: no job on this profile could ever run",
+					mem, limit)
+			}
+		}
+		return
+	}
 	maxLine, ok := d.lines["max_memory_mib"]
 	if !ok || c.MaxMemoryMiB == 0 {
 		return
