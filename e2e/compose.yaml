@@ -4,7 +4,9 @@
 # `just e2e up` (e2e/mod.just). Everything the stack writes is bind-mounted
 # under .e2e/ at the repo root, which `just e2e down` deletes. Each decision
 # and its reason is in docs/development.md (The local harness). The project
-# name is not set here: the recipes name one per checkout.
+# name is not set here: the recipes name one per checkout. E2E_ADDRESS, the
+# host's address the jobs' guests reach Forgejo at, comes from the recipes
+# too.
 
 services:
   forgejo:
@@ -13,16 +15,20 @@ services:
     environment:
       FORGEJO__database__DB_TYPE: sqlite3
       FORGEJO__security__INSTALL_LOCK: "true"
-      FORGEJO__server__ROOT_URL: http://forgejo:3000/
+      # The address the runner hands jobs (the runner's instance, below), so
+      # the URLs Forgejo builds point where the guest can go.
+      FORGEJO__server__ROOT_URL: http://${E2E_ADDRESS:?run through just e2e}:3000/
       FORGEJO__server__DISABLE_SSH: "true"
       FORGEJO__service__DISABLE_REGISTRATION: "true"
       FORGEJO__actions__ENABLED: "true"
     volumes:
       - ../.e2e/forgejo:/data
-    # Only the API, and only on loopback: nothing else needs to reach it
-    # from outside the stack.
+    # The API on loopback, for the recipes; and the host's own address,
+    # for the jobs: a guest can't reach the host's loopback (NET-4), and its
+    # connections leave the host as the job process's.
     ports:
       - 127.0.0.1:3000:3000
+      - ${E2E_ADDRESS:?run through just e2e}:3000:3000
     healthcheck:
       test: [CMD, curl, -fsS, http://localhost:3000/api/healthz]
       interval: 2s
@@ -48,7 +54,7 @@ services:
       - -euc
       - |
         forgejo-runner --config /etc/forgejo-runner/config.yaml create-runner-file \
-          --instance http://forgejo:3000 \
+          --instance http://${E2E_ADDRESS:?run through just e2e}:3000 \
           --name e2e --secret "$$(cat /secrets/runner-secret)"
         exec forgejo-runner daemon --config /etc/forgejo-runner/config.yaml
     volumes:

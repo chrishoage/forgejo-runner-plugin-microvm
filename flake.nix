@@ -83,12 +83,14 @@
           # The local harness (`just e2e`, docs/development.md): the Docker
           # CLI with its compose plugin for `docker compose`, podman for
           # `podman compose` with `docker-compose` on PATH as its provider,
-          # and curl and jq for Forgejo's API.
+          # curl and jq for Forgejo's API, and iproute2's `ip` for the host's
+          # address the jobs reach Forgejo at.
           pkgs.docker-client
           pkgs.docker-compose
           podman
           pkgs.curl
           pkgs.jq
+          pkgs.iproute2
           # `go test -race` needs cgo, so the shell carries a C compiler
           # (mkShell's stdenv) even though the binary builds without it.
         ];
