@@ -125,8 +125,8 @@ func startNetwork(spec *jobv1.Spec, log *slog.Logger) (*jobnet.Network, []*os.Fi
 		return nil, nil, err
 	}
 	links := make([]*os.File, 0, len(spec.GetVms()))
-	for _, v := range spec.GetVms() {
-		l, err := n.Attach()
+	for i, v := range spec.GetVms() {
+		l, err := n.Attach(cfg.VMs[i].MAC)
 		if err != nil {
 			for _, l := range links {
 				_ = l.Close()

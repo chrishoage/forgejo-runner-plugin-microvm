@@ -4,16 +4,21 @@
 // server and forwarders, run inside the job process, serving each of the
 // job's VMs over a frame socket of its own (NET-1, NET-2).
 //
-// It is gvisor-tap-vsock's virtualnetwork.New, configured only: no NAT
-// table, no gateway virtual IPs, no port forwards, no DNS zones and
-// link-local access off. So no address on the job network maps to the
-// host's loopback (NET-4), no host port is forwarded into a VM (NET-3), and
-// connections leave the host as the job process's own (NET-5). Its DHCP
-// server always runs, and no VM uses it; each VM's address is reserved for
-// its MAC, so it can hand one VM's address to no other (NET-6).
+// It is gvisor-tap-vsock's virtualnetwork.New with no NAT table, no gateway
+// virtual IPs, no port forwards, no DNS zones and link-local access off,
+// and a guard on each VM's switch port. So no address on the job network
+// maps to the host's loopback (NET-4), no host port is forwarded into a VM
+// (NET-3), and connections leave the host as the job process's own (NET-5).
+// The guard passes to the gateway's forwarders only packets to outside
+// unicast addresses, refuses every gateway port but DNS's, answers echo
+// requests to the gateway itself, bounds the ICMP echo requests it
+// forwards, and drops frames from any MAC but the VM's own. Its DHCP server always runs, and no VM uses it; each
+// VM's address is reserved for its MAC, so it can hand one VM's address to
+// no other (NET-6).
 package jobnet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +26,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
@@ -59,6 +65,7 @@ type VM struct {
 // Network is a running job network.
 type Network struct {
 	vn     *virtualnetwork.VirtualNetwork
+	cfg    Config
 	log    *slog.Logger
 	libLog *libraryLog
 
@@ -98,7 +105,7 @@ func New(cfg Config, log *slog.Logger) (*Network, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Network{vn: vn, log: log, libLog: libLog, ctx: ctx, cancel: cancel}, nil
+	return &Network{vn: vn, cfg: cfg, log: log, libLog: libLog, ctx: ctx, cancel: cancel}, nil
 }
 
 // check refuses a config the library would take but serve wrongly.
@@ -133,9 +140,12 @@ func (c Config) check() error {
 }
 
 // Attach makes a frame socket, one Ethernet frame per datagram, serves its
-// switch end, and returns the VM's end, for the VM child's fd 4. Each VM
-// attaches through a call of its own.
-func (n *Network) Attach() (*os.File, error) {
+// switch end for the config's VM whose MAC is mac, and returns the VM's
+// end, for the VM child's fd 4. Each VM attaches through a call of its own.
+func (n *Network) Attach(mac net.HardwareAddr) (*os.File, error) {
+	if !slices.ContainsFunc(n.cfg.VMs, func(vm VM) bool { return bytes.Equal(vm.MAC, mac) }) {
+		return nil, fmt.Errorf("MAC %s: no VM of the job network's", mac)
+	}
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("frame socket: %w", err)
@@ -154,7 +164,7 @@ func (n *Network) Attach() (*os.File, error) {
 	n.wg.Go(func() {
 		// It returns once Close closes the port, or the VM's end is gone
 		// and a write to it fails.
-		if err := n.vn.AcceptVfkit(n.ctx, port); err != nil && n.ctx.Err() == nil {
+		if err := n.vn.AcceptVfkit(n.ctx, newGuard(port, mac, n.cfg)); err != nil && n.ctx.Err() == nil {
 			n.log.Warn("job network: a VM's frame socket stopped", "err", err)
 		}
 	})
