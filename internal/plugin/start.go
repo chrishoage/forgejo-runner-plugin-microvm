@@ -55,8 +55,11 @@ const tailBytes = 300
 //
 // SHORTCUT(#10): no queue or memory budget: every Start boots at once.
 func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.BackendPlugin_StartServer) error {
-	j, err := s.lock(req.GetEnvironmentId())
+	j, err := s.lookup(req.GetEnvironmentId())
 	if err != nil {
+		return err
+	}
+	if err := s.lockJob(stream.Context(), j); err != nil {
 		return err
 	}
 	defer j.mu.Unlock()
@@ -80,6 +83,7 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 		s.log.Error("start failed", "job", j.id, "err", err)
 		return startError(ctx, err)
 	}
+	j.ready.Store(true)
 	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(begin).Round(time.Millisecond))
 	return await(ctx, func() error {
 		return stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{

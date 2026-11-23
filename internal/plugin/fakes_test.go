@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -48,6 +49,9 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cache.dir == "" {
+		cache.dir = dirs.Cache
+	}
 	srv, err := NewServer(discardLog(), Config{
 		Arch:         arch,
 		Dirs:         dirs,
@@ -69,13 +73,22 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 	return srv
 }
 
-// fakeCache stands in for the image cache.
+// fakeCache stands in for the image cache. Like the real one, it makes each
+// VM's layer link directory, <dir>/jobs/<id>/<n>/, and Release deletes the
+// job's.
 type fakeCache struct {
+	// dir is the cache directory; newTestServer sets it.
+	dir string
 	// err fails Acquire.
 	err error
-	// block makes Acquire wait for its context, after closing entered.
+	// block makes Acquire send its job on entered, then wait for its
+	// context, or for release to close when it is set.
 	block   bool
-	entered chan struct{}
+	entered chan string
+	release chan struct{}
+	// unwind, when set, makes a cancelled Acquire wait for it to close
+	// before it returns, as a call still unwinding.
+	unwind chan struct{}
 
 	mu       sync.Mutex
 	acquired []imagecache.Request
@@ -87,17 +100,36 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 	c.acquired = append(c.acquired, req)
 	c.mu.Unlock()
 	if c.block {
-		close(c.entered)
-		<-ctx.Done()
-		return imagecache.Image{}, ctx.Err()
+		select {
+		case c.entered <- req.Job:
+		case <-ctx.Done():
+			return imagecache.Image{}, ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			if c.unwind != nil {
+				<-c.unwind
+			}
+			return imagecache.Image{}, ctx.Err()
+		case <-c.release:
+		}
 	}
 	if c.err != nil {
 		return imagecache.Image{}, c.err
 	}
+	link := filepath.Join(c.dir, "jobs", req.Job, strconv.Itoa(req.VM))
+	if err := os.MkdirAll(link, 0o700); err != nil {
+		return imagecache.Image{}, err
+	}
+	for _, l := range []string{"0.erofs", "1.erofs"} {
+		if err := os.WriteFile(filepath.Join(link, l), nil, 0o600); err != nil {
+			return imagecache.Image{}, err
+		}
+	}
 	return imagecache.Image{
 		Digest:  "sha256:0",
 		Env:     []string{"PATH=/usr/bin:/bin", "A=b=c"},
-		LinkDir: "/cache/jobs/" + req.Job + "/0",
+		LinkDir: link,
 		Layers:  []string{"0.erofs", "1.erofs"},
 	}, nil
 }
@@ -106,7 +138,7 @@ func (c *fakeCache) Release(_ context.Context, job string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.released = append(c.released, job)
-	return nil
+	return os.RemoveAll(filepath.Join(c.dir, "jobs", job))
 }
 
 // How the fake job process behaves once launched.
@@ -174,6 +206,14 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 	p := &joblaunch.Process{Events: events, Exited: fp.exited}
 	switch l.does {
 	case boots:
+		// Like the job process and its VM child, it writes the job
+		// process log and the VM's scratch disk, VM log and console.
+		vm := spec.GetVms()[0]
+		for _, f := range []string{logPath, vm.GetScratchDisk(), vm.GetVmLog(), vm.GetConsole()} {
+			if err := os.WriteFile(f, nil, 0o600); err != nil {
+				return nil, err
+			}
+		}
 		// Like the VM child, it binds the agent socket relative to its
 		// directory, as the full path can outgrow bind's 107 bytes.
 		sock := spec.GetVms()[0].GetAgentSocket()

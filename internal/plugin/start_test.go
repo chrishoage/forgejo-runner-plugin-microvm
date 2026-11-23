@@ -122,7 +122,7 @@ func TestStartBootsTheVM(t *testing.T) {
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
 		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
 		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 ||
-		vm.GetLayerDir() != "/cache/jobs/"+id+"/0" || !proto.Equal(vm.GetBoot(), wantBoot) ||
+		vm.GetLayerDir() != filepath.Join(srv.cfg.Dirs.Cache, "jobs", id, "0") || !proto.Equal(vm.GetBoot(), wantBoot) ||
 		vm.GetGuestAddress() != "198.18.0.2" || vm.GetGuestMac() != "02:00:c6:12:00:02" {
 		t.Errorf("VM = %v", vm)
 	}
@@ -246,7 +246,7 @@ func TestStartFailsOnTheNetwork(t *testing.T) {
 // (PROTO-13).
 func TestRemoveDuringStart(t *testing.T) {
 	t.Parallel()
-	cache := &fakeCache{block: true, entered: make(chan struct{})}
+	cache := &fakeCache{block: true, entered: make(chan string, 1)}
 	launcher := &fakeLauncher{}
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, cache, launcher)))
 	id := create(t, c)
