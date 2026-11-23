@@ -4,6 +4,9 @@ package plugin
 
 import (
 	"bytes"
+	"errors"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,5 +85,58 @@ func TestServeStopsOnAnInvalidConfig(t *testing.T) {
 	}
 	if _, err := os.Lstat(state); !os.IsNotExist(err) {
 		t.Errorf("serve wrote %s: %v", state, err)
+	}
+}
+
+// run opens the image cache with cache_max_gib in bytes as its cap: left
+// out, the built-in 20 GiB; 0, a cap of 0; the largest value, the largest
+// whole GiB an int64 of bytes holds (IMG-14). A failure to open it stops
+// startup with that error, and releases the directory locks.
+//
+// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
+func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
+	tools := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tools, "mkfs.ext4"), nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools)
+	t.Setenv(LibDirEnv, "")
+	errOpen := errors.New("the fake image cache does not open")
+	for content, want := range map[string]int64{
+		"":                            20 << 30,
+		"cache_max_gib: 0\n":          0,
+		"cache_max_gib: 3\n":          3 << 30,
+		"cache_max_gib: 8589934591\n": math.MaxInt64 >> 30 << 30,
+	} {
+		dirs := testDirs(filepath.Join(t.TempDir(), "plugin"))
+		file := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(file, []byte("state_dir: "+dirs.State+"\ncache_dir: "+dirs.Cache+
+			"\nruntime_dir: "+dirs.Runtime+"\nlisten: unix://"+dirs.Listen+"\n"+content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(func(k string) string {
+			if k == config.PathEnv {
+				return file
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var calls []int64
+		err = run(t.Context(), discardLog(), cfg, nil, func(_ *slog.Logger, dir string, maxSize int64) (ImageCache, error) {
+			if dir != dirs.Cache {
+				t.Errorf("%q: the image cache opened in %s, want %s", content, dir, dirs.Cache)
+			}
+			calls = append(calls, maxSize)
+			return nil, errOpen
+		})
+		if !errors.Is(err, errOpen) {
+			t.Errorf("%q: run returned %v, want the image cache's error", content, err)
+		}
+		if len(calls) != 1 || calls[0] != want {
+			t.Errorf("%q: the image cache opened with caps %v, want one of %d bytes", content, calls, want)
+		}
+		_ = mustLock(t, dirs)
 	}
 }

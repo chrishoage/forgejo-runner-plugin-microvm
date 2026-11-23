@@ -214,11 +214,12 @@ func TestReloadLogsPluginLevelKeysAsNeedingARestart(t *testing.T) {
 			base, state, base, base, base)
 	}
 	f := newReloadFixture(t, dirs("state")+"max_memory_mib: 4096\nprofiles:\n  big: {cpus: 3}\n")
-	writeFile(t, f.path, dirs("state2")+"max_memory_mib: 2048\nprofiles:\n  big: {cpus: 4}\n")
+	writeFile(t, f.path, dirs("state2")+"max_memory_mib: 2048\ncache_max_gib: 0\nprofiles:\n  big: {cpus: 4}\n")
 
 	next := reloadConfig(f.log, f.srv, f.cfg, (*config.Config).Reload)
-	if next.StateDir != base+"/state" || next.MaxMemoryMiB != 4096 {
-		t.Errorf("state_dir %s, max_memory_mib %d: want the running values", next.StateDir, next.MaxMemoryMiB)
+	if next.StateDir != base+"/state" || next.MaxMemoryMiB != 4096 || next.CacheMaxGiB != 20 {
+		t.Errorf("state_dir %s, max_memory_mib %d, cache_max_gib %d: want the running values",
+			next.StateDir, next.MaxMemoryMiB, next.CacheMaxGiB)
 	}
 	if j := jobOf(t, f.srv, createOn(t, f.srv, bigLabel)); j.profile.CPUs != 4 {
 		t.Errorf("the profiles did not reload: %+v", j.profile)
@@ -228,6 +229,7 @@ func TestReloadLogsPluginLevelKeysAsNeedingARestart(t *testing.T) {
 		`level=WARN msg="a changed setting takes effect only at a restart: kept the running value" key=state_dir running=` +
 			base + `/state file=` + base + `/state2`,
 		`key=max_memory_mib running=4096 file=2048`,
+		`key=cache_max_gib running=20 file=0`,
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log does not contain %q:\n%s", want, log)
