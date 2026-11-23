@@ -26,24 +26,30 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
 
-// The boot root's files, by their names in it, and where the agent mounts
-// the layer share.
-//
-// SHORTCUT(#6): provisional picks. The agent's path is the one the VM child
-// starts (internal/job/internal/vm's AgentPath), the boot config's name the
-// one the agent reads (internal/agent's BootConfigPath), and the layer
-// directory is under the agent's staging directory; the protocol test fails
-// if they part.
+// The boot root's directory of the agent's own files, and the files in it,
+// by their paths in the boot root: one hidden directory keeps the job's root
+// tidy, and names both after the program. The agent's path is the one the
+// VM child starts (internal/job/internal/vm's AgentPath), and the boot
+// config's the one the agent reads (internal/agent's BootConfigPath, which
+// the tests check this against).
 const (
-	agentPath      = ".runner-microvm-agent"
-	bootConfigPath = ".runner-microvm-boot"
-	guestLayerDir  = "/dev/.runner-microvm/layers"
-	// The scratch disk is the VM's first block device.
-	scratchDevice = "/dev/vda"
+	agentDir       = ".runner-microvm"
+	agentPath      = agentDir + "/agent"
+	bootConfigPath = agentDir + "/boot-config.binpb"
 )
 
-// SHORTCUT(#6): provisional pick: the job's container's agent's vsock
-// port.
+// Where the agent mounts the layer share.
+//
+// SHORTCUT(#6): provisional pick, under the agent's staging directory; the
+// VM child's layer share tag is the same kind of pick.
+const guestLayerDir = "/dev/.runner-microvm/layers"
+
+// The scratch disk is the VM's first block device.
+const scratchDevice = "/dev/vda"
+
+// agentPort is the vsock port every VM's agent listens on. Only the plugin
+// sets it: the job spec carries it for libkrun's port mapping, and the boot
+// config for the agent, which reads it before it listens.
 const agentPort = 1024
 
 // The most of a console or VM log a failed Start's error carries.
@@ -146,6 +152,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		Hostname:      j.hostname,
 		Image:         &agentv1.Image{Env: img.Env},
 		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
+		VsockPort:     agentPort,
 	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
@@ -350,10 +357,12 @@ func envMap(env []string) map[string]string {
 }
 
 // makeBootRoot makes the VM's boot root at root: empty proc, sys and dev
-// mount points, so images without them boot (GST-2), a hard link to the
-// agent, not a copy, and the agent's boot config as a file. libkrun shares it
-// read-only as the VM's root, and it is the bottom layer of the guest's root,
-// so the agent and its config stay visible in the job's root.
+// mount points, so images without them boot (GST-2), and in its
+// .runner-microvm directory a hard link to the agent, not a copy, and the
+// agent's boot config as a file. libkrun shares it read-only as the VM's
+// root, and it is the bottom layer of the guest's root, so the agent and its
+// config stay visible in the job's root: the config holds nothing a step
+// can't read anyway, such as the image's environment.
 func makeBootRoot(root, agent string, boot *agentv1.BootConfig) error {
 	b, err := proto.Marshal(boot)
 	if err != nil {
@@ -362,7 +371,7 @@ func makeBootRoot(root, agent string, boot *agentv1.BootConfig) error {
 	if err := os.Mkdir(root, 0o755); err != nil { //nolint:gosec // G301: the guest's /, which every guest user must traverse
 		return err
 	}
-	for _, d := range []string{"proc", "sys", "dev"} {
+	for _, d := range []string{"proc", "sys", "dev", agentDir} {
 		if err := os.Mkdir(filepath.Join(root, d), 0o755); err != nil { //nolint:gosec // G301: guest mount points
 			return err
 		}

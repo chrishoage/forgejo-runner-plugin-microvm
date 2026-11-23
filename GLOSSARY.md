@@ -90,6 +90,10 @@ _Avoid_: guest daemon, init
 **Agent protocol**:
 The plugin's own protocol between the plugin and the agent.
 
+**Boot config**:
+What the plugin tells a VM's agent at boot: how to build the VM's root, its mounts, disks and network, and the image's defaults for Exec.
+_Avoid_: agent config
+
 **Scratch disk**:
 A fresh disk for each VM that holds every change the job makes to that VM's root filesystem.
 

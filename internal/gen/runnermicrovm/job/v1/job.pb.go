@@ -167,7 +167,8 @@ type VM struct {
 	VmLog   string `protobuf:"bytes,6,opt,name=vm_log,json=vmLog,proto3" json:"vm_log,omitempty"`
 	Console string `protobuf:"bytes,7,opt,name=console,proto3" json:"console,omitempty"`
 	// The unix socket libkrun maps to the agent's vsock port, which the plugin
-	// dials, in <runtime>/<id>/<n>/. The port is #6's.
+	// dials, in <runtime>/<id>/<n>/, and that port: 1024, the same value as
+	// the boot config's vsock_port, which the agent listens on.
 	AgentSocket string `protobuf:"bytes,8,opt,name=agent_socket,json=agentSocket,proto3" json:"agent_socket,omitempty"`
 	AgentPort   uint32 `protobuf:"varint,9,opt,name=agent_port,json=agentPort,proto3" json:"agent_port,omitempty"`
 	// The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares

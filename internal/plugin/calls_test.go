@@ -62,7 +62,7 @@ func TestRemoveDeletesEveryFileOfTheJob(t *testing.T) {
 		filepath.Join(srv.cfg.Dirs.State, "jobs", id, "job.log"),
 		filepath.Join(srv.cfg.Dirs.State, "jobs", id, "0", "scratch.ext4"),
 		filepath.Join(srv.cfg.Dirs.State, "jobs", id, "0", "console"),
-		filepath.Join(srv.cfg.Dirs.State, "jobs", id, "0", "root", ".runner-microvm-boot"),
+		filepath.Join(srv.cfg.Dirs.State, "jobs", id, "0", "root", ".runner-microvm", "boot-config.binpb"),
 		filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock"),
 		filepath.Join(srv.cfg.Dirs.Cache, "jobs", id, "0", "0.erofs"),
 	} {

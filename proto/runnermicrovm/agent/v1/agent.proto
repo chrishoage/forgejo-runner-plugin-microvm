@@ -6,8 +6,8 @@ syntax = "proto3";
 // agent inside each of a job's VMs. The plugin dials a VM's agent over the
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
-// (docs/adr/0003-plugin-talks-to-agent-directly.md). The vsock port and the
-// readiness details (timeouts, polling) are #6's.
+// (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
+// vsock port its boot config names, and the VM is ready when it answers Ping.
 package runnermicrovm.agent.v1;
 
 // AgentService prepares a VM at boot, runs commands inside it and copies files
@@ -101,7 +101,7 @@ message FlushResponse {}
 // serves: its root filesystem, mounts, disks, network and the image's
 // defaults for Exec. The plugin builds it; the job spec and the VM child spec
 // carry it unopened. It reaches the agent as a file in the VM's boot root,
-// binary protobuf, which is a provisional pick for #6 to settle.
+// /.runner-microvm/boot-config.binpb, encoded as binary protobuf.
 message BootConfig {
   // The guest directory where the agent mounts the VM's layer link
   // directory's share.
@@ -134,6 +134,10 @@ message BootConfig {
   // one entry, the VM's own name at its address; each service will add
   // one.
   repeated Host hosts = 10;
+  // The vsock port the agent listens on, once its boot work is done. Only
+  // the plugin sets it: the same value is libkrun's port mapping for the
+  // VM's agent socket.
+  uint32 vsock_port = 11;
 }
 
 // Host is one name on the job network and its address.

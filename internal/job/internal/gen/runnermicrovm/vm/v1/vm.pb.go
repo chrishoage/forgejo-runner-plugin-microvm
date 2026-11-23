@@ -57,7 +57,8 @@ type Spec struct {
 	LayerDir string `protobuf:"bytes,6,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
 	// The file libkrun writes the VM's console to.
 	Console string `protobuf:"bytes,7,opt,name=console,proto3" json:"console,omitempty"`
-	// The unix socket libkrun maps to the agent's vsock port. The port is #6's.
+	// The unix socket libkrun maps to the agent's vsock port, and that port:
+	// the same value as the boot config's vsock_port.
 	AgentSocket string `protobuf:"bytes,8,opt,name=agent_socket,json=agentSocket,proto3" json:"agent_socket,omitempty"`
 	AgentPort   uint32 `protobuf:"varint,9,opt,name=agent_port,json=agentPort,proto3" json:"agent_port,omitempty"`
 	// The VM's mounts and disks (STO-1), disks in guest device order. Today

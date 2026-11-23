@@ -23,20 +23,18 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 )
 
-// Port is the vsock port the agent listens on.
-//
-// SHORTCUT(#6): provisional pick: libkrun starts the agent as its workload,
-// on vsock port 1024, and the VM is ready when the agent answers Ping.
-const Port = 1024
-
-// Main runs the agent, and returns its exit code.
+// Main runs the agent, and returns its exit code. libkrun's init, PID 1,
+// starts it as its workload, with an empty environment. It reads its boot
+// config, prepares the guest, and only then listens on the boot config's
+// vsock port: the VM is ready when the agent answers Ping, so every call
+// finds the guest prepared.
 func Main(args []string) int {
 	log := logging.Setup("runner-microvm-agent")
 	if len(args) > 0 {
 		log.Error("the agent takes no arguments", "args", args)
 		return 2
 	}
-	cfg, err := readBootConfig(BootConfigPath)
+	cfg, err := ReadBootConfig(BootConfigPath)
 	if err != nil {
 		log.Error("boot", "err", err)
 		return 1
@@ -55,7 +53,7 @@ func Main(args []string) int {
 		return 1
 	}
 	log.Info("booted", "layers", len(cfg.GetLayers()), "address", cfg.GetNetwork().GetAddress(), "hostname", cfg.GetHostname())
-	lis, err := listenVsock(Port)
+	lis, err := listenVsock(cfg.GetVsockPort())
 	if err != nil {
 		log.Error("listen", "err", err)
 		return 1

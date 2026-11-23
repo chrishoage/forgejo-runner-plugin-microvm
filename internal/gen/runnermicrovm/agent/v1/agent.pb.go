@@ -10,8 +10,8 @@
 // agent inside each of a job's VMs. The plugin dials a VM's agent over the
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
-// (docs/adr/0003-plugin-talks-to-agent-directly.md). The vsock port and the
-// readiness details (timeouts, polling) are #6's.
+// (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
+// vsock port its boot config names, and the VM is ready when it answers Ping.
 
 package agentv1
 
@@ -560,7 +560,7 @@ func (*FlushResponse) Descriptor() ([]byte, []int) {
 // serves: its root filesystem, mounts, disks, network and the image's
 // defaults for Exec. The plugin builds it; the job spec and the VM child spec
 // carry it unopened. It reaches the agent as a file in the VM's boot root,
-// binary protobuf, which is a provisional pick for #6 to settle.
+// /.runner-microvm/boot-config.binpb, encoded as binary protobuf.
 type BootConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The guest directory where the agent mounts the VM's layer link
@@ -593,7 +593,11 @@ type BootConfig struct {
 	// after localhost's lines. There is no DNS zone for them. Today it holds
 	// one entry, the VM's own name at its address; each service will add
 	// one.
-	Hosts         []*Host `protobuf:"bytes,10,rep,name=hosts,proto3" json:"hosts,omitempty"`
+	Hosts []*Host `protobuf:"bytes,10,rep,name=hosts,proto3" json:"hosts,omitempty"`
+	// The vsock port the agent listens on, once its boot work is done. Only
+	// the plugin sets it: the same value is libkrun's port mapping for the
+	// VM's agent socket.
+	VsockPort     uint32 `protobuf:"varint,11,opt,name=vsock_port,json=vsockPort,proto3" json:"vsock_port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -696,6 +700,13 @@ func (x *BootConfig) GetHosts() []*Host {
 		return x.Hosts
 	}
 	return nil
+}
+
+func (x *BootConfig) GetVsockPort() uint32 {
+	if x != nil {
+		return x.VsockPort
+	}
+	return 0
 }
 
 // Host is one name on the job network and its address.
@@ -1047,7 +1058,7 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\xb8\x03\n" +
+	"\rFlushResponse\"\xd7\x03\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
 	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x16\n" +
@@ -1060,7 +1071,9 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\bhostname\x18\b \x01(\tR\bhostname\x123\n" +
 	"\x05image\x18\t \x01(\v2\x1d.runnermicrovm.agent.v1.ImageR\x05image\x122\n" +
 	"\x05hosts\x18\n" +
-	" \x03(\v2\x1c.runnermicrovm.agent.v1.HostR\x05hosts\"4\n" +
+	" \x03(\v2\x1c.runnermicrovm.agent.v1.HostR\x05hosts\x12\x1d\n" +
+	"\n" +
+	"vsock_port\x18\v \x01(\rR\tvsockPort\"4\n" +
 	"\x04Host\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\"P\n" +

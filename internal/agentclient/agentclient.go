@@ -22,8 +22,7 @@ import (
 )
 
 // ReadyTimeout is how long the plugin waits for a VM's agent to answer Ping.
-//
-// SHORTCUT(#6): provisional pick: 30 s, whatever the image or host.
+// Boot takes about 2 s; 30 s leaves room on a loaded host.
 const ReadyTimeout = 30 * time.Second
 
 // Until the agent listens, libkrun accepts a connection on the socket and

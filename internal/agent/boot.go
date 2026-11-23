@@ -16,13 +16,10 @@ import (
 )
 
 // BootConfigPath is the boot config's file in the boot root, the VM's root
-// when the agent starts.
-//
-// SHORTCUT(#6): provisional pick: its name, its encoding (the BootConfig
-// message, binary protobuf) and the agent's path are #6's to settle; the
-// plugin writes the same name (internal/plugin's bootConfigPath), and the
-// protocol test fails if they part.
-const BootConfigPath = "/.runner-microvm-boot"
+// when the agent starts: the BootConfig message, binary protobuf, beside the
+// agent, /.runner-microvm/agent. The plugin writes it there
+// (internal/plugin's bootConfigPath, which its tests check against this).
+const BootConfigPath = "/.runner-microvm/boot-config.binpb"
 
 // layerTag is the virtiofs tag of the VM's layer link directory.
 //
@@ -61,9 +58,9 @@ type apiMount struct {
 	data                   string
 }
 
-// apiMounts are the mounts the agent makes in the job's root, in order.
-//
-// SHORTCUT(#6): provisional set and options, from #1's prototype choices.
+// apiMounts are the mounts the agent always makes in the job's root, in
+// order: what container engines give a container, so images and steps find
+// what they expect.
 var apiMounts = []apiMount{
 	{"proc", "/proc", "proc", syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC, ""},
 	{"sysfs", "/sys", "sysfs", syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC, ""},
@@ -73,8 +70,8 @@ var apiMounts = []apiMount{
 	{"tmpfs", "/dev/shm", "tmpfs", syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC, ""},
 }
 
-// readBootConfig reads the boot config at path.
-func readBootConfig(path string) (*agentv1.BootConfig, error) {
+// ReadBootConfig reads the boot config at path.
+func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 	b, err := os.ReadFile(path) //nolint:gosec // G304: the boot root's own file
 	if err != nil {
 		return nil, fmt.Errorf("boot config: %w", err)
@@ -234,9 +231,12 @@ func parentsFirst(targets []scratchTarget) []int {
 }
 
 // checkBootConfig refuses a config whose layer names would leave the layer
-// share, that names no scratch device, or whose scratch paths aren't
-// absolute, clean paths below /.
+// share, that names no scratch device or vsock port, or whose scratch paths
+// aren't absolute, clean paths below /.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
+	if cfg.GetVsockPort() == 0 {
+		return fmt.Errorf("boot config: no vsock port")
+	}
 	if cfg.GetScratchDevice() == "" {
 		return fmt.Errorf("boot config: no scratch device")
 	}
