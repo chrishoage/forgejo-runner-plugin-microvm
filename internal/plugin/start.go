@@ -120,6 +120,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		LayerDir:      guestLayerDir,
 		Layers:        img.Layers,
 		ScratchDevice: scratchDevice,
+		ScratchPaths:  j.profile.ScratchPaths,
 		Image:         &agentv1.Image{Env: img.Env},
 	}
 	root := filepath.Join(vmState, "root")

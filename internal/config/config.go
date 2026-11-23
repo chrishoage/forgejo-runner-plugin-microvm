@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -74,6 +75,12 @@ type Profile struct {
 	// ScratchGiB is the scratch disk's size, at least 1 and at most
 	// MaxScratchGiB.
 	ScratchGiB uint64
+	// ScratchPaths are the guest directories that live on the scratch disk
+	// instead of the overlay, each empty at every boot (GST-13): absolute,
+	// cleaned, distinct, not / and not under /proc, /sys or /dev. Nil when
+	// there are none, the built-in value. Never changed once loaded: a job
+	// keeps its profile's list as it was at Create.
+	ScratchPaths []string
 }
 
 // The profile keys' built-in values (#1, Configuration and profiles).
@@ -465,12 +472,84 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 		case "scratch_gib":
 			n, valid := d.integer(kp, scope, 1, MaxScratchGiB)
 			prof.ScratchGiB, ok = n, ok && valid
+		case "scratch_paths":
+			paths, valid := d.scratchPaths(kp, scope)
+			prof.ScratchPaths, ok = paths, ok && valid
 		default:
 			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
 			ok = false
 		}
 	}
 	return ok
+}
+
+// apiDirs are the guest directories the agent's own mounts hold, under
+// which no scratch path may be: STO-5's target rule, which mounts and disks
+// share.
+var apiDirs = []string{"/proc", "/sys", "/dev"}
+
+// scratchPaths returns p's value, in scope, a list of guest paths, each
+// cleaned; nil for an empty list. Every invalid path is reported, at its own
+// line.
+func (d *decoder) scratchPaths(p pair, scope string) ([]string, bool) {
+	v := deref(p.value)
+	switch {
+	case isNull(v):
+		d.errorf(p.key.Line, scope, p.key.Value, "has no value")
+		return nil, false
+	case v.Kind != yaml.SequenceNode:
+		d.errorf(p.key.Line, scope, p.key.Value, "must be a list of paths")
+		return nil, false
+	}
+	var paths []string
+	seen := map[string]int{}
+	ok := true
+	for _, n := range v.Content {
+		n = deref(n)
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!str" {
+			if n.Kind == yaml.ScalarNode && !isNull(n) {
+				d.errorf(n.Line, scope, p.key.Value, "each path must be a string, not %q", n.Value)
+			} else {
+				d.errorf(n.Line, scope, p.key.Value, "each path must be a string")
+			}
+			ok = false
+			continue
+		}
+		clean, problem := scratchPath(n.Value)
+		if problem == "" {
+			if first, dup := seen[clean]; dup {
+				problem = fmt.Sprintf("is already listed on line %d", first)
+			}
+		}
+		if problem != "" {
+			d.errorf(n.Line, scope, p.key.Value, "%q %s", n.Value, problem)
+			ok = false
+			continue
+		}
+		seen[clean] = n.Line
+		paths = append(paths, clean)
+	}
+	return paths, ok
+}
+
+// scratchPath returns the guest path s cleaned, or what is wrong with it.
+func scratchPath(s string) (string, string) {
+	if strings.ContainsRune(s, 0) {
+		return "", "holds a NUL byte"
+	}
+	if !path.IsAbs(s) {
+		return "", "is not an absolute path"
+	}
+	clean := path.Clean(s)
+	if clean == "/" {
+		return "", "is the root"
+	}
+	for _, dir := range apiDirs {
+		if clean == dir || strings.HasPrefix(clean, dir+"/") {
+			return "", "is under " + dir
+		}
+	}
+	return clean, ""
 }
 
 // inProfile is the scope of an error inside the profile name.

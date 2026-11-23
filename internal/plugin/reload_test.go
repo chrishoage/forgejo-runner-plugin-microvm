@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -132,7 +133,7 @@ func TestReloadGivesLaterJobsTheNewProfile(t *testing.T) {
 		{created, config.Profile{CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4}},
 		{later, config.Profile{CPUs: 5, MemoryMiB: 2048, ScratchGiB: 4}},
 	} {
-		if j := jobOf(t, f.srv, tc.id); j.profile != tc.want {
+		if j := jobOf(t, f.srv, tc.id); !reflect.DeepEqual(j.profile, tc.want) {
 			t.Errorf("job %s has %+v, want %+v", tc.id, j.profile, tc.want)
 		}
 	}
