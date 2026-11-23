@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package agent is the agent that runs inside every VM: it makes the guest's
-// boot mounts and configures its network from its boot config, then serves the agent protocol's Ping,
-// Exec, CopyIn, CopyOut and Flush.
+// boot mounts, configures its network, hostname and name resolution from its
+// boot config, then serves the agent protocol's Ping, Exec, CopyIn, CopyOut
+// and Flush.
 //
 // The agent binary may depend only on the standard library, grpc, protobuf,
 // vishvananda/netlink, this package, internal/logging, internal/secret and the agent protocol's
@@ -47,7 +48,12 @@ func Main(args []string) int {
 		log.Error("boot", "err", err)
 		return 1
 	}
-	log.Info("booted", "layers", len(cfg.GetLayers()), "address", cfg.GetNetwork().GetAddress())
+	// The job's root is / now.
+	if err := configureNames(sethostname, "/", rootOwner, cfg); err != nil {
+		log.Error("boot", "err", err)
+		return 1
+	}
+	log.Info("booted", "layers", len(cfg.GetLayers()), "address", cfg.GetNetwork().GetAddress(), "hostname", cfg.GetHostname())
 	lis, err := listenVsock(Port)
 	if err != nil {
 		log.Error("listen", "err", err)
