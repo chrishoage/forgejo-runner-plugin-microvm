@@ -844,7 +844,11 @@ type Failed struct {
 	// child, and the VM it belongs to by name (PROTO-10). A job network that
 	// fails to start gives `network: <error>`, which Start reports as
 	// FailedPrecondition.
-	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Set when only a bug in the plugin can cause the failure: the job spec
+	// can't be read, or doesn't describe a job. Start reports it as Internal,
+	// the code for the plugin's own bugs (PROTO-10).
+	Bug           bool `protobuf:"varint,2,opt,name=bug,proto3" json:"bug,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -884,6 +888,13 @@ func (x *Failed) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *Failed) GetBug() bool {
+	if x != nil {
+		return x.Bug
+	}
+	return false
 }
 
 var File_runnermicrovm_job_v1_job_proto protoreflect.FileDescriptor
@@ -951,9 +962,10 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\x02vm\x18\x01 \x01(\rR\x02vm\x12\x1b\n" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12!\n" +
 	"\fconsole_tail\x18\x03 \x01(\tR\vconsoleTail\x12\x19\n" +
-	"\blog_tail\x18\x04 \x01(\tR\alogTail\" \n" +
+	"\blog_tail\x18\x04 \x01(\tR\alogTail\"2\n" +
 	"\x06Failed\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reasonB\xf3\x01\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x10\n" +
+	"\x03bug\x18\x02 \x01(\bR\x03bugB\xf3\x01\n" +
 	"\x18com.runnermicrovm.job.v1B\bJobProtoP\x01Z[github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1;jobv1\xa2\x02\x03RJX\xaa\x02\x14Runnermicrovm.Job.V1\xca\x02\x14Runnermicrovm\\Job\\V1\xe2\x02 Runnermicrovm\\Job\\V1\\GPBMetadata\xea\x02\x16Runnermicrovm::Job::V1b\x06proto3"
 
 var (

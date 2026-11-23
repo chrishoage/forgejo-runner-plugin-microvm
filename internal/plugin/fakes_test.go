@@ -5,6 +5,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -147,13 +148,52 @@ type behaviour int
 const (
 	// The VM boots and its agent answers.
 	boots behaviour = iota
-	// The VM exits during boot, with a console tail.
+	// The VM exits during boot, with the tails of bootConsole and
+	// bootLog.
 	exitsDuringBoot
-	// The VM never answers.
+	// The VM never answers; its console and VM log files hold
+	// bootConsole and bootLog.
 	hangs
 	// The job network fails to start.
 	networkFails
+	// The job process fails to make the scratch disk.
+	scratchFails
+	// The job process exits during boot, saying nothing; the console and
+	// VM log files hold bootConsole and bootLog.
+	exitsSilently
+	// The job process can't read its spec: the plugin's own bug.
+	specUnreadable
 )
+
+// What a fake VM that fails to boot wrote: a console of 25 short lines,
+// and a VM log of 10 lines of 1000 bytes, more than the 4 KiB an error
+// carries.
+var (
+	bootConsole = func() string {
+		var b strings.Builder
+		for i := range 25 {
+			fmt.Fprintf(&b, "console line %d\n", i+1)
+		}
+		return b.String()
+	}()
+	bootLog = func() string {
+		var b strings.Builder
+		for i := range 10 {
+			line := fmt.Sprintf("log line %d ", i+1)
+			b.WriteString(line + strings.Repeat("-", 999-len(line)) + "\n")
+		}
+		return b.String()
+	}()
+)
+
+// writeBootOutput writes bootConsole and bootLog to vm's console and VM
+// log files, as its VM child does.
+func writeBootOutput(vm *jobv1.VM) error {
+	if err := os.WriteFile(vm.GetConsole(), []byte(bootConsole), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(vm.GetVmLog(), []byte(bootLog), 0o600)
+}
 
 // fakeLauncher stands in for the job launcher. Its job processes are a fake
 // agent served on the spec's agent socket.
@@ -245,15 +285,32 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 		go func() { defer close(fp.served); _ = fp.gs.Serve(lis) }()
 		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
 	case exitsDuringBoot:
+		// The job process's tails are the files' last 4 KiB.
 		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
 		events <- &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
-			ExitCode: 1, ConsoleTail: "Kernel panic - not syncing",
+			ExitCode: 1, ConsoleTail: bootConsole, LogTail: bootLog[len(bootLog)-4096:],
 		}}}
 	case hangs:
+		if err := writeBootOutput(spec.GetVms()[0]); err != nil {
+			return nil, err
+		}
 	case networkFails:
 		// The job process says why and exits, so its events end and Exited
 		// closes, both ready by the time Start looks.
 		fp.end(&jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "network: cannot reserve gateway IP"}}})
+	case scratchFails:
+		fp.end(&jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{
+			Reason: "scratch disk: " + spec.GetVms()[0].GetScratchDisk() + ": no space left on device",
+		}}})
+	case specUnreadable:
+		fp.end(&jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{
+			Reason: "read the job spec: unexpected EOF", Bug: true,
+		}}})
+	case exitsSilently:
+		if err := writeBootOutput(spec.GetVms()[0]); err != nil {
+			return nil, err
+		}
+		fp.end()
 	}
 	if l.running == nil {
 		l.running = map[*joblaunch.Process]*fakeProcess{}
@@ -317,6 +374,13 @@ func (l *fakeLauncher) report(t *testing.T, id string, ev *jobv1.Event) {
 		t.Fatalf("no job process of %s was launched", id)
 	}
 	fp.events <- ev
+}
+
+// launched returns how many job processes were launched.
+func (l *fakeLauncher) launched() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.specs)
 }
 
 // alive returns how many job processes are not killed.

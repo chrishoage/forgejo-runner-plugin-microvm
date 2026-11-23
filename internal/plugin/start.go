@@ -70,8 +70,14 @@ var guestDirs = []struct {
 // config for the agent, which reads it before it listens.
 const agentPort = 1024
 
-// The most of a console or VM log a failed Start's error carries.
-const tailBytes = 300
+// How much of a VM's console and of its VM log an error carries: the last
+// tailLines lines of the last tailBytes of each. 20 lines hold a kernel
+// panic's message and the lines before it, and the job log shows several
+// lines fine (PROTO-10, VM-8).
+const (
+	tailLines = 20
+	tailBytes = 4 << 10
+)
 
 // Start pulls the job's image, starts its job process, which boots the VM,
 // waits until the agent answers Ping, and ends with StartComplete carrying
@@ -121,26 +127,27 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 }
 
 // startError is the status a failed Start returns: the call's own context's
-// code once it ended, FailedPrecondition when the job network failed to
-// start, Unavailable otherwise.
+// code once it ended, whether the runner or Remove ended it; Internal for
+// the plugin's own bug; else FailedPrecondition. The image, the VM's boot,
+// its agent, its scratch disk or a disk is the job's or the operator's to
+// fix, and never Unavailable, which the runner reads as the plugin being
+// gone.
 func startError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return status.FromContextError(ctx.Err()).Err()
 	}
-	if errors.As(err, new(*networkError)) {
-		return status.Error(codes.FailedPrecondition, err.Error())
+	if errors.As(err, new(*bugError)) {
+		return status.Error(codes.Internal, err.Error())
 	}
-	return status.Error(codes.Unavailable, err.Error())
+	return status.Error(codes.FailedPrecondition, err.Error())
 }
 
-// networkFailed is how a job process's Failed reason begins when its job
-// network failed to start.
-const networkFailed = "network: "
+// bugError is a failure only a bug in the plugin can cause.
+type bugError struct{ err error }
 
-// networkError is a job network that failed to start.
-type networkError struct{ reason string }
+func (e *bugError) Error() string { return e.err.Error() }
 
-func (e *networkError) Error() string { return "job process: " + e.reason }
+func (e *bugError) Unwrap() error { return e.err }
 
 // boot does Start's work on j, which is locked, and returns the image's
 // environment. On error, j.proc and j.agent may be set: the caller stops
@@ -155,7 +162,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	}
 	addr, mac, err := vmAddress(0)
 	if err != nil {
-		return nil, err
+		return nil, &bugError{err}
 	}
 	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
 	if err != nil {
@@ -213,7 +220,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	// dialled through the runtime directory.
 	agent, err := agentclient.New(s.runtime.path(j.id + "/0/agent.sock"))
 	if err != nil {
-		return nil, err
+		return nil, &bugError{err}
 	}
 	j.agent = agent
 	if err := s.waitReady(ctx, j, vm); err != nil {
@@ -241,7 +248,7 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 	// the exit is reported.
 	events, exited := j.proc.Events, j.proc.Exited
 	exitedErr := func() error {
-		return fmt.Errorf("the job process exited during boot%s", lastOutput(tail(vm.GetConsole()), tail(vm.GetVmLog())))
+		return fmt.Errorf("VM %s: its job process exited during boot%s", vm.GetName(), vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())))
 	}
 	for {
 		select {
@@ -253,7 +260,7 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 				return ctx.Err()
 			}
 			return fmt.Errorf("VM %s: the agent did not answer within %v%s", vm.GetName(), s.cfg.ReadyTimeout,
-				lastOutput(tail(vm.GetConsole()), tail(vm.GetVmLog())))
+				vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())))
 		case ev, ok := <-events:
 			if !ok {
 				if exited == nil {
@@ -263,14 +270,16 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 				continue
 			}
 			if x := ev.GetVmExited(); x != nil {
-				return fmt.Errorf("VM %s exited during boot with code %d%s", vm.GetName(), x.GetExitCode(),
-					lastOutput(x.GetConsoleTail(), x.GetLogTail()))
+				return errors.New(vmExited(vm.GetName()+" exited during boot", x))
 			}
+			// The reason names the cause first: the job network, the
+			// scratch disk, a disk or the VM, or, for the plugin's own
+			// bug, the job spec.
 			if f := ev.GetFailed(); f != nil {
-				if strings.HasPrefix(f.GetReason(), networkFailed) {
-					return &networkError{reason: f.GetReason()}
+				if f.GetBug() {
+					return &bugError{errors.New(f.GetReason())}
 				}
-				return fmt.Errorf("job process: %s", f.GetReason())
+				return errors.New(f.GetReason())
 			}
 		case <-exited:
 			if events == nil {
@@ -330,26 +339,50 @@ func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCaus
 
 // vmExitedError is the status of every call on a job whose VM, named name,
 // exited after Start: FailedPrecondition, naming the VM, its exit code and
-// its console tail. It is not Unavailable, which the runner reads as the
-// plugin being gone.
+// its last output, as a failed Start's error does. It is not Unavailable,
+// which the runner reads as the plugin being gone.
 func vmExitedError(name string, x *jobv1.VMExited) error {
-	msg := fmt.Sprintf("VM %s exited (%d)", name, x.GetExitCode())
-	if c := strings.TrimSpace(x.GetConsoleTail()); c != "" {
-		msg += ": " + c
-	}
-	return status.Error(codes.FailedPrecondition, msg)
+	return status.Error(codes.FailedPrecondition, vmExited(name+" exited", x))
 }
 
-// lastOutput formats a VM's last console and log output for an error.
-func lastOutput(console, log string) string {
+// vmExited is the message for VM x, which what names: `VM <what>
+// (<code>)`, then the VM's last output from x's tails.
+func vmExited(what string, x *jobv1.VMExited) string {
+	return fmt.Sprintf("VM %s (%d)%s", what, x.GetExitCode(), vmOutput(x.GetLogTail(), x.GetConsoleTail()))
+}
+
+// vmOutput formats a VM's last output for an error: the last tailLines
+// lines of the last tailBytes of its VM log and of its console, each on the
+// lines after its heading, with their newlines, and nothing for an empty
+// one. A tail comes from a file the guest writes, so it is cut to size here
+// whatever its source, and loses its invalid UTF-8 and carriage returns.
+func vmOutput(log, console string) string {
 	var b strings.Builder
-	if c := strings.TrimSpace(console); c != "" {
-		fmt.Fprintf(&b, "; console: %s", c)
-	}
-	if l := strings.TrimSpace(log); l != "" {
-		fmt.Fprintf(&b, "; VM log: %s", l)
+	for _, f := range []struct{ heading, text string }{{"VM log", log}, {"console", console}} {
+		if l := lastLines(f.text); l != "" {
+			fmt.Fprintf(&b, "\n%s:\n%s", f.heading, l)
+		}
 	}
 	return b.String()
+}
+
+// lastLines returns the last tailLines lines of the last tailBytes of s,
+// without a trailing newline.
+func lastLines(s string) string {
+	if len(s) > tailBytes {
+		s = s[len(s)-tailBytes:]
+	}
+	s = strings.ToValidUTF8(s, "")
+	s = strings.TrimRight(strings.ReplaceAll(s, "\r", ""), "\n")
+	end := len(s)
+	for range tailLines {
+		i := strings.LastIndexByte(s[:end], '\n')
+		if i < 0 {
+			return s
+		}
+		end = i
+	}
+	return s[end+1:]
 }
 
 // tail returns the end of the file at path, at most tailBytes; a file that

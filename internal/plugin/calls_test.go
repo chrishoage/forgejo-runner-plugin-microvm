@@ -280,10 +280,10 @@ func wantGone(t *testing.T, what string, err error, want string) {
 
 // Once the job process reports that the job's VM exited, an Exec in flight
 // and every later Exec, CopyIn and CopyOut fail with FailedPrecondition
-// naming the VM, its exit code and its console tail, not with the broken
-// connection's Unavailable. A job process that fails, or exits with
-// neither said, fails them the same way, naming the VM. Remove then works
-// as usual.
+// naming the VM, its exit code and its last output, as a failed Start
+// does, not with the broken connection's Unavailable. A job process that
+// fails, or exits with neither said, fails them the same way, naming the
+// VM. Remove then works as usual.
 func TestCallsOnAJobWhoseVMDied(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -294,7 +294,7 @@ func TestCallsOnAJobWhoseVMDied(t *testing.T) {
 			[]*jobv1.Event{{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
 				ExitCode: 1, ConsoleTail: "Kernel panic - not syncing: Attempted to kill init!\n", LogTail: "the VM log",
 			}}}},
-			"VM job exited (1): Kernel panic - not syncing: Attempted to kill init!",
+			"VM job exited (1)\nVM log:\nthe VM log\nconsole:\nKernel panic - not syncing: Attempted to kill init!",
 		},
 		"job process fails": {
 			[]*jobv1.Event{{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "the job network stopped"}}}},
@@ -429,7 +429,7 @@ func TestCallWhoseAgentFailsAsItsVMDies(t *testing.T) {
 				ExitCode: 1, ConsoleTail: "Kernel panic - not syncing: Attempted to kill init!\n",
 			}}})
 			wantGone(t, "the Exec in flight", within(t, inFlight, "the Exec in flight"),
-				"VM job exited (1): Kernel panic - not syncing: Attempted to kill init!")
+				"VM job exited (1)\nconsole:\nKernel panic - not syncing: Attempted to kill init!")
 		})
 	}
 }

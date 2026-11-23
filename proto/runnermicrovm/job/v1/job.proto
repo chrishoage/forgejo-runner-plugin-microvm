@@ -194,4 +194,8 @@ message Failed {
   // fails to start gives `network: <error>`, which Start reports as
   // FailedPrecondition.
   string reason = 1;
+  // Set when only a bug in the plugin can cause the failure: the job spec
+  // can't be read, or doesn't describe a job. Start reports it as Internal,
+  // the code for the plugin's own bugs (PROTO-10).
+  bool bug = 2;
 }
