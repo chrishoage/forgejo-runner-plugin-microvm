@@ -93,13 +93,26 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 }
 
 // startError is the status a failed Start returns: the call's own context's
-// code once it ended, Unavailable otherwise.
+// code once it ended, FailedPrecondition when the job network failed to
+// start, Unavailable otherwise.
 func startError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return status.FromContextError(ctx.Err()).Err()
 	}
+	if errors.As(err, new(*networkError)) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
 	return status.Error(codes.Unavailable, err.Error())
 }
+
+// networkFailed is how a job process's Failed reason begins when its job
+// network failed to start.
+const networkFailed = "network: "
+
+// networkError is a job network that failed to start.
+type networkError struct{ reason string }
+
+func (e *networkError) Error() string { return "job process: " + e.reason }
 
 // boot does Start's work on j, which is locked, and returns the image's
 // environment. On error, j.proc and j.agent may be set: the caller stops
@@ -112,6 +125,10 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 			return nil, err
 		}
 	}
+	addr, mac, err := vmAddress(0)
+	if err != nil {
+		return nil, err
+	}
 	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
 	if err != nil {
 		return nil, fmt.Errorf("image %s: %w", j.image, err)
@@ -121,6 +138,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		Layers:        img.Layers,
 		ScratchDevice: scratchDevice,
 		ScratchPaths:  j.profile.ScratchPaths,
+		Network:       bootNetwork(addr),
 		Image:         &agentv1.Image{Env: img.Env},
 	}
 	root := filepath.Join(vmState, "root")
@@ -139,6 +157,8 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		AgentPort:        agentPort,
 		RootDir:          root,
 		LayerDir:         img.LinkDir,
+		GuestAddress:     addr.String(),
+		GuestMac:         mac.String(),
 		Boot:             boot,
 	}
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
@@ -146,6 +166,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		JobBinary: s.cfg.JobBinary,
 		LibDir:    s.cfg.LibDir,
 		MkfsExt4:  s.cfg.MkfsExt4,
+		Network:   jobNetwork(),
 		Vms:       []*jobv1.VM{vm},
 	}, filepath.Join(s.jobStateDir(j.id), "job.log"))
 	if err != nil {
@@ -178,7 +199,14 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 	}()
 	// The goroutine always ends, once readyCtx does at the latest.
 	defer func() { cancel(); <-done }()
-	events := j.proc.Events
+	// Once the job process has exited, its events still to come say why:
+	// they end when the launcher reaches the end of its stdout, which no
+	// process is left to hold open, so they are read to their end before
+	// the exit is reported.
+	events, exited := j.proc.Events, j.proc.Exited
+	exitedErr := func() error {
+		return fmt.Errorf("the job process exited during boot%s", lastOutput(tail(vm.GetConsole()), tail(vm.GetVmLog())))
+	}
 	for {
 		select {
 		case err := <-ready:
@@ -192,6 +220,9 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 				lastOutput(tail(vm.GetConsole()), tail(vm.GetVmLog())))
 		case ev, ok := <-events:
 			if !ok {
+				if exited == nil {
+					return exitedErr()
+				}
 				events = nil
 				continue
 			}
@@ -200,10 +231,16 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 					lastOutput(x.GetConsoleTail(), x.GetLogTail()))
 			}
 			if f := ev.GetFailed(); f != nil {
+				if strings.HasPrefix(f.GetReason(), networkFailed) {
+					return &networkError{reason: f.GetReason()}
+				}
 				return fmt.Errorf("job process: %s", f.GetReason())
 			}
-		case <-j.proc.Exited:
-			return fmt.Errorf("the job process exited during boot%s", lastOutput(tail(vm.GetConsole()), tail(vm.GetVmLog())))
+		case <-exited:
+			if events == nil {
+				return exitedErr()
+			}
+			exited = nil
 		}
 	}
 }

@@ -20,6 +20,7 @@ import (
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 )
 
 // create creates a job on c and returns its environment id.
@@ -93,7 +94,8 @@ func TestStartBootsTheVM(t *testing.T) {
 	}
 	wantBoot := &agentv1.BootConfig{
 		LayerDir: "/dev/.runner-microvm/layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
-		Image: &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+		Network: &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
+		Image:   &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
 	}
 	if !proto.Equal(boot, wantBoot) {
 		t.Errorf("boot config = %v, want %v", boot, wantBoot)
@@ -103,12 +105,17 @@ func TestStartBootsTheVM(t *testing.T) {
 		len(spec.GetVms()) != 1 {
 		t.Fatalf("job spec = %v", spec)
 	}
+	wantNet := &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500}
+	if !proto.Equal(spec.GetNetwork(), wantNet) {
+		t.Errorf("job network = %v, want %v", spec.GetNetwork(), wantNet)
+	}
 	vm := spec.GetVms()[0]
 	if vm.GetRootDir() != root || vm.GetAgentPort() != 1024 || vm.GetCpus() != 2 || vm.GetMemoryMib() != 1024 ||
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
 		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
 		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 ||
-		vm.GetLayerDir() != "/cache/jobs/"+id+"/0" || !proto.Equal(vm.GetBoot(), wantBoot) {
+		vm.GetLayerDir() != "/cache/jobs/"+id+"/0" || !proto.Equal(vm.GetBoot(), wantBoot) ||
+		vm.GetGuestAddress() != "198.18.0.2" || vm.GetGuestMac() != "02:00:c6:12:00:02" {
 		t.Errorf("VM = %v", vm)
 	}
 	if launcher.logs[0] != filepath.Join(state, "job.log") {
@@ -189,6 +196,22 @@ func TestStartFails(t *testing.T) {
 				t.Fatalf("Remove after a failed Start: %v", err)
 			}
 		})
+	}
+}
+
+// A job network that fails to start fails Start with FailedPrecondition,
+// naming the network, and leaves no job process behind.
+func TestStartFailsOnTheNetwork(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{does: networkFails}
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, launcher)))
+	_, err := start(testContext(t), c, create(t, c))
+	wantCode(t, err, codes.FailedPrecondition)
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "network: cannot reserve gateway IP") {
+		t.Errorf("error %q does not name the network", msg)
+	}
+	if launcher.alive() != 0 {
+		t.Error("a failed Start left its job process running")
 	}
 }
 
