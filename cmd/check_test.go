@@ -35,7 +35,7 @@ func TestBuiltPluginCheck(t *testing.T) {
 	if err := os.WriteFile(valid, []byte("state_dir: "+dir+"/state\nmax_memory_mib: 0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(invalid, []byte("profiles:\n  big:\n    cpus: 8\n"), 0o600); err != nil {
+	if err := os.WriteFile(invalid, []byte("profiles:\n  big:\n    cpus: 256\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,7 +46,7 @@ func TestBuiltPluginCheck(t *testing.T) {
 		out, inErr string
 	}{
 		{[]string{"check"}, valid, 0, "config " + valid + ": valid\n", ""},
-		{[]string{"check"}, invalid, 1, "", "config " + invalid + `: line 3: profile "big": cpus: unknown key`},
+		{[]string{"check"}, invalid, 1, "", "config " + invalid + `: line 3: profile "big": cpus: must be from 1 to 255, not 256`},
 		{nil, valid, 2, "", "usage: runner-microvm <command>"},
 	} {
 		code, stdout, stderr := runBin(t, bin, tc.file, tc.args...)
