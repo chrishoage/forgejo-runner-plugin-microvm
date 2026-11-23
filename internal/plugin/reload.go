@@ -83,6 +83,6 @@ func logProfiles(log *slog.Logger, ps config.Profiles) {
 		p, _ := ps.Lookup(name)
 		_, defined := ps[name]
 		log.Info("profile", "name", name, "defined", defined, "cpus", p.CPUs, "memory_mib", p.MemoryMiB, "scratch_gib", p.ScratchGiB,
-			"scratch_paths", p.ScratchPaths)
+			"scratch_paths", p.ScratchPaths, "force_pull", p.ForcePull)
 	}
 }

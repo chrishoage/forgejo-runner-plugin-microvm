@@ -185,7 +185,7 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 	}
 	s.log.Info("created", "job", j.id, "name", req.GetName(), "image", image, "profile", j.profileName,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
-		"scratch_paths", j.profile.ScratchPaths)
+		"scratch_paths", j.profile.ScratchPaths, "force_pull", j.profile.ForcePull)
 	return &pluginv1alpha.CreateResponse{
 		EnvironmentId: j.id,
 		RootPath:      rootPath,

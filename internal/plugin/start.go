@@ -112,7 +112,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 			return nil, err
 		}
 	}
-	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image})
+	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
 	if err != nil {
 		return nil, fmt.Errorf("image %s: %w", j.image, err)
 	}

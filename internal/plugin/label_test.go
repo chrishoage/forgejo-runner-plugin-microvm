@@ -14,12 +14,13 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
 )
 
 // The profiles the tests below define: big sets every key, and cpusOnly
 // only cpus.
 var (
-	bigProfile      = config.Profile{CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4, ScratchPaths: []string{"/var/lib/docker", "/tmp"}}
+	bigProfile      = config.Profile{CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4, ScratchPaths: []string{"/var/lib/docker", "/tmp"}, ForcePull: true}
 	cpusOnlyProfile = config.Profile{CPUs: 8, MemoryMiB: 1024, ScratchGiB: 10}
 	definedDefault  = config.Profile{CPUs: 1, MemoryMiB: 512, ScratchGiB: 2}
 )
@@ -149,12 +150,13 @@ func TestCreateEmptyImagePartWithAContainerImage(t *testing.T) {
 }
 
 // Start puts the job's profile's CPU count, memory and scratch size in the
-// job spec (VM-4, VM-5), and a job created before the profiles change keeps
-// its copy, even one not yet started (CFG-7).
+// job spec (VM-4, VM-5), and acquires its image with the profile's
+// force_pull (IMG-6); a job created before the profiles change keeps its
+// copy, even one not yet started (CFG-7).
 func TestStartUsesTheJobsProfile(t *testing.T) {
 	t.Parallel()
-	launcher := &fakeLauncher{}
-	srv := newTestServer(t, &fakeCache{}, launcher)
+	cache, launcher := &fakeCache{}, &fakeLauncher{}
+	srv := newTestServer(t, cache, launcher)
 	srv.SetProfiles(config.Profiles{"big": bigProfile})
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
 	createWith := func(arg string) string {
@@ -191,7 +193,27 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 			t.Errorf("job %s: VM has %d CPUs, %d MiB, %d scratch bytes, scratch paths %q; want %+v",
 				tc.id, vm.GetCpus(), vm.GetMemoryMib(), vm.GetScratchSizeBytes(), vm.GetBoot().GetScratchPaths(), tc.want)
 		}
+		if req := acquiredBy(t, cache, tc.id); req.ForcePull != tc.want.ForcePull {
+			t.Errorf("job %s: Acquire(%+v); want ForcePull %v", tc.id, req, tc.want.ForcePull)
+		}
 	}
+}
+
+// acquiredBy returns the one request cache's Acquire had for job id.
+func acquiredBy(t *testing.T, cache *fakeCache, id string) imagecache.Request {
+	t.Helper()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	var reqs []imagecache.Request
+	for _, req := range cache.acquired {
+		if req.Job == id {
+			reqs = append(reqs, req)
+		}
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("job %s acquired %+v, want one request", id, reqs)
+	}
+	return reqs[0]
 }
 
 // specOf returns the job spec launcher launched for job id.
