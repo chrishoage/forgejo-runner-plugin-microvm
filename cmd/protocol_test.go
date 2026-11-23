@@ -62,13 +62,28 @@ func TestEchoWorkflow(t *testing.T) {
 
 // TestProfileWorkflow runs a workflow whose label names the big profile:
 // its VM has that profile's CPU count, memory and scratch size (VM-4, VM-5).
+// Then it changes the profile's CPU count in the plugin's config file and
+// sends the plugin SIGHUP: the next job on the profile has the new count
+// (CFG-7).
 func TestProfileWorkflow(t *testing.T) {
 	wf := writeWorkflow(t, "  big:\n    runs-on: microvm-big\n    steps:\n      - run: |\n          "+shapeStep+"\n")
-	log, err := runWorkflow(t, wf, map[string]string{"microvm-big": readImage(t) + ";profile=" + bigProfile})
+	images := map[string]string{"microvm-big": readImage(t) + ";profile=" + bigProfile}
+	p := startPlugin(t, buildPlugin(t))
+	log, err := runWorkflowOn(t, p, wf, images)
 	if err != nil {
 		t.Fatalf("the workflow failed: %v", err)
 	}
 	wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB)
+
+	const reloadedCPUs = bigCPUs + 1
+	p.writeConfig(t, fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: %d\n    scratch_gib: %d\n",
+		bigProfile, reloadedCPUs, bigMemoryMiB, bigScratchGiB))
+	p.reload(t)
+	log, err = runWorkflowOn(t, p, wf, images)
+	if err != nil {
+		t.Fatalf("the workflow failed after the reload: %v", err)
+	}
+	wantShape(t, log, reloadedCPUs, bigMemoryMiB, bigScratchGiB)
 }
 
 // shapeStep is the step, in e2e/workflows/echo.yml too, that prints the VM's
@@ -113,7 +128,13 @@ func wantShape(t *testing.T, log string, cpus, memoryMiB, scratchGiB uint64) {
 // job log and the executor's error.
 func runWorkflow(t *testing.T, workflow string, images map[string]string) (string, error) {
 	t.Helper()
-	sock := startPlugin(t, buildPlugin(t))
+	return runWorkflowOn(t, startPlugin(t, buildPlugin(t)), workflow, images)
+}
+
+// runWorkflowOn is runWorkflow against the running plugin p.
+func runWorkflowOn(t *testing.T, p *plugin, workflow string, images map[string]string) (string, error) {
+	t.Helper()
+	sock := p.sock
 	planner, err := model.NewWorkflowPlanner(workflow, true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -175,14 +196,56 @@ func buildPlugin(t *testing.T) string {
 	return bin
 }
 
+// plugin is a running plugin under test.
+type plugin struct {
+	// sock is its listen socket.
+	sock string
+	// config is its config file, and dirs the config file's directory
+	// keys, which every version of the file keeps.
+	config, dirs string
+	pid          int
+	log          *syncBuffer
+}
+
+// writeConfig replaces p's config file with its directory keys and
+// profiles, in one step, as an editor's save through a rename does.
+func (p *plugin) writeConfig(t *testing.T, profiles string) {
+	t.Helper()
+	tmp := p.config + ".tmp"
+	if err := os.WriteFile(tmp, []byte(p.dirs+profiles), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, p.config); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reloaded is the plugin's log line for a successful reload.
+var reloaded = regexp.MustCompile(`msg="reloaded the config file"`)
+
+// reload sends p SIGHUP and waits until its log shows the reload.
+func (p *plugin) reload(t *testing.T) {
+	t.Helper()
+	before := len(reloaded.FindAllString(p.log.String(), -1))
+	if err := syscall.Kill(p.pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for len(reloaded.FindAllString(p.log.String(), -1)) == before {
+		if time.Now().After(deadline) {
+			t.Fatalf("the plugin did not reload on SIGHUP:\n%s", p.log.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // startPlugin runs the plugin's serve by path, with RUNNER_MICROVM_CONFIG
 // naming a config file that puts its directories in a fresh directory and
-// defines testProfiles, and
-// returns its listen socket once it exists. On
+// defines testProfiles, and returns it once its listen socket exists. On
 // cleanup it stops the plugin with SIGTERM, which removes every job; a
 // plugin still running after that, or at the timeout, is killed with each
 // job process's group (killWithJobs).
-func startPlugin(t *testing.T, bin string) string {
+func startPlugin(t *testing.T, bin string) *plugin {
 	t.Helper()
 	// Short, so the runner's client can connect to the socket by its path.
 	base, err := os.MkdirTemp("", "rm-")
@@ -191,17 +254,17 @@ func startPlugin(t *testing.T, bin string) string {
 	}
 	sock := filepath.Join(base, "runtime", "runner-microvm.sock")
 	cfg := filepath.Join(base, "config.yaml")
-	content := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n%s",
-		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"), testProfiles)
-	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
+	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"))
+	if err := os.WriteFile(cfg, []byte(dirs+testProfiles), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	var log syncBuffer
+	log := &syncBuffer{}
 	cmd := exec.CommandContext(ctx, bin, "serve")
 	cmd.Env = append(os.Environ(), "RUNNER_MICROVM_CONFIG="+cfg)
-	cmd.Stdout, cmd.Stderr = &log, &log
+	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { killWithJobs(cmd.Process.Pid); return nil }
 	cmd.WaitDelay = 10 * time.Second
@@ -230,7 +293,7 @@ func startPlugin(t *testing.T, bin string) string {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			return sock
+			return &plugin{sock: sock, config: cfg, dirs: dirs, pid: cmd.Process.Pid, log: log}
 		}
 		select {
 		case <-done:
