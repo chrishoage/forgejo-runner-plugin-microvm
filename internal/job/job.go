@@ -50,6 +50,12 @@ func Main(args []string) int {
 		return vm.Main(os.Stdin, logging.Setup("runner-microvm-vm"))
 	case len(args) == 0:
 		log := logging.Setup("runner-microvm-job")
+		live, err := liveness()
+		if err != nil {
+			log.Error("job process", "err", err)
+			return 1
+		}
+		go dieWithPlugin(live, log, killGroup)
 		if err := Run(context.Background(), os.Stdin, os.Stdout, log); err != nil {
 			log.Error("job process", "err", err)
 			return 1
@@ -67,14 +73,48 @@ const tailBytes = 300
 // maxSpec bounds the job spec read from the control channel.
 const maxSpec = 1 << 20
 
+// livenessFD is the liveness pipe's descriptor in the job process and in
+// each VM child.
+const livenessFD = 3
+
+// liveness returns the liveness pipe this process inherited as fd 3, made
+// close-on-exec, so only a child it is handed to explicitly holds it.
+func liveness() (*os.File, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(livenessFD, &st); err != nil {
+		return nil, fmt.Errorf("no liveness pipe on fd %d: %w", livenessFD, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFIFO {
+		return nil, fmt.Errorf("fd %d is not the liveness pipe: mode %#o", livenessFD, st.Mode)
+	}
+	unix.CloseOnExec(livenessFD)
+	return os.NewFile(livenessFD, "liveness pipe"), nil
+}
+
+// dieWithPlugin reads the liveness pipe until it ends, which it does once
+// the plugin, the only holder of its write end, is gone, and then calls
+// kill. Nothing is ever written to the pipe.
+func dieWithPlugin(live *os.File, log *slog.Logger, kill func()) {
+	_, err := io.Copy(io.Discard, live)
+	log.Error("the plugin is gone: its liveness pipe ended", "err", err)
+	kill()
+}
+
+// killGroup kills the job process's group, its VM children and mkfs
+// included, and so itself. The launcher makes each job process the leader
+// of a group of its own; one that isn't kills only itself.
+func killGroup() {
+	if pid := os.Getpid(); unix.Getpgrp() == pid {
+		_ = unix.Kill(-pid, unix.SIGKILL)
+	}
+	_ = unix.Kill(os.Getpid(), unix.SIGKILL)
+}
+
 // Run is the job process: it reads the job spec from in, starts the job
 // network and attaches every VM to it, reports NetworkUp, runs its VM in a
 // VM child, and writes status events to out until the VM child exits. A VM
 // never boots before its switch serves its socket. Cancelling ctx kills the
 // VM child.
-//
-// SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the job process and
-// its VM child outlive a plugin that dies.
 func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) error {
 	spec := &jobv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
@@ -171,6 +211,9 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 // runVM starts VM 0's VM child, with link, its VM's end of its frame
 // socket, as its fd 4, reports VMStarted, and waits for it to exit. It
 // returns the VM child's exit code, 128+n when signal n ended it.
+//
+// SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the VM child outlives
+// a job process killed outright.
 func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link *os.File, out io.Writer, log *slog.Logger) (int32, error) {
 	if err := createScratchDisk(ctx, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
 		return 0, fmt.Errorf("scratch disk %s: %w", v.GetScratchDisk(), err)

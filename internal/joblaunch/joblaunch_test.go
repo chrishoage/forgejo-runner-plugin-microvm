@@ -28,7 +28,11 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if builtDir != "" {
+		_ = os.RemoveAll(builtDir)
+	}
+	os.Exit(code)
 }
 
 // fakeJobBinary writes a shell script standing in for the job binary. It
@@ -43,9 +47,19 @@ func fakeJobBinary(t *testing.T, script string) *jobv1.Spec {
 	return &jobv1.Spec{Job: "job-1", JobBinary: path, Vms: []*jobv1.VM{{Name: "echo"}}}
 }
 
+func newLauncher(t *testing.T) *Launcher {
+	t.Helper()
+	l, err := New(slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	return l
+}
+
 func launch(t *testing.T, spec *jobv1.Spec) (*Launcher, *Process, string) {
 	t.Helper()
-	l := New(slog.New(slog.DiscardHandler))
+	l := newLauncher(t)
 	logPath := filepath.Join(t.TempDir(), "job.log")
 	p, err := l.Launch(t.Context(), spec, logPath)
 	if err != nil {
@@ -183,7 +197,7 @@ func TestKill(t *testing.T) {
 // Kill gives up with its context's error, not the job process's life.
 func TestKillHonoursItsContext(t *testing.T) {
 	t.Parallel()
-	l := New(slog.New(slog.DiscardHandler))
+	l := newLauncher(t)
 	p := &Process{Exited: make(chan struct{}), pid: 1 << 30, exited: true}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -194,7 +208,7 @@ func TestKillHonoursItsContext(t *testing.T) {
 
 func TestLaunchFails(t *testing.T) {
 	t.Parallel()
-	l := New(slog.New(slog.DiscardHandler))
+	l := newLauncher(t)
 	spec := &jobv1.Spec{JobBinary: filepath.Join(t.TempDir(), "missing")}
 	if _, err := l.Launch(t.Context(), spec, filepath.Join(t.TempDir(), "job.log")); err == nil {
 		t.Error("launched a missing binary")
@@ -220,7 +234,7 @@ func TestLaunchFailsWhenTheSpecCantBeWritten(t *testing.T) {
 	// A spec bigger than a pipe's buffer, so the write can't complete
 	// before the job process is gone.
 	spec := &jobv1.Spec{Job: strings.Repeat("x", 1<<20), JobBinary: path}
-	l := New(slog.New(slog.DiscardHandler))
+	l := newLauncher(t)
 	if _, err := l.Launch(t.Context(), spec, filepath.Join(t.TempDir(), "job.log")); err == nil {
 		t.Fatal("launched, though the spec was never read")
 	}

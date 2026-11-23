@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -60,12 +61,41 @@ type Process struct {
 const maxEvent = 1 << 20
 
 // Launcher starts job processes. It is the plugin's JobLauncher.
+//
+// Every job process holds the read end of the launcher's liveness pipe as its
+// fd 3, and only the launcher holds the write end, close-on-exec, so no child
+// of the plugin inherits it. The pipe reads end of file once the plugin is
+// gone, however it died, and the job process then kills its group. Each job
+// process also gets Pdeathsig SIGKILL, the backstop for a job process too
+// stuck to read the pipe, forked from the launcher's own locked OS thread.
 type Launcher struct {
 	log *slog.Logger
+	// liveR is what each job process gets as fd 3; liveW is never written,
+	// and is closed only by Close or when the plugin exits.
+	liveR, liveW *os.File
+	thread       *thread
 }
 
-// New returns a launcher.
-func New(log *slog.Logger) *Launcher { return &Launcher{log: log} }
+// New returns a launcher, with its liveness pipe and its forking thread. Both
+// last until Close, which the plugin calls as it exits.
+func New(log *slog.Logger) (*Launcher, error) {
+	liveR, liveW, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("liveness pipe: %w", err)
+	}
+	return &Launcher{log: log, liveR: liveR, liveW: liveW, thread: startThread()}, nil
+}
+
+// Close ends the launcher's forking thread and closes both ends of its
+// liveness pipe, so a job process still running dies as it would with the
+// plugin. A closed launcher launches nothing. Closing it again does nothing.
+func (l *Launcher) Close() {
+	// Every Launch forks on the thread, so once it is gone no Launch can
+	// still be handing liveR to a job process.
+	l.thread.stop()
+	_ = l.liveR.Close()
+	_ = l.liveW.Close()
+}
 
 // SetSubreaper makes the calling process a child subreaper, so a VM child
 // whose job process is gone is reparented to it, and the launcher can reap
@@ -80,11 +110,9 @@ func SetSubreaper() error {
 
 // Launch starts spec's job binary as a job process leading its own process
 // group, with stderr on the job process log at logPath, and writes spec to
-// its control channel. ctx bounds the launch only. On error, every process it
-// started has been killed and reaped.
-//
-// SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the job process
-// outlives a plugin that dies.
+// its control channel. Its fd 3 is the liveness pipe, and it gets Pdeathsig
+// SIGKILL from the launcher's thread. ctx bounds the launch only. On error,
+// every process it started has been killed and reaped.
 func (l *Launcher) Launch(ctx context.Context, spec *jobv1.Spec, logPath string) (*Process, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -104,9 +132,14 @@ func (l *Launcher) Launch(ctx context.Context, spec *jobv1.Spec, logPath string)
 		_ = stdinR.Close()
 		return nil, err
 	}
-	proc, err := os.StartProcess(spec.GetJobBinary(), []string{spec.GetJobBinary()}, &os.ProcAttr{
-		Files: []*os.File{stdinR, stdoutW, logFile},
-		Sys:   &syscall.SysProcAttr{Setpgid: true},
+	var proc *os.Process
+	err = l.thread.do(ctx, func() error {
+		var err error
+		proc, err = os.StartProcess(spec.GetJobBinary(), []string{spec.GetJobBinary()}, &os.ProcAttr{
+			Files: []*os.File{stdinR, stdoutW, logFile, l.liveR},
+			Sys:   &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL},
+		})
+		return err
 	})
 	// The child holds its own ends now.
 	_ = stdinR.Close()
@@ -222,4 +255,77 @@ func waitExitNoReap(pid int) {
 			return
 		}
 	}
+}
+
+// errThreadGone is do's error once its thread has exited.
+var errThreadGone = errors.New("the launcher's forking thread is gone")
+
+// thread is a goroutine locked to an OS thread of its own, which forks every
+// job process. Pdeathsig fires when the thread that forked a child exits, not
+// when its process does, and a goroutine that isn't locked may fork on a
+// thread the runtime ends at any time. This thread lives until the
+// launcher's Close, as long as the plugin.
+type thread struct {
+	calls chan func()
+	// tid is the thread's id, never the main thread's.
+	tid   int
+	ready chan struct{}
+	quit  chan struct{}
+	done  chan struct{}
+	once  sync.Once
+}
+
+func startThread() *thread {
+	t := &thread{calls: make(chan func()), ready: make(chan struct{}), quit: make(chan struct{}), done: make(chan struct{})}
+	go t.serve()
+	<-t.ready
+	return t
+}
+
+func (t *thread) serve() {
+	runtime.LockOSThread()
+	if syscall.Gettid() == syscall.Getpid() {
+		// The main thread never exits while the process runs: the runtime
+		// parks it instead. Hand the work to another thread, which the
+		// new goroutine must be while this one holds the main thread.
+		go t.serve()
+		<-t.ready
+		runtime.UnlockOSThread()
+		return
+	}
+	defer close(t.done)
+	t.tid = syscall.Gettid()
+	close(t.ready)
+	// Never unlocked: when serve returns, the runtime ends the thread
+	// rather than hand it to another goroutine, so a job process's
+	// Pdeathsig fires only when its thread is truly gone.
+	for {
+		select {
+		case f := <-t.calls:
+			f()
+		case <-t.quit:
+			return
+		}
+	}
+}
+
+// do runs f on the thread and returns its error, or ctx's error if the
+// thread is busy until ctx ends.
+func (t *thread) do(ctx context.Context, f func() error) error {
+	errc := make(chan error, 1)
+	select {
+	case t.calls <- func() { errc <- f() }:
+		return <-errc
+	case <-t.done:
+		return errThreadGone
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// stop ends the thread, which fires the Pdeathsig of every job process it
+// forked.
+func (t *thread) stop() {
+	t.once.Do(func() { close(t.quit) })
+	<-t.done
 }

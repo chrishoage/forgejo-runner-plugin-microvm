@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
+	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
 
 // runMain runs Main with RUNNER_MICROVM_CONFIG set to file, and returns its
@@ -130,7 +132,7 @@ func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
 			}
 			calls = append(calls, maxSize)
 			return nil, errOpen
-		})
+		}, joblaunch.New)
 		if !errors.Is(err, errOpen) {
 			t.Errorf("%q: run returned %v, want the image cache's error", content, err)
 		}
@@ -138,5 +140,46 @@ func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
 			t.Errorf("%q: the image cache opened with caps %v, want one of %d bytes", content, calls, want)
 		}
 		_ = mustLock(t, dirs)
+	}
+}
+
+// run closes the job launcher it made when it fails after making it, so a
+// failed startup leaves no forking thread and no liveness pipe behind.
+//
+// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
+func TestRunClosesTheLauncherWhenStartupFails(t *testing.T) {
+	tools := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tools, "mkfs.ext4"), nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools)
+	t.Setenv(LibDirEnv, "")
+	errOpen := errors.New("the fake image cache does not open")
+	var launcher *joblaunch.Launcher
+	err := run(t.Context(), discardLog(), configOf(testDirs(filepath.Join(t.TempDir(), "plugin"))), nil,
+		func(*slog.Logger, string, int64) (ImageCache, error) { return nil, errOpen },
+		func(log *slog.Logger) (*joblaunch.Launcher, error) {
+			l, err := joblaunch.New(log)
+			launcher = l
+			return l, err
+		})
+	if !errors.Is(err, errOpen) {
+		t.Fatalf("run returned %v, want the image cache's error", err)
+	}
+	if launcher == nil {
+		t.Fatal("run failed before it made the job launcher")
+	}
+	t.Cleanup(launcher.Close)
+	// A job binary that would run, were the launcher still open.
+	bin := filepath.Join(t.TempDir(), "runner-microvm-job")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := launcher.Launch(t.Context(), &jobv1.Spec{Job: "job-1", JobBinary: bin}, filepath.Join(t.TempDir(), "job.log"))
+	if err == nil {
+		t.Error("run left its job launcher open: it launched a job process")
+		if err := launcher.Kill(t.Context(), p); err != nil {
+			t.Errorf("Kill: %v", err)
+		}
 	}
 }

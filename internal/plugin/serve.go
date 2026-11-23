@@ -100,7 +100,7 @@ func serveCmd(getenv func(string) string) int {
 	logConfig(log, cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, log, cfg, hup, newImageCache); err != nil {
+	if err := run(ctx, log, cfg, hup, newImageCache, joblaunch.New); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
@@ -134,9 +134,14 @@ func newImageCache(log *slog.Logger, dir string, maxSize int64) (ImageCache, err
 	return imagecache.New(log, dir, imagecache.WithMaxSize(maxSize))
 }
 
+// newLauncherFunc makes the job launcher. run takes it so tests can see that
+// run closes the launcher it made.
+type newLauncherFunc func(log *slog.Logger) (*joblaunch.Launcher, error)
+
 // run runs the plugin with cfg until ctx ends, reloading the config file on
-// each signal from hup. It opens the image cache with newCache.
-func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal, newCache newCacheFunc) error {
+// each signal from hup. It opens the image cache with newCache, and makes the
+// job launcher with newLauncher, which it closes on every return.
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal, newCache newCacheFunc, newLauncher newLauncherFunc) error {
 	// An architecture libkrun doesn't support, or a missing host tool,
 	// stops startup before anything is written.
 	arch, err := runnerArch(runtime.GOARCH)
@@ -155,6 +160,13 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 		return err
 	}
 	defer func() { _ = locks.Close() }()
+	// The job launcher, its forking thread and its liveness pipe, last
+	// until run returns, after the server has ended every job.
+	launcher, err := newLauncher(log)
+	if err != nil {
+		return err
+	}
+	defer launcher.Close()
 	// The image cache's own startup cleanup needs only the locks.
 	cache, err := newCache(log, dirs.Cache, cfg.CacheMaxBytes())
 	if err != nil {
@@ -192,7 +204,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 		Agent:     agent,
 		Profiles:  cfg.Profiles,
 		Cache:     cache,
-		Launcher:  joblaunch.New(log),
+		Launcher:  launcher,
 		Arch:      arch,
 	})
 	if err != nil {
