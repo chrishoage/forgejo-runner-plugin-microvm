@@ -288,17 +288,19 @@ func TestGuestCantReachHostLoopback(t *testing.T) {
 }
 
 // A packet a root guest crafts itself, to 0.0.0.0, which a host dial or send
-// takes as its own loopback, or to a loopback address, reaches no listener
-// on the host's 127.0.0.1, over TCP or UDP (NET-4): the guard keeps every
-// destination that isn't outside unicast from the gateway's forwarders. The
-// same packets to the host's non-loopback address are the positive control.
-func TestGuardKeepsTheForwardersOffTheHostsLoopback(t *testing.T) {
+// takes as its own loopback, or to 127.0.0.1 or another loopback address,
+// reaches no listener on the host's 127.0.0.1, over TCP or UDP (NET-4): the
+// guard keeps every destination that isn't outside unicast from the
+// gateway's forwarders, and the gateway's stack drops a packet to a
+// loopback address arriving on its link. The same packets to the host's
+// non-loopback address are the positive control.
+func TestCraftedPacketsCantReachHostLoopback(t *testing.T) {
 	t.Parallel()
 	host := hostAddr(t)
 	lo, ctl := listen(t, netip.MustParseAddr("127.0.0.1")), listen(t, host)
 	loUDP, ctlUDP := listenUDP(t, netip.MustParseAddr("127.0.0.1")), listenUDP(t, host)
 	vmEnd := attachRaw(t)
-	for _, to := range []string{"0.0.0.0", "127.0.0.1"} {
+	for _, to := range []string{"0.0.0.0", "127.0.0.1", "127.1.2.3"} {
 		for _, f := range [][]byte{syn(to, lo.port()), datagram(to, loUDP.port())} {
 			if _, err := vmEnd.Write(f); err != nil {
 				t.Fatal(err)
