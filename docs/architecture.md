@@ -166,6 +166,37 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
   The layer list and the scratch device come from the boot config fields the agent protocol already defines. The agent's new mount API calls are raw system calls, because the agent may not import `golang.org/x/sys`.
 - **A failure to build the root ends the agent, so the VM exits during boot,** and Start fails with its console tail (VM-8).
 
+## Configuration
+
+The plugin's settings and its profiles come from the config file, one YAML file (CFG-1). `internal/config` reads and validates it; the plugin is its only user.
+
+- **The file is `/etc/runner-microvm/config.yaml`, unless `RUNNER_MICROVM_CONFIG=<path>` names another;** a relative path in the variable is made absolute once, at startup. It is the default path plus the override that operators and packagers expect.
+- **No file at the default path means every setting takes its built-in value, and the plugin logs that it found none; so does an empty file (CFG-1). A missing file that `RUNNER_MICROVM_CONFIG` names stops startup, and so does any file that exists but can't be read, including a symlink at the default path, or on the way to it, whose target is gone.** A typo in the variable never falls back to built-in values without a word.
+- **`RUNNER_MICROVM_CONFIG` is the plugin's only environment variable for an operator setting; every other one is a key in the file.** One source of truth means one validation covers everything. `RUNNER_MICROVM_LIBDIR` stays a variable until #11's children turn it, the libkrun log level and kept logs into keys.
+- **The file is decoded with `go.yaml.in/yaml/v3`** (the YAML organisation's maintained fork, MIT and Apache-2.0). It is maintained and gives line numbers; `sigs.k8s.io/yaml` loses them, and `goccy/go-yaml` adds a dependency for no gain.
+- **The decoder walks the file's `yaml.Node` tree itself, key by key, so every error, decoding and validation alike, carries the line of the key at fault and, inside `profiles`, the profile's name:** `config <path>: line <n>: profile "<name>": <key>: <problem>`, and for a plugin-level key the same without the profile (CFG-2, CFG-3). An unknown key fails exactly as `KnownFields` would, but `KnownFields` exists only on a `yaml.Decoder` over bytes, not on a node's `Decode`, so a profile decoded from its own node couldn't use it, and its errors would be the library's text, whose line would have to be parsed out. Walking the nodes never blames a key written after `profiles:` on the last profile. Every error in the file is reported, not only the first. A key set twice in one mapping fails, naming both lines.
+- **A YAML syntax error stops startup with the library's line.** A second YAML document in the file is an error, and a top level that isn't a mapping is too.
+- **Unknown top-level keys are errors, Compose-style `x-` keys included.** Operators share values between profiles with YAML anchors on a profile and merge keys (`big: {<<: *default, cpus: 8}`): plain YAML, which the decoder expands, so the plugin never sees it, and profiles still don't inherit from each other (CFG-5). An explicit key wins over a merged one; an error in a merged key names the line where it is written and the profile it was merged into. A mapping that merges itself fails, and merges that expand to more than 100,000 keys fail, so a file can't make decoding loop or blow up.
+- **The plugin-level keys are read at startup only:**
+
+  | Key | Built-in value | Rule |
+  |---|---|---|
+  | `listen` | `unix:///run/runner-microvm/runner-microvm.sock` | `unix://` followed by an absolute path; any other form is an invalid value |
+  | `state_dir` | `/var/lib/runner-microvm` | absolute |
+  | `cache_dir` | `/var/cache/runner-microvm` | absolute |
+  | `runtime_dir` | `/run/runner-microvm/jobs` | absolute |
+  | `max_memory_mib` | unset | an integer ≥ 0; unset or 0 means no limit (Admission, below) |
+
+  - The names end in `_dir`: that says what the value is, and avoids a bare `cache` in a file operators keep next to the runner config, whose own `cache:` section is the actions cache.
+  - `listen` keeps the `unix://` scheme: it matches the runner's `plugins.<key>.address`, and leaves room for another transport later without changing the key.
+  - Every path must be absolute, or startup stops naming the key: a relative path would depend on whatever working directory the service manager uses. Paths are cleaned.
+  - A key with no value (`state_dir:`) is an invalid value, as is a value of the wrong type, such as a quoted number.
+  - The directories must follow the rule in Failure handling and startup cleanup (below); the check is `internal/config`'s, part of loading the file. It only reads: missing directories are created at startup, as before.
+  - `max_memory_mib` is read, validated and kept for #10, which builds the admission behind it.
+  - A plugin-level 0 is taken literally, except `max_memory_mib`, where 0 means no limit: literal values are honest.
+  - `cache_max_gib` arrives with #70, which passes it to the image cache's cap.
+- **`profiles` is a map from profile name to profile.** A name must match `[a-z0-9][a-z0-9_-]*`: a name with `;`, `=`, a space, or an empty name can never appear in a label, so it's a mistake best caught at load. Each profile key arrives with the change that gives it meaning (#67, #69, #70), so today a profile with any key fails as an unknown key, and an empty profile (`big: {}`, or `big:` with no value) decodes.
+
 ## On-disk layout
 
 `<state>`, `<cache>` and `<runtime>` are the plugin's directories, and `<listen>` is the directory holding its listen socket; each has its own config key (CFG-9). `<id>` is the job's environment id, and `<n>` is the VM's index in the job spec's VMs: 0 for the job's container, then each service in order. Today the job's container is the only VM, because the plugin protocol passes no VM options for services. A VM's directories are named by its index, never by its name, because the workflow chooses a service's name (One job process runs all of a job's VMs, above). Each VM gets its own directories, so a job's VMs never share a file by accident; the job process log is the job's, so it stays at the job's level.
@@ -254,7 +285,7 @@ The plugin process pulls and converts images, each layer pull in its own gorouti
 
 - **Each of the state, cache, runtime and listen-socket directories has its own lock: an exclusive, non-blocking `flock` on a `lock` file in that directory** (`<state>/lock`, `<cache>/lock`, `<runtime>/lock`, `<listen>/lock`), held for the plugin's whole life (IMG-16). A single state lock would let two plugins with different state directories share a cache or runtime directory, and then one plugin's startup cleanup would delete the other's live files.
 - **The state, cache and runtime directories must be distinct, and none may be inside another.** They are compared as absolute paths with symlinks resolved, before any lock is taken; otherwise startup fails with an error naming both config keys. Startup cleanup deletes `<runtime>/*` without looking: with runtime equal to cache it would wipe the image cache, and with runtime equal to state the kept logs and `bin/`. With state equal to cache, `<state>/jobs/<id>/<n>/` and `<cache>/jobs/<id>/<n>/` collide, so the read-only layer share would expose the VM's scratch disk and logs.
-- **The listen-socket directory may be the runtime directory; otherwise the same rule applies to it** (distinct from the other three, not inside one and not containing one), because cleanup of a directory that contains it would delete the listen socket. When it is the runtime directory, it takes no lock of its own, since two `flock`s on one file through two opens in one process block each other, and startup cleanup skips the listen socket.
+- **The listen-socket directory may be the runtime directory, or its direct parent; otherwise the same rule applies to it** (distinct from the other three, not inside one and not containing one), because cleanup of a directory that contains it would delete the listen socket. The direct parent is allowed because the built-in values have it so (`/run/runner-microvm/` holds the socket and `jobs/`), and nothing cleans the listen-socket directory, so its holding the runtime directory endangers neither. Only the direct parent: a directory further up is a system directory such as `/run`, whose `lock` file the plugin would create and hold. When it is the runtime directory, it takes no lock of its own, since two `flock`s on one file through two opens in one process block each other, and startup cleanup skips the listen socket. The socket itself may not be one of the three directories, nor the lock file of any directory the plugin locks, since binding it would fail on the lock file. No directory may be the lock file of another either, also the runtime directory when the listen-socket directory is its direct parent, since the plugin would create it and then fail to open it as that directory's lock file. Symlinks are resolved through their targets, also targets that don't exist yet, so a dangling link can't hide two directories being one. `check` reports these errors together with the file's decoding errors, comparing only the keys that decoded.
 - **The plugin takes the locks in a fixed order: state, cache, runtime, listen-socket directory.** The first one held by another process stops startup with an error naming that directory.
 - **The lock files are opened close-on-exec,** so no job process inherits one and keeps a directory locked after the plugin dies.
 - **At startup, after taking every directory lock, the plugin deletes `<state>/jobs/*`, `<state>/bin/*` (stale job binaries and leftover temp files; it then writes the job binary afresh), `<runtime>/*` except `<runtime>/lock` and, when `<listen>` is `<runtime>`, the listen socket, `<cache>/jobs/*` and `<cache>/tmp/*`, without inspecting them.** The locks prove no other plugin uses these directories. The liveness pipe and Pdeathsig mean no old job process outlives the plugin. So everything per-job is leftover. Cleanup never deletes a `lock` file: deleting a held lock file would let a second plugin lock a new file at the same path.
@@ -285,6 +316,7 @@ proto/runnermicrovm/vm/v1/          VM child spec (private to the job binary)
 internal/gen/runnermicrovm/{agent,job}/v1/      generated, committed
 internal/gen/plugin/v1alpha/        the runner's plugin protocol, generated, committed
 internal/plugin/                    BackendPlugin server, job table, the two seam interfaces
+internal/config/                    the config file: decoding and validation
 internal/imagecache/                pulls, conversion, cache, layer link directories, eviction
 internal/joblaunch/                 plugin side of a job process: start it, read events, kill it
 internal/agentclient/               plugin side of the agent protocol
@@ -300,7 +332,7 @@ internal/secret/                    the self-redacting secret type
 
 - **`cmd/<name>/` with thin mains, and everything else under `internal/`, with no `pkg/`.** This is the Go team's layout for multi-binary server repos (go.dev/doc/modules/layout). The project has no public Go API.
 - **Names avoid shadowing the standard library** (`logging`, not `log`), and follow the glossary (`imagecache`, not "image store").
-- **`config` (#8) and `queue` (#10) are created by their epics,** as `internal/config/` and `internal/queue/`. Both belong to the plugin.
+- **`queue` (#10) is created by its epic,** as `internal/queue/`. It belongs to the plugin, like `config`.
 
 ### Responsibilities and import rules
 
@@ -309,6 +341,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 | Package | Responsibility | Our packages it may import | Imported by |
 |---|---|---|---|
 | `internal/plugin` | `BackendPlugin` server, job table, the two seam interfaces | `imagecache`, `joblaunch`, `agentclient`, `payload`, `config`, `queue`, `logging`, `secret`, the agent and job protocols | `cmd/runner-microvm` |
+| `internal/config` | reads and validates the config file | none | `plugin` |
 | `internal/imagecache` | pulls, conversion, the cache, layer link directories, eviction | `logging` | `plugin` |
 | `internal/joblaunch` | starts a job process, reads its events, kills it | `logging`, the job protocol | `plugin` |
 | `internal/agentclient` | the plugin's side of the agent protocol | `secret`, the agent protocol | `plugin` |
