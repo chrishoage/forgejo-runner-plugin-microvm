@@ -66,6 +66,10 @@ A pipe held from the plugin down to every job process and VM child, whose closin
 **Job network**:
 A job's private network, run inside its job process, that only its VMs can use.
 
+**Gateway**:
+The job network's own address: every VM's default route and its only name server. Connections through it leave the host as the job process's own.
+_Avoid_: router, host (the host is the machine the plugin runs on)
+
 ## Inside the VM
 
 **VM**:

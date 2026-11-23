@@ -17,8 +17,8 @@ runner:
     - microvm-big:runner-microvm://@IMAGE@;profile=big
 
 cache:
-  # Off: the slice's guest has no network until #7, and nothing here needs
-  # a cache.
+  # Off: nothing here needs a cache, and the guest can't reach a cache
+  # server on the host's loopback (NET-4).
   enabled: false
 
 plugins:
