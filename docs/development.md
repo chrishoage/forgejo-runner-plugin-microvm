@@ -104,6 +104,7 @@ The harness is a real Forgejo and a real forgejo-runner in one compose stack, wi
 nix develop -c just e2e up     # fresh state, the plugin, Forgejo and the runner; waits until the runner is online
 nix develop -c just e2e run    # pushes e2e/workflows/echo.yml, dispatches it, prints the job's log and the VM's shape
 nix develop -c just e2e run big   # the same for e2e/workflows/big.yml, or any workflow in e2e/workflows/
+nix develop -c just e2e run clone # one of the Network exit-check workflows (The workflows, below)
 nix develop -c just e2e reload # sends the plugin SIGHUP and prints the reload's log lines
 nix develop -c just e2e down   # stops the plugin and every container, and deletes .e2e/
 COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman compose
@@ -133,7 +134,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 
 - **The recipes are a just module, `mod e2e`, loaded from `e2e/mod.just`:** `just e2e up`, `just e2e down`, `just e2e run [workflow]` and `just e2e reload`. It keeps them out of the root justfile's list and reads as sub-commands. Its recipes run in `e2e/`.
 - **`up`** checks the host's address (above), runs `down`, builds and starts the plugin and waits for its socket, writes the runner's config and the secrets, starts Forgejo and waits until it is healthy, creates the admin, registers the runner, starts the runner, and waits until Forgejo's API shows it online (`idle` or `active`), for up to 120 seconds, then prints the compose project's name.
-- **`run [workflow]`** runs `e2e/workflows/<workflow>.yml`, `echo` when none is named. It deletes and re-creates the test repository `e2e/<workflow>` through Forgejo's API, commits the workflow to `.forgejo/workflows/<workflow>.yml`, triggers it with `workflow_dispatch`, polls the run for up to 300 seconds, prints each job's log, and exits 0 only when the run succeeded and a job log has the first step's output (`hello from runner-microvm e2e`) as a line of its own. Then it prints each `shape:` line the jobs logged. A failing jobs list or log fetch fails it too, so a green `run` always shows the log. The expected text is the `expect` variable in `e2e/mod.just`, kept equal to the workflows' first step by hand: a change to one alone fails `run`. The repository is named after the workflow so that two runs of different workflows can be in flight at once, as the exit check below needs; each still starts from a fresh repository.
+- **`run [workflow]`** runs `e2e/workflows/<workflow>.yml`, `echo` when none is named. It deletes and re-creates the test repository `e2e/<workflow>`, private, through Forgejo's API, commits the workflow to `.forgejo/workflows/<workflow>.yml`, triggers it with `workflow_dispatch`, polls the run for up to 300 seconds, prints each job's log, and exits 0 only when the run succeeded and a job log has the first step's output (`hello from runner-microvm e2e`) as a line of its own. Then it prints each `shape:` line the jobs logged. A failing jobs list or log fetch fails it too, so a green `run` always shows the log. The expected text is the `expect` variable in `e2e/mod.just`, kept equal to the workflows' first step by hand: a change to one alone fails `run`. The repository is named after the workflow so that two runs of different workflows can be in flight at once, as the exit check below needs; each still starts from a fresh repository. It is private, so a job that reads it (`clone`, `checkout`) proves the token the runner gives the job works: anonymous reads get 401.
 - **`reload`** sends the plugin SIGHUP, then waits up to 30 seconds for the plugin's log, from the signal on, to show the reload: it prints the reload's lines (each profile, any setting kept until a restart, and the summary) and exits 0, or prints the error and exits 1 when the reload failed. Editing `.e2e/plugin-config.yaml` first is the developer's step, as it is the operator's: `runner-microvm check` with `RUNNER_MICROVM_CONFIG=.e2e/plugin-config.yaml` tests an edit without reloading.
 - **Both waits are wall-clock deadlines: 120 seconds for `up`, 300 for `run`.** Every curl has a timeout of its own, and a curl inside a wait never outlasts the time left, so neither wait can overrun however slow Forgejo answers.
 - **`down`** stops this checkout's stack and its plugin, removes its network, and deletes `.e2e/`.
@@ -154,6 +155,22 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
 - **`e2e/workflows/big.yml`: the same steps on `runs-on: microvm-big`,** so its VM has the `big` profile's shape.
 - **`e2e/workflows/hold.yml`: `big.yml`'s steps, then `sleep 60` and the shape again,** so a job is running while the config file is edited and reloaded.
+- **The Network epic's exit check (#7) is four workflows on `runs-on: microvm-node`, one per item, so a red run names what broke.** Each starts with the same `echo` step as the others, which `run` looks for.
+  - **`clone.yml`: `git clone` of the job's own repository in a `run:` step, at `github.server_url` with the job's token (`github.token`) as the password, over HTTP inside the harness.** That is what a real workflow does, and it proves the guest reaches the Forgejo server through the gateway. The repository is private, so the clone fails without the token.
+  - **`fetch.yml`: an HTTPS GET of `https://example.com/` with `curl`, after printing what `getent` resolves for it.** A stable public URL, so it proves DNS and TLS to the outside world.
+  - **`checkout.yml`: `actions/checkout@v7`, then a check that the workflow's own file is in the workspace.** v7 is the newest major on `data.forgejo.org`, where Forgejo resolves `actions/…` by default; it runs on the image's `node`.
+  - **`artifacts.yml`: an `upload` job that uploads a file with `https://data.forgejo.org/forgejo/upload-artifact@v4`, and a `download` job (`needs: upload`) that downloads it with `https://data.forgejo.org/forgejo/download-artifact@v4` and checks its content.** Forgejo implements its own artifact protocol, and its documentation for the pinned Forgejo, v17.0, says to use v3 or the patched v4 ([Advanced features, Artifacts](https://forgejo.org/docs/v17.0/user/actions/advanced-features/), whose v4 example uses these two actions). Upstream `actions/upload-artifact@v4` and later detect Forgejo as GHES and refuse to run.
+  - **The actions are referenced by tag, not commit digest.** Renovate's GitHub Actions manager doesn't read `e2e/workflows/`, so a digest would go stale unnoticed; a tag follows its major, and the artifact actions must stay on v4 anyway. The harness never runs in CI.
+- **The Network epic's exit check runs in the harness with these steps:**
+
+  ```sh
+  nix develop -c just e2e up
+  nix develop -c just e2e run clone       # "Cloning into 'repo'...", then the repository's commit
+  nix develop -c just e2e run fetch       # "fetched https://example.com/: HTTP 200"
+  nix develop -c just e2e run checkout    # actions/checkout@v7 fetches from http://<address>:3000/e2e/checkout
+  nix develop -c just e2e run artifacts   # the download job prints "artifact from run <id>"
+  nix develop -c just e2e down
+  ```
 
 ### The profiles
 

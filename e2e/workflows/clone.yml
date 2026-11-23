@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Network epic's exit check: a job clones its own repository from the
+# harness's Forgejo with git in a run: step, at the server URL and with the
+# token the runner gives the job, so the guest reaches Forgejo through the
+# gateway (docs/development.md, The local harness).
+name: clone
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clone:
+    runs-on: microvm-node
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - env:
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          echo "server: $SERVER_URL"
+          scheme=${SERVER_URL%%://*}
+          rest=${SERVER_URL#*://}
+          git clone "$scheme://e2e:$TOKEN@${rest%/}/$REPOSITORY.git" repo
+          test -f repo/.forgejo/workflows/clone.yml
+          git -C repo log --oneline -1

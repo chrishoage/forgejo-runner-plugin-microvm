@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Network epic's exit check: a job checks out its repository with
+# actions/checkout, which the runner copies into the VM and runs with the
+# image's node (docs/development.md, The local harness).
+name: checkout
+
+on:
+  workflow_dispatch:
+
+jobs:
+  checkout:
+    runs-on: microvm-node
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - uses: actions/checkout@v7
+      - run: |
+          set -eu
+          test -f .forgejo/workflows/checkout.yml
+          git log --oneline -1
