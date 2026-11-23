@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 )
 
@@ -126,18 +127,67 @@ func TestCreateReturnsPathsAndPlatform(t *testing.T) {
 	}
 }
 
-func TestCreateRefuses(t *testing.T) {
+// A job with services is well formed, but the plugin can't run them yet, so
+// Create fails with Unimplemented (PROTO-6), whatever else the request
+// holds, and adds no job.
+func TestCreateRefusesServices(t *testing.T) {
 	t.Parallel()
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
+	srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+	services := []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}}
+	const want = "runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM"
 	for name, req := range map[string]*pluginv1alpha.CreateRequest{
-		"no image":        {},
-		"container image": {Image: testImage, LabelArg: testImage},
-		"services":        {LabelArg: testImage, Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}}},
+		"label image":     {LabelArg: testImage, Services: services},
+		"container image": {LabelArg: ";", Image: testImage, Services: services},
+		"no image":        {Services: services},
 	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := c.Create(testContext(t), req)
-			wantCode(t, err, codes.InvalidArgument)
-		})
+		_, err := c.Create(testContext(t), req)
+		if status.Code(err) != codes.Unimplemented || status.Convert(err).Message() != want {
+			t.Errorf("%s: Create = %v; want Unimplemented: %s", name, err, want)
+		}
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if n := len(srv.jobs); n != 0 {
+		t.Errorf("%d jobs in the table after refused Creates", n)
+	}
+}
+
+// A job's container: image is the one it boots, in place of the label's;
+// without one, the label's (PROTO-4). The label's profile applies either
+// way.
+func TestCreateUsesTheContainerImage(t *testing.T) {
+	t.Parallel()
+	const container = "registry.example/team/build:1"
+	cache, launcher := &fakeCache{}, &fakeLauncher{}
+	srv := newTestServer(t, cache, launcher)
+	srv.SetProfiles(config.Profiles{"big": bigProfile})
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+	for _, tc := range []struct {
+		arg, container, want string
+		profile              config.Profile
+	}{
+		{testImage, container, container, config.BuiltinProfile()},
+		{testImage + ";profile=big", container, container, bigProfile},
+		{";profile=big", container, container, bigProfile},
+		{"", container, container, config.BuiltinProfile()},
+		{testImage + ";profile=big", "", testImage, bigProfile},
+	} {
+		resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: tc.arg, Image: tc.container})
+		if err != nil {
+			t.Fatalf("Create(label %q, container %q): %v", tc.arg, tc.container, err)
+		}
+		id := resp.GetEnvironmentId()
+		if _, err := start(testContext(t), c, id); err != nil {
+			t.Fatal(err)
+		}
+		if req := acquiredBy(t, cache, id); req.Ref != tc.want {
+			t.Errorf("label %q, container %q: acquired %q; want %q", tc.arg, tc.container, req.Ref, tc.want)
+		}
+		if vm := specOf(t, launcher, id).GetVms()[0]; vm.GetCpus() != tc.profile.CPUs || vm.GetMemoryMib() != tc.profile.MemoryMiB {
+			t.Errorf("label %q, container %q: VM has %d CPUs, %d MiB; want %+v",
+				tc.arg, tc.container, vm.GetCpus(), vm.GetMemoryMib(), tc.profile)
+		}
 	}
 }
 

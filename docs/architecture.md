@@ -294,7 +294,11 @@ The plugin's settings and its profiles come from the config file, one YAML file 
   - The plugin strips one more leading `//`, then splits at the first `;`. OCI references can't contain `;`, so the split is safe.
   - After the `;`, only `profile=<name>` is allowed. Each of these fails Create with `InvalidArgument`, naming the label argument: an empty name, any other key, a second key, and a trailing `;`. The runner reserves `InvalidArgument` for malformed requests (#6). Matching is exact and case-sensitive.
   - An empty image part (`runner-microvm://;profile=big`) is valid: it means the job brings its own `container:` image. A job with no image in either place fails Create with `InvalidArgument` (PROTO-5). This lets operators offer a VM shape without forcing an image.
-  - Create checks, in order: services (refused, PROTO-6), the label's form, its profile, then the image. So a malformed label or an unknown profile fails even when the job has a `container:` image. Today a `container:` image is still refused (`SHORTCUT(#6)`, PROTO-4), which #50 replaces by booting it in place of the label's image, with the label's profile.
+  - Create checks, in order: services (refused, PROTO-6), the label's form, its profile, then the image. So a malformed label or an unknown profile fails even when the job has a `container:` image.
+- **A job's `container:` image replaces the label's image; the label's profile still applies (PROTO-4).** The image is the workflow's choice, and the VM's shape is the operator's. Create records the chosen image, and Start acquires it.
+- **A Create that can't work fails at once, with a code the runner understands and a message the job log shows:**
+  - no image in either place, or a malformed label argument: `InvalidArgument` (PROTO-5), because the runner reserves it for a malformed request. An unknown profile is `InvalidArgument` too (above).
+  - a job that declares services: `Unimplemented`, with `runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM` (PROTO-6). The request is well formed; the plugin can't do it yet, which is what `Unimplemented` means. Services return when the protocol carries per-service options.
 
 ## On-disk layout
 

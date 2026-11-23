@@ -165,9 +165,9 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 // (PROTO-3). The job keeps a copy of its profile for its whole life.
 func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
 	if len(req.GetServices()) > 0 {
-		// SHORTCUT(#6): services are refused (PROTO-6) until #6 decides
-		// what the plugin does with them.
-		return nil, status.Error(codes.InvalidArgument,
+		// The request is well formed; the plugin can't run services until
+		// the protocol carries per-service VM options (PROTO-6).
+		return nil, status.Error(codes.Unimplemented,
 			"runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM")
 	}
 	l, err := parseLabel(req.GetLabelArg())
@@ -178,9 +178,12 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	image, err := jobImage(l, req.GetImage())
-	if err != nil {
-		return nil, err
+	image := req.GetImage()
+	if image == "" {
+		image = l.image
+	}
+	if image == "" {
+		return nil, status.Error(codes.InvalidArgument, "no image: neither the label nor the job's container: names one")
 	}
 	j, err := s.add(image, dnsName(req.GetName()), l.profile, prof)
 	if err != nil {
@@ -198,20 +201,6 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 		Os:            platformOS,
 		Arch:          platformArch,
 	}, nil
-}
-
-// jobImage returns the image a job boots: its container: image, else the
-// label's (PROTO-4), or InvalidArgument when neither names one (PROTO-5).
-func jobImage(l label, container string) (string, error) {
-	if container != "" {
-		// SHORTCUT(#6): a job's container: image is refused, not used
-		// in place of the label's (PROTO-4, #50).
-		return "", status.Error(codes.InvalidArgument, "runner-microvm does not take a job's container: image yet")
-	}
-	if l.image == "" {
-		return "", status.Error(codes.InvalidArgument, "no image: neither the label nor the job's container: names one")
-	}
-	return l.image, nil
 }
 
 // lookupProfile returns a copy of the profile name names, or fails with
