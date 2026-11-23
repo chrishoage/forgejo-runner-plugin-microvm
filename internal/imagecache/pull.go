@@ -65,8 +65,10 @@ type Cache struct {
 	// limits bounds each layer's tar stream; tests lower them.
 	limits tarLimits
 	// maxSize is the cap on the allocated size of the cached layers,
-	// image configs and tags, in bytes. No layer converts past it.
+	// image configs and tags, in bytes. No layer converts past it, unless
+	// it is 0. capped says WithMaxSize set it.
 	maxSize int64
+	capped  bool
 
 	// storeMu is held by linking, eviction and pruning, and by record's
 	// writes of configs and tags, so an eviction can't delete a layer
@@ -125,9 +127,11 @@ type Option func(*Cache)
 
 // WithMaxSize sets the image cache's size cap: the allocated size, in bytes,
 // that eviction keeps its layers, image configs and tags under, and that no
-// layer's conversion may pass. New requires it.
+// layer's conversion may pass. New requires it, 0 or more. A cap of 0 is
+// taken literally: the cache keeps nothing no VM is using, and then no
+// layer's conversion is bounded by it, since every layer is over it.
 func WithMaxSize(bytes int64) Option {
-	return func(c *Cache) { c.maxSize = bytes }
+	return func(c *Cache) { c.maxSize, c.capped = bytes, true }
 }
 
 // New returns the image cache in dir, the plugin's cache directory, which
@@ -173,8 +177,11 @@ func New(log *slog.Logger, dir string, opts ...Option) (*Cache, error) {
 	for _, o := range opts {
 		o(c)
 	}
-	if c.maxSize <= 0 {
+	if !c.capped {
 		return nil, fmt.Errorf("the image cache %s: no size cap", dir)
+	}
+	if c.maxSize < 0 {
+		return nil, fmt.Errorf("the image cache %s: a negative size cap, %d", dir, c.maxSize)
 	}
 	c.lookups = newSharedCalls(&c.running, func(r *resolved) { r.unpin() })
 	c.layers = newSharedCalls(&c.running, (*pulledLayer).discard)
