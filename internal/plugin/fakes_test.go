@@ -113,6 +113,8 @@ const (
 	exitsDuringBoot
 	// The VM never answers.
 	hangs
+	// The job network fails to start.
+	networkFails
 )
 
 // fakeLauncher stands in for the job launcher. Its job processes are a fake
@@ -194,6 +196,12 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 			ExitCode: 1, ConsoleTail: "Kernel panic - not syncing",
 		}}}
 	case hangs:
+	case networkFails:
+		// The job process says why and exits, so its events end and Exited
+		// closes, both ready by the time Start looks.
+		events <- &jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "network: cannot reserve gateway IP"}}}
+		close(events)
+		fp.end()
 	}
 	if l.running == nil {
 		l.running = map[*joblaunch.Process]*fakeProcess{}
