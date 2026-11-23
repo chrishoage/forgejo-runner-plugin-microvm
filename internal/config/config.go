@@ -33,11 +33,16 @@ const PathEnv = "RUNNER_MICROVM_CONFIG"
 
 // The plugin-level keys' built-in values (#1, Configuration and profiles).
 const (
-	builtinListen     = "/run/runner-microvm/runner-microvm.sock"
-	builtinStateDir   = "/var/lib/runner-microvm"
-	builtinCacheDir   = "/var/cache/runner-microvm"
-	builtinRuntimeDir = "/run/runner-microvm/jobs"
+	builtinListen      = "/run/runner-microvm/runner-microvm.sock"
+	builtinStateDir    = "/var/lib/runner-microvm"
+	builtinCacheDir    = "/var/cache/runner-microvm"
+	builtinRuntimeDir  = "/run/runner-microvm/jobs"
+	builtinCacheMaxGiB = 20
 )
+
+// MaxCacheMaxGiB is the largest cache_max_gib: the image cache takes its cap
+// as an int64 of bytes, and a larger value's byte count overflows one.
+const MaxCacheMaxGiB = math.MaxInt64 >> 30
 
 // Config is a validated config file, with every setting the file leaves out
 // at its built-in value.
@@ -53,6 +58,9 @@ type Config struct {
 	StateDir, CacheDir, RuntimeDir string
 	// MaxMemoryMiB caps the memory of every running VM; 0 means no limit.
 	MaxMemoryMiB uint64
+	// CacheMaxGiB is the image cache's size cap, in GiB, at most
+	// MaxCacheMaxGiB; 0 is taken literally (IMG-14).
+	CacheMaxGiB uint64
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
 
@@ -61,6 +69,9 @@ type Config struct {
 	path  string
 	named bool
 }
+
+// CacheMaxBytes is the image cache's size cap in bytes.
+func (c *Config) CacheMaxBytes() int64 { return int64(c.CacheMaxGiB) << 30 } //nolint:gosec // G115: CacheMaxGiB is at most MaxCacheMaxGiB, whose byte count fits an int64
 
 // DefaultProfile is the profile a label that names none uses (CFG-4).
 const DefaultProfile = "default"
@@ -174,6 +185,7 @@ func (c *Config) Reload() (*Config, []Change, error) {
 		{"cache_dir", c.CacheDir, f.CacheDir},
 		{"runtime_dir", c.RuntimeDir, f.RuntimeDir},
 		{"max_memory_mib", strconv.FormatUint(c.MaxMemoryMiB, 10), strconv.FormatUint(f.MaxMemoryMiB, 10)},
+		{"cache_max_gib", strconv.FormatUint(c.CacheMaxGiB, 10), strconv.FormatUint(f.CacheMaxGiB, 10)},
 	} {
 		if k.running != k.file {
 			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
@@ -263,11 +275,12 @@ func noFile(path string) bool {
 // builtin returns the config with every built-in value.
 func builtin() *Config {
 	return &Config{
-		Listen:     builtinListen,
-		StateDir:   builtinStateDir,
-		CacheDir:   builtinCacheDir,
-		RuntimeDir: builtinRuntimeDir,
-		Profiles:   Profiles{},
+		Listen:      builtinListen,
+		StateDir:    builtinStateDir,
+		CacheDir:    builtinCacheDir,
+		RuntimeDir:  builtinRuntimeDir,
+		CacheMaxGiB: builtinCacheMaxGiB,
+		Profiles:    Profiles{},
 	}
 }
 
@@ -408,6 +421,8 @@ func (d *decoder) top(c *Config, root *yaml.Node) {
 			ok = d.absPath(p, &c.RuntimeDir)
 		case "max_memory_mib":
 			ok = d.uint(p, &c.MaxMemoryMiB)
+		case "cache_max_gib":
+			c.CacheMaxGiB, ok = d.integer(p, "", 0, MaxCacheMaxGiB)
 		case "profiles":
 			d.profiles(c, p)
 		default:

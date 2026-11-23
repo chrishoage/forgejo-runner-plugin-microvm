@@ -98,7 +98,7 @@ func serveCmd(getenv func(string) string) int {
 	logConfig(log, cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, log, cfg, hup); err != nil {
+	if err := run(ctx, log, cfg, hup, newImageCache); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
@@ -119,13 +119,22 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 		maxMemory = "0 (no limit)"
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
-		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory)
+		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB)
 	logProfiles(log, cfg.Profiles)
 }
 
+// newCacheFunc opens the image cache in dir, with a size cap of maxSize
+// bytes. run takes it so tests can see the cap it passes.
+type newCacheFunc func(log *slog.Logger, dir string, maxSize int64) (ImageCache, error)
+
+// newImageCache is the newCacheFunc serve uses: imagecache.New.
+func newImageCache(log *slog.Logger, dir string, maxSize int64) (ImageCache, error) {
+	return imagecache.New(log, dir, imagecache.WithMaxSize(maxSize))
+}
+
 // run runs the plugin with cfg until ctx ends, reloading the config file on
-// each signal from hup.
-func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal) error {
+// each signal from hup. It opens the image cache with newCache.
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal, newCache newCacheFunc) error {
 	// A missing host tool stops startup before anything is written.
 	mkfs, err := lookMkfs()
 	if err != nil {
@@ -139,6 +148,11 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 		return err
 	}
 	defer func() { _ = locks.Close() }()
+	// The image cache's own startup cleanup needs only the locks.
+	cache, err := newCache(log, dirs.Cache, cfg.CacheMaxBytes())
+	if err != nil {
+		return err
+	}
 	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left,
 	// beyond the stale files in <state>/bin/ and the image cache's own
 	// (imagecache.New).
@@ -160,10 +174,6 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 		return err
 	}
 	libDir, err := libDirFromEnv(os.Getenv)
-	if err != nil {
-		return err
-	}
-	cache, err := imagecache.New(log, dirs.Cache, imagecache.WithMaxSize(cacheMaxSize))
 	if err != nil {
 		return err
 	}
@@ -214,10 +224,6 @@ func lookMkfs() (string, error) {
 	}
 	return filepath.Abs(path)
 }
-
-// cacheMaxSize is the image cache's built-in size cap, 20 GiB (#1). #8 adds
-// the cache_max_gib key, which replaces it.
-const cacheMaxSize = 20 << 30
 
 // LibDirEnv names the directory holding libkrun and libkrunfw (VM-10).
 //

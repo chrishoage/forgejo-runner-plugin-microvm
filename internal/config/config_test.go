@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,14 +16,15 @@ import (
 // path, which names file when it isn't empty.
 func wantBuiltin(path, file string) *Config {
 	return &Config{
-		path:       path,
-		named:      file != "",
-		File:       file,
-		Listen:     "/run/runner-microvm/runner-microvm.sock",
-		StateDir:   "/var/lib/runner-microvm",
-		CacheDir:   "/var/cache/runner-microvm",
-		RuntimeDir: "/run/runner-microvm/jobs",
-		Profiles:   Profiles{},
+		path:        path,
+		named:       file != "",
+		File:        file,
+		Listen:      "/run/runner-microvm/runner-microvm.sock",
+		StateDir:    "/var/lib/runner-microvm",
+		CacheDir:    "/var/cache/runner-microvm",
+		RuntimeDir:  "/run/runner-microvm/jobs",
+		CacheMaxGiB: 20,
+		Profiles:    Profiles{},
 	}
 }
 
@@ -153,6 +155,7 @@ state_dir: %[1]s/state/
 cache_dir: %[1]s/x/../cache
 runtime_dir: %[1]s/runtime
 max_memory_mib: 16384
+cache_max_gib: 5
 `, base))
 	want := &Config{
 		path:         cfg.File,
@@ -163,6 +166,7 @@ max_memory_mib: 16384
 		CacheDir:     base + "/cache",
 		RuntimeDir:   base + "/runtime",
 		MaxMemoryMiB: 16384,
+		CacheMaxGiB:  5,
 		Profiles:     Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -218,6 +222,13 @@ func TestInvalidPluginLevelValuesFail(t *testing.T) {
 		{"max_memory_mib: \"1024\"\n", `line 1: max_memory_mib: must be an integer`},
 		{"max_memory_mib: 99999999999999999999\n", `line 1: max_memory_mib: must be an integer`},
 		{"max_memory_mib:\n", `line 1: max_memory_mib: has no value`},
+		{"\ncache_max_gib: -1\n", `line 2: cache_max_gib: must be from 0 to 8589934591, not -1`},
+		{"cache_max_gib: 8589934592\n", `line 1: cache_max_gib: must be from 0 to 8589934591, not 8589934592`},
+		{"cache_max_gib: 17179869183\n", `line 1: cache_max_gib: must be from 0 to 8589934591, not 17179869183`},
+		{"cache_max_gib: 18446744073709551616\n", `line 1: cache_max_gib: must be from 0 to 8589934591, not 18446744073709551616`},
+		{"cache_max_gib: 1.5\n", `line 1: cache_max_gib: must be an integer, not "1.5"`},
+		{"cache_max_gib: \"20\"\n", `line 1: cache_max_gib: must be an integer, not "20"`},
+		{"cache_max_gib:\n", `line 1: cache_max_gib: has no value`},
 		{"profiles: [default]\n", `line 1: profiles: must be a mapping of profile names to profiles`},
 		{"profiles:\n  big: 8\n", `line 2: profile "big": must be a mapping of profile keys`},
 		{"max_memory_mib: 1\nmax_memory_mib: 2\n", `line 2: max_memory_mib: is already set on line 1`},
@@ -311,6 +322,22 @@ func TestMaxMemoryMiB(t *testing.T) {
 	} {
 		if got := mustLoad(t, content).MaxMemoryMiB; got != want {
 			t.Errorf("%q: MaxMemoryMiB = %d, want %d", content, got, want)
+		}
+	}
+}
+
+// cache_max_gib left out is the built-in 20 GiB; 0 is taken literally; the
+// largest value is the one whose byte count fits an int64 (IMG-14).
+func TestCacheMaxGiB(t *testing.T) {
+	t.Parallel()
+	for content, want := range map[string]int64{
+		"":                            20 << 30,
+		"cache_max_gib: 0\n":          0,
+		"cache_max_gib: 1\n":          1 << 30,
+		"cache_max_gib: 8589934591\n": math.MaxInt64 >> 30 << 30,
+	} {
+		if got := mustLoad(t, content).CacheMaxBytes(); got != want {
+			t.Errorf("%q: CacheMaxBytes = %d, want %d", content, got, want)
 		}
 	}
 }
