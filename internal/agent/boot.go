@@ -43,6 +43,13 @@ type mounter interface {
 	mount(source, target, fstype string, flags uintptr, data string) error
 	// overlay mounts an overlay of lowers, top first, at target.
 	overlay(lowers []string, upper, work, target string) error
+	// resolveScratch finds where the scratch path guestPath lands in the
+	// job's root at root, creating it if the image lacks it, and the owner
+	// and mode the image gives it there (GST-13).
+	resolveScratch(root, guestPath string) (scratchTarget, error)
+	// bindScratch makes dir on the scratch disk, with t's owner and mode,
+	// and bind-mounts it over t's place in the job's root at root.
+	bindScratch(root, dir string, t scratchTarget) error
 	// moveRoot moves the mount at root to / and chroots into it.
 	moveRoot(root string) error
 }
@@ -86,7 +93,11 @@ func readBootConfig(path string) (*agentv1.BootConfig, error) {
 //  4. it builds an overlay of the layers, top first, over the boot root, the
 //     VM's / at boot, with its upper and work directories on the scratch
 //     disk;
-//  5. it makes the API mounts in it, then moves it to / and chroots.
+//  5. it makes the API mounts in it;
+//  6. it resolves every scratch path in it, then makes each one, parents
+//     first, a fresh directory on the scratch disk, named by its position
+//     in the list;
+//  7. it moves it to / and chroots.
 //
 // The host enforces read-only on both shares, so the guest can't write a
 // layer even after remounting one read-write (IMG-9).
@@ -127,6 +138,16 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 			func() error { return m.mount(a.source, target, a.fstype, a.flags, a.data) },
 		)
 	}
+	// SHORTCUT(#53): the act path, tool cache and temp directory are not
+	// made before the scratch paths yet, so a scratch path on an image's
+	// missing /tmp is 0755, not 1777.
+	if paths := cfg.GetScratchPaths(); len(paths) > 0 {
+		dirs := scratch + "/paths"
+		steps = append(steps,
+			func() error { return m.mkdirAll(dirs) },
+			func() error { return makeScratchPaths(m, root, dirs, paths) },
+		)
+	}
 	steps = append(steps, func() error { return m.moveRoot(root) })
 	for _, step := range steps {
 		if err := step(); err != nil {
@@ -136,8 +157,85 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 	return nil
 }
 
+// scratchTarget is where a scratch path lands in the job's root, and the
+// owner and mode the image gives it there.
+type scratchTarget struct {
+	// guestPath is the path as the profile lists it.
+	guestPath string
+	// resolved is where it lands: absolute in the job's root, with every
+	// symlink resolved.
+	resolved string
+	uid, gid int
+	mode     uint32
+}
+
+// apiMountRoots are the API mounts no scratch path may land in: binding a
+// fresh directory over them, or under them, would hide the kernel's files.
+var apiMountRoots = []string{"/proc", "/sys", "/dev"}
+
+// makeScratchPaths makes the scratch paths paths in the job's root at root,
+// each from dirs/<i>, i its position in paths. It resolves every path before
+// it binds any, so each one keeps the image's owner and mode even below
+// another scratch path, whose fresh directory would hide the image's copy.
+// Then it binds them parents first, by where they land.
+func makeScratchPaths(m mounter, root, dirs string, paths []string) error {
+	targets := make([]scratchTarget, len(paths))
+	for i, p := range paths {
+		t, err := m.resolveScratch(root, p)
+		if err != nil {
+			return err
+		}
+		for _, api := range apiMountRoots {
+			if t.resolved == api || strings.HasPrefix(t.resolved, api+"/") {
+				return fmt.Errorf("scratch path %s: lands at %s, in %s", p, t.resolved, api)
+			}
+		}
+		for _, prev := range targets[:i] {
+			if prev.resolved == t.resolved {
+				return fmt.Errorf("scratch path %s: lands at %s, as %s does", p, t.resolved, prev.guestPath)
+			}
+		}
+		targets[i] = t
+	}
+	for _, i := range parentsFirst(targets) {
+		if err := m.bindScratch(root, dirs+"/"+strconv.Itoa(i), targets[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parentsFirst returns the indexes of targets, ordered so that a target
+// comes after every target whose place is above its own, and otherwise in
+// the list's order.
+func parentsFirst(targets []scratchTarget) []int {
+	order := make([]int, 0, len(targets))
+	placed := make([]bool, len(targets))
+	// waits reports whether i has an unplaced target above it.
+	waits := func(i int) bool {
+		for j, u := range targets {
+			if !placed[j] && strings.HasPrefix(targets[i].resolved, u.resolved+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	for len(order) < len(targets) {
+		// The first unplaced target with nothing unplaced above it: one
+		// always exists, since being above is a strict order.
+		for i := range targets {
+			if !placed[i] && !waits(i) {
+				order, placed[i] = append(order, i), true
+				break
+			}
+		}
+	}
+	return order
+}
+
 // checkBootConfig refuses a config whose layer names would leave the layer
-// share, or that names no scratch device.
+// share, that names no scratch device, or whose scratch paths aren't
+// absolute, clean paths below /.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
 	if cfg.GetScratchDevice() == "" {
 		return fmt.Errorf("boot config: no scratch device")
@@ -148,6 +246,11 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 	for _, name := range cfg.GetLayers() {
 		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
 			return fmt.Errorf("boot config: layer %q is not a file name", name)
+		}
+	}
+	for _, p := range cfg.GetScratchPaths() {
+		if !path.IsAbs(p) || path.Clean(p) != p || p == "/" || strings.ContainsRune(p, 0) {
+			return fmt.Errorf("boot config: scratch path %q is not an absolute, clean path below /", p)
 		}
 	}
 	return nil

@@ -18,10 +18,12 @@ import (
 )
 
 // fakeMounter records the boot's calls, and fails the first whose
-// description contains fail.
+// description contains fail. A scratch path resolves to itself, root-owned,
+// mode 0755, unless image names its target.
 type fakeMounter struct {
 	calls []string
 	fail  string
+	image map[string]scratchTarget
 }
 
 func (m *fakeMounter) do(call string) error {
@@ -40,6 +42,19 @@ func (m *fakeMounter) mount(source, target, fstype string, flags uintptr, data s
 
 func (m *fakeMounter) overlay(lowers []string, upper, work, target string) error {
 	return m.do(fmt.Sprintf("overlay %s upper=%s work=%s on %s", strings.Join(lowers, ":"), upper, work, target))
+}
+
+func (m *fakeMounter) resolveScratch(root, guestPath string) (scratchTarget, error) {
+	t, ok := m.image[guestPath]
+	if !ok {
+		t = scratchTarget{resolved: guestPath, mode: 0o755}
+	}
+	t.guestPath = guestPath
+	return t, m.do(fmt.Sprintf("resolve %s in %s", guestPath, root))
+}
+
+func (m *fakeMounter) bindScratch(root, dir string, t scratchTarget) error {
+	return m.do(fmt.Sprintf("scratch %s at %s %d:%d:%o from %s in %s", t.guestPath, t.resolved, t.uid, t.gid, t.mode, dir, root))
 }
 
 func (m *fakeMounter) moveRoot(root string) error { return m.do("move root " + root) }
@@ -99,13 +114,116 @@ func TestBootBuildsTheRoot(t *testing.T) {
 	}
 }
 
+// The scratch paths are made after the API mounts and before the root
+// moves, each from the directory on the scratch disk named by its position
+// in the list (GST-13). Every path is resolved before any is bound, so each
+// keeps the image's owner and mode even below another scratch path; then
+// they are bound parents first by where they land, and otherwise in the
+// list's order.
+func TestBootMakesTheScratchPaths(t *testing.T) {
+	t.Parallel()
+	cfg := testBootConfig()
+	cfg.ScratchPaths = []string{"/var/lib/docker/volumes", "/tmp", "/var/lib/docker", "/a/b/c", "/srv"}
+	m := &fakeMounter{image: map[string]scratchTarget{
+		"/var/lib/docker":         {resolved: "/var/lib/docker", mode: 0o711},
+		"/var/lib/docker/volumes": {resolved: "/var/lib/docker/volumes", uid: 12, gid: 34, mode: 0o700},
+	}}
+	if err := boot(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	const s = "/dev/.runner-microvm"
+	want := []string{
+		fmt.Sprintf("mount tmpfs %s/root/dev/shm tmpfs %#x ", s, syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC),
+		"mkdir " + s + "/scratch/paths",
+		"resolve /var/lib/docker/volumes in " + s + "/root",
+		"resolve /tmp in " + s + "/root",
+		"resolve /var/lib/docker in " + s + "/root",
+		"resolve /a/b/c in " + s + "/root",
+		"resolve /srv in " + s + "/root",
+		"scratch /tmp at /tmp 0:0:755 from " + s + "/scratch/paths/1 in " + s + "/root",
+		"scratch /var/lib/docker at /var/lib/docker 0:0:711 from " + s + "/scratch/paths/2 in " + s + "/root",
+		"scratch /var/lib/docker/volumes at /var/lib/docker/volumes 12:34:700 from " + s + "/scratch/paths/0 in " + s + "/root",
+		"scratch /a/b/c at /a/b/c 0:0:755 from " + s + "/scratch/paths/3 in " + s + "/root",
+		"scratch /srv at /srv 0:0:755 from " + s + "/scratch/paths/4 in " + s + "/root",
+		"move root " + s + "/root",
+	}
+	if got := m.calls[len(m.calls)-len(want):]; !slices.Equal(got, want) {
+		t.Errorf("last calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// No scratch paths: no directory for them.
+	m = &fakeMounter{}
+	if err := boot(m, testBootConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(m.calls, func(c string) bool { return strings.Contains(c, "paths") }) {
+		t.Errorf("calls without scratch paths: %v", m.calls)
+	}
+}
+
+// The order goes by where each path lands, not by how it is listed: one
+// under an image symlink is bound after a path above where it lands.
+func TestBootOrdersScratchPathsByWhereTheyLand(t *testing.T) {
+	t.Parallel()
+	cfg := testBootConfig()
+	// The image has /deep/x/y -> /top.
+	cfg.ScratchPaths = []string{"/top/z", "/deep/x/y"}
+	m := &fakeMounter{image: map[string]scratchTarget{"/deep/x/y": {resolved: "/top", mode: 0o755}}}
+	if err := boot(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	var binds []string
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "scratch ") {
+			binds = append(binds, strings.Fields(c)[3])
+		}
+	}
+	if want := []string{"/top", "/top/z"}; !slices.Equal(binds, want) {
+		t.Errorf("bound %v, want %v", binds, want)
+	}
+}
+
+// A scratch path that lands in /proc, /sys or /dev, through an image
+// symlink, or where another one lands, fails the boot, naming it, before
+// any is bound.
+func TestBootRefusesAScratchPathLandingBadly(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		image map[string]scratchTarget
+		want  string
+	}{
+		"dev":   {map[string]scratchTarget{"/var/lib/docker": {resolved: "/dev"}}, "scratch path /var/lib/docker: lands at /dev, in /dev"},
+		"sys":   {map[string]scratchTarget{"/var/lib/docker": {resolved: "/sys/fs/cgroup/x"}}, "scratch path /var/lib/docker: lands at /sys/fs/cgroup/x, in /sys"},
+		"proc":  {map[string]scratchTarget{"/var/lib/docker": {resolved: "/proc/1"}}, "scratch path /var/lib/docker: lands at /proc/1, in /proc"},
+		"twice": {map[string]scratchTarget{"/var/lib/docker": {resolved: "/srv"}}, "scratch path /var/lib/docker: lands at /srv, as /srv does"},
+	} {
+		cfg := testBootConfig()
+		cfg.ScratchPaths = []string{"/srv", "/var/lib/docker"}
+		m := &fakeMounter{image: tc.image}
+		err := boot(m, cfg)
+		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
+		}
+		if slices.ContainsFunc(m.calls, func(c string) bool { return strings.HasPrefix(c, "scratch ") || strings.HasPrefix(c, "move root") }) {
+			t.Errorf("%s: bound or moved: %v", name, m.calls)
+		}
+	}
+	// /devices is not in /dev.
+	cfg := testBootConfig()
+	cfg.ScratchPaths = []string{"/devices"}
+	if err := boot(&fakeMounter{}, cfg); err != nil {
+		t.Errorf("/devices: %v", err)
+	}
+}
+
 // A failed step stops the boot there, naming it, and the root is never
 // moved.
 func TestBootStopsAtAFailedStep(t *testing.T) {
 	t.Parallel()
-	for _, fail := range []string{"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2"} {
+	for _, fail := range []string{"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "resolve /opt", "scratch /srv"} {
 		m := &fakeMounter{fail: fail}
-		err := boot(m, testBootConfig())
+		cfg := testBootConfig()
+		cfg.ScratchPaths = []string{"/srv", "/opt"}
+		err := boot(m, cfg)
 		if err == nil || !errors.Is(err, syscall.EINVAL) {
 			t.Errorf("%s fails: err = %v, want EINVAL", fail, err)
 		}
@@ -124,6 +242,10 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		"relative layer dir": func(c *agentv1.BootConfig) { c.LayerDir = "layers" },
 		"layer path":         func(c *agentv1.BootConfig) { c.Layers = []string{"../x"} },
 		"empty layer":        func(c *agentv1.BootConfig) { c.Layers = []string{""} },
+		"relative scratch":   func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"srv"} },
+		"unclean scratch":    func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"/srv/../../x"} },
+		"root scratch":       func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"/"} },
+		"empty scratch":      func(c *agentv1.BootConfig) { c.ScratchPaths = []string{""} },
 	} {
 		cfg := testBootConfig()
 		edit(cfg)
