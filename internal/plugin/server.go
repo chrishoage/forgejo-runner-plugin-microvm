@@ -42,7 +42,8 @@ const (
 
 // defaultPath is the plugin's default PATH, which Create returns as the
 // runner's default_path_variable: the runner uses it for a job whose image
-// sets no PATH, so the runner and the agent use one value.
+// sets no PATH. Start puts it in the boot config as the agent's default
+// PATH, so the runner and the agent use one value.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // runnerArch returns the runner's name (RUNNER_ARCH) for goarch, the host's

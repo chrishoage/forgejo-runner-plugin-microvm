@@ -210,12 +210,21 @@ message Network {
   uint32 mtu = 3;
 }
 
-// Image is the image config's defaults for Exec.
+// Image is the image config's defaults for Exec, and the plugin's default
+// PATH.
 message Image {
-  // The image's environment, as KEY=VALUE in the image's order (GST-4).
+  // The image's environment, as KEY=VALUE in the image's order (GST-4). An
+  // Exec's environment is this, with the request's on top.
   repeated string env = 1;
-  // The image's USER (GST-5).
+  // The image's USER: the user an Exec that names none runs as; empty, root
+  // (GST-5).
   string user = 2;
-  // The image's WORKDIR (GST-6).
+  // The image's WORKDIR: the working directory of an Exec that names none;
+  // empty, `/` (GST-6).
   string working_dir = 3;
+  // The PATH an Exec gets, and its command is looked up in, when neither the
+  // image's environment nor the request's sets one (GST-4). The plugin sets
+  // it to the default PATH Create returns to the runner, so both use one
+  // value.
+  string default_path = 4;
 }

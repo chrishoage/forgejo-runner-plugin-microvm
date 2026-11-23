@@ -278,7 +278,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		ScratchPaths:  j.profile.ScratchPaths,
 		Network:       bootNetwork(addr),
 		Hostname:      j.hostname,
-		Image:         &agentv1.Image{Env: img.Env},
+		Image:         &agentv1.Image{Env: img.Env, User: img.User, WorkingDir: img.WorkingDir, DefaultPath: defaultPath},
 		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
 		VsockPort:     agentPort,
 	}

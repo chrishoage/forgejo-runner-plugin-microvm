@@ -1045,15 +1045,24 @@ func (x *Network) GetMtu() uint32 {
 	return 0
 }
 
-// Image is the image config's defaults for Exec.
+// Image is the image config's defaults for Exec, and the plugin's default
+// PATH.
 type Image struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The image's environment, as KEY=VALUE in the image's order (GST-4).
+	// The image's environment, as KEY=VALUE in the image's order (GST-4). An
+	// Exec's environment is this, with the request's on top.
 	Env []string `protobuf:"bytes,1,rep,name=env,proto3" json:"env,omitempty"`
-	// The image's USER (GST-5).
+	// The image's USER: the user an Exec that names none runs as; empty, root
+	// (GST-5).
 	User string `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
-	// The image's WORKDIR (GST-6).
-	WorkingDir    string `protobuf:"bytes,3,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// The image's WORKDIR: the working directory of an Exec that names none;
+	// empty, `/` (GST-6).
+	WorkingDir string `protobuf:"bytes,3,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// The PATH an Exec gets, and its command is looked up in, when neither the
+	// image's environment nor the request's sets one (GST-4). The plugin sets
+	// it to the default PATH Create returns to the runner, so both use one
+	// value.
+	DefaultPath   string `protobuf:"bytes,4,opt,name=default_path,json=defaultPath,proto3" json:"default_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1105,6 +1114,13 @@ func (x *Image) GetUser() string {
 func (x *Image) GetWorkingDir() string {
 	if x != nil {
 		return x.WorkingDir
+	}
+	return ""
+}
+
+func (x *Image) GetDefaultPath() string {
+	if x != nil {
+		return x.DefaultPath
 	}
 	return ""
 }
@@ -1179,12 +1195,13 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\aNetwork\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\agateway\x18\x02 \x01(\tR\agateway\x12\x10\n" +
-	"\x03mtu\x18\x03 \x01(\rR\x03mtuJ\x04\b\x04\x10\x05R\rsearch_domain\"N\n" +
+	"\x03mtu\x18\x03 \x01(\rR\x03mtuJ\x04\b\x04\x10\x05R\rsearch_domain\"q\n" +
 	"\x05Image\x12\x10\n" +
 	"\x03env\x18\x01 \x03(\tR\x03env\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x1f\n" +
 	"\vworking_dir\x18\x03 \x01(\tR\n" +
-	"workingDir2\xc5\x03\n" +
+	"workingDir\x12!\n" +
+	"\fdefault_path\x18\x04 \x01(\tR\vdefaultPath2\xc5\x03\n" +
 	"\fAgentService\x12Q\n" +
 	"\x04Ping\x12#.runnermicrovm.agent.v1.PingRequest\x1a$.runnermicrovm.agent.v1.PingResponse\x12S\n" +
 	"\x04Exec\x12#.runnermicrovm.agent.v1.ExecRequest\x1a$.runnermicrovm.agent.v1.ExecResponse0\x01\x12Y\n" +

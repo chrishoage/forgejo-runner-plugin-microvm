@@ -128,10 +128,12 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 		}
 	}
 	return imagecache.Image{
-		Digest:  "sha256:0",
-		Env:     []string{"PATH=/usr/bin:/bin", "A=b=c"},
-		LinkDir: link,
-		Layers:  []string{"0.erofs", "1.erofs"},
+		Digest:     "sha256:0",
+		Env:        []string{"PATH=/usr/bin:/bin", "A=b=c"},
+		User:       "builder:staff",
+		WorkingDir: "/src",
+		LinkDir:    link,
+		Layers:     []string{"0.erofs", "1.erofs"},
 	}, nil
 }
 
