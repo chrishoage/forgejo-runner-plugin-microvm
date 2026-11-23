@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
@@ -25,15 +27,33 @@ import (
 // Name is the plugin's name in Capabilities.
 const Name = "runner-microvm"
 
-// The job's paths and platform, as Create returns them (PROTO-7).
+// The job's paths and OS, as Create returns them (PROTO-7). They are fixed:
+// nothing asks for them to change.
 const (
 	rootPath      = "/"
 	actPath       = "/var/run/act"
 	toolCachePath = "/opt/hostedtoolcache"
 	tempPath      = "/tmp"
 	platformOS    = "Linux"
-	platformArch  = "X64"
 )
+
+// defaultPath is the plugin's default PATH, which Create returns as the
+// runner's default_path_variable: the runner uses it for a job whose image
+// sets no PATH, so the runner and the agent use one value.
+const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// runnerArch returns the runner's name (RUNNER_ARCH) for goarch, the host's
+// architecture, or an error naming it when libkrun doesn't support it. Images
+// resolve for the host's platform, so the job's arch is the host's.
+func runnerArch(goarch string) (string, error) {
+	switch goarch {
+	case "amd64":
+		return "X64", nil
+	case "arm64":
+		return "ARM64", nil
+	}
+	return "", fmt.Errorf("runner-microvm runs only on amd64 and arm64, the architectures libkrun supports, not on %q", goarch)
+}
 
 // Config is what the server needs from startup.
 type Config struct {
@@ -54,6 +74,9 @@ type Config struct {
 	Launcher JobLauncher
 	// ReadyTimeout is how long Start waits for the agent to answer Ping.
 	ReadyTimeout time.Duration
+	// Arch is the runner's name for the host's architecture (runnerArch),
+	// which Create returns.
+	Arch string
 }
 
 // Server is the runner's BackendPlugin service and the job table.
@@ -115,6 +138,9 @@ type job struct {
 // NewServer returns a server with an empty job table. cfg.Dirs.Runtime must
 // exist. Close releases it.
 func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
+	if cfg.Arch == "" {
+		return nil, errors.New("no arch for Create to return")
+	}
 	rt, err := openSockDir(cfg.Dirs.Runtime)
 	if err != nil {
 		return nil, err
@@ -193,13 +219,14 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
 		"scratch_paths", j.profile.ScratchPaths, "force_pull", j.profile.ForcePull)
 	return &pluginv1alpha.CreateResponse{
-		EnvironmentId: j.id,
-		RootPath:      rootPath,
-		ActPath:       actPath,
-		ToolCachePath: toolCachePath,
-		TempPath:      tempPath,
-		Os:            platformOS,
-		Arch:          platformArch,
+		EnvironmentId:       j.id,
+		RootPath:            rootPath,
+		ActPath:             actPath,
+		ToolCachePath:       toolCachePath,
+		TempPath:            tempPath,
+		DefaultPathVariable: proto.String(defaultPath),
+		Os:                  platformOS,
+		Arch:                s.cfg.Arch,
 	}, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -119,11 +120,30 @@ func TestCreateReturnsPathsAndPlatform(t *testing.T) {
 		ActPath:       "/var/run/act",
 		ToolCachePath: "/opt/hostedtoolcache",
 		TempPath:      "/tmp",
-		Os:            "Linux",
-		Arch:          "X64",
+		// The runner's PATH for a job whose image sets none.
+		DefaultPathVariable: proto.String("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+		Os:                  "Linux",
+		Arch:                map[string]string{"amd64": "X64", "arm64": "ARM64"}[runtime.GOARCH],
 	}
 	if !proto.Equal(resp, want) {
 		t.Errorf("Create = %v, want %v", resp, want)
+	}
+}
+
+// The runner's arch follows the host's, and only amd64 and arm64 have one:
+// libkrun supports no other.
+func TestRunnerArch(t *testing.T) {
+	t.Parallel()
+	for goarch, want := range map[string]string{"amd64": "X64", "arm64": "ARM64"} {
+		if got, err := runnerArch(goarch); got != want || err != nil {
+			t.Errorf("runnerArch(%q) = %q, %v; want %q", goarch, got, err, want)
+		}
+	}
+	for _, goarch := range []string{"riscv64", "386", "arm", ""} {
+		got, err := runnerArch(goarch)
+		if err == nil || !strings.Contains(err.Error(), `"`+goarch+`"`) {
+			t.Errorf("runnerArch(%q) = %q, %v; want an error naming it", goarch, got, err)
+		}
 	}
 }
 
