@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"syscall"
@@ -135,7 +136,12 @@ func newImageCache(log *slog.Logger, dir string, maxSize int64) (ImageCache, err
 // run runs the plugin with cfg until ctx ends, reloading the config file on
 // each signal from hup. It opens the image cache with newCache.
 func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal, newCache newCacheFunc) error {
-	// A missing host tool stops startup before anything is written.
+	// An architecture libkrun doesn't support, or a missing host tool,
+	// stops startup before anything is written.
+	arch, err := runnerArch(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
 	mkfs, err := lookMkfs()
 	if err != nil {
 		return err
@@ -186,6 +192,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 		Profiles:  cfg.Profiles,
 		Cache:     cache,
 		Launcher:  joblaunch.New(log),
+		Arch:      arch,
 	})
 	if err != nil {
 		return err

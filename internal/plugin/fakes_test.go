@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,12 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 	if err := os.WriteFile(agent, []byte("agent binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	arch, err := runnerArch(runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := NewServer(discardLog(), Config{
+		Arch:         arch,
 		Dirs:         dirs,
 		JobBinary:    "/fake/runner-microvm-job",
 		MkfsExt4:     "/fake/mkfs.ext4",

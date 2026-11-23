@@ -299,6 +299,9 @@ The plugin's settings and its profiles come from the config file, one YAML file 
 - **A Create that can't work fails at once, with a code the runner understands and a message the job log shows:**
   - no image in either place, or a malformed label argument: `InvalidArgument` (PROTO-5), because the runner reserves it for a malformed request. An unknown profile is `InvalidArgument` too (above).
   - a job that declares services: `Unimplemented`, with `runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM` (PROTO-6). The request is well formed; the plugin can't do it yet, which is what `Unimplemented` means. Services return when the protocol carries per-service options.
+- **Create returns fixed paths: root `/`, act path `/var/run/act`, tool cache `/opt/hostedtoolcache`, temp `/tmp` (PROTO-7).** Nothing asks for them to change; making them configurable can come later through profiles.
+- **Create also returns `default_path_variable`, the plugin's default `PATH`: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.** The runner uses it for a job whose image sets no `PATH`, so the runner and the agent use one value, owned by the plugin. `path_variable_name` and `path_separator` are left unset, so the runner uses `PATH` and `:`.
+- **Create returns `os` `Linux` and an `arch` that follows the host: `X64` on amd64, `ARM64` on arm64.** It is the runner's `RUNNER_ARCH`, and images resolve for the host's platform. The plugin refuses to start on any other architecture, naming it, before it writes anything, because libkrun supports only those two. Only amd64 is tested and supported (#5).
 
 ## On-disk layout
 
