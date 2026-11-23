@@ -133,9 +133,11 @@ up:
         sleep 0.1
     done
     echo "plugin serving on $sock (pid $(cat '{{ plugin_pid }}'), log .e2e/plugin.log)"
-    # The runner's config, with the label's image from e2e/image.
+    # The runner's config, with the labels' images from e2e/image and
+    # e2e/node-image.
     image=$(tr -d '[:space:]' <image)
-    sed "s|@IMAGE@|$image|" runner-config.yaml >'{{ state }}/runner-config.yaml'
+    node_image=$(tr -d '[:space:]' <node-image)
+    sed -e "s|@IMAGE@|$image|" -e "s|@NODE_IMAGE@|$node_image|" runner-config.yaml >'{{ state }}/runner-config.yaml'
     # Throwaway secrets in plain text: they die at `down`.
     hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
     secret=$(hex 20)

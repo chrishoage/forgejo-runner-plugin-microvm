@@ -41,14 +41,16 @@
     schedule: ['* 0-3 * * 1'],
   },
 
-  // The slice's test image, e2e/image: one line, an image pinned by tag and
-  // digest, read by the harness's runner label and the protocol test. The
-  // docker-compose manager can't read it, so a regex manager keeps its tag
-  // and digest current.
+  // The slice's test image, e2e/image, and the harness's Node image,
+  // e2e/node-image: each one line, an image pinned by tag and digest. The
+  // test image is read by the harness's runner label and the protocol test,
+  // the Node image by the harness's microvm-node label. The docker-compose
+  // manager can't read them, so a regex manager keeps their tags and digests
+  // current.
   customManagers: [
     {
       customType: 'regex',
-      managerFilePatterns: ['/^e2e/image$/'],
+      managerFilePatterns: ['/^e2e/(image|node-image)$/'],
       matchStrings: ['^(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[0-9a-f]{64})'],
       datasourceTemplate: 'docker',
     },
