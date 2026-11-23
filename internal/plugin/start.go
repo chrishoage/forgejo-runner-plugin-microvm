@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,8 +82,9 @@ const (
 
 // Start pulls the job's image, starts its job process, which boots the VM,
 // waits until the agent answers Ping, and ends with StartComplete carrying
-// the image's environment (PROTO-8). A failed Start kills the job process
-// and waits until its group is reaped.
+// the image's environment (PROTO-8). Before that it sends a progress line
+// for the image, the VM and the total (PROTO-9). A failed Start kills the
+// job process and waits until its group is reaped.
 //
 // SHORTCUT(#10): no queue or memory budget: every Start boots at once.
 func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.BackendPlugin_StartServer) error {
@@ -105,25 +107,82 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 	j.started = true
 	ctx, cancel := callContext(stream.Context(), j)
 	defer cancel()
-	begin := time.Now()
-	env, err := s.boot(ctx, j)
+	p := &progress{ctx: ctx, stream: stream, begin: time.Now(), log: s.log.With("job", j.id)}
+	env, err := s.boot(ctx, j, p)
+	if err == nil {
+		err = s.complete(ctx, j, p, env)
+	}
 	if err != nil {
 		// The job process and its VM are gone before Start returns.
 		err = errors.Join(err, s.stop(context.WithoutCancel(ctx), j))
 		j.startErr = err
 		s.log.Error("start failed", "job", j.id, "err", err)
-		return startError(ctx, err)
+		return startError(ctx, stream.Context(), err)
 	}
 	j.ready.Store(true)
-	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(begin).Round(time.Millisecond))
+	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(p.begin).Round(time.Millisecond))
+	return nil
+}
+
+// complete ends a Start whose VM is ready: it starts watching j's job
+// process, then sends the last progress line and StartComplete with env.
+// Its error, once ctx ended before StartComplete was sent, fails Start like
+// any other: the runner never takes the job as started. Once StartComplete's
+// send has returned without error, Start has succeeded, whatever ctx does
+// meanwhile (awaitDelivery).
+func (s *Server) complete(ctx context.Context, j *job, p *progress, env map[string]string) error {
 	gone, markGone := context.WithCancelCause(context.Background())
 	j.gone, j.watched = gone, make(chan struct{})
 	go s.watch(j, j.proc, markGone, j.watched)
-	return await(ctx, func() error {
-		return stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{
-			StartComplete: &pluginv1alpha.StartComplete{ImageEnv: env},
-		}})
-	})
+	p.line("started in %s", seconds(time.Since(p.begin)))
+	err := ctx.Err()
+	if !p.stalled {
+		err = awaitDelivery(ctx, p.stream.Context(), func() error {
+			return p.stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{
+				StartComplete: &pluginv1alpha.StartComplete{ImageEnv: env},
+			}})
+		})
+	}
+	// A stalled progress line's Send may still run, and a stream takes one
+	// Send at a time, so Start ended with its context. Either way the
+	// failed Start kills the job process: marking the job gone first keeps
+	// the watcher from reporting that as the VM dying.
+	if err != nil {
+		markGone(err)
+	}
+	return err
+}
+
+// awaitDelivery is await for StartComplete's send, on a stream whose own
+// context is streamCtx, whose success must win over ctx ending at the same
+// moment: the runner cancels Start as soon as it reads StartComplete, so
+// once the send returned without error, Start has succeeded. Once ctx has
+// ended, it sends nothing and returns ctx's status. When ctx ends during the
+// send and streamCtx has ended too, the runner ended the stream: gRPC ends a
+// blocked send as soon as its stream's context ends, so the send's own
+// result is waited for. When only ctx ended, Remove's or the VM's death,
+// the runner may never read again: a send that has returned still wins,
+// and one still blocked fails with ctx's status, as await's does.
+func awaitDelivery(ctx, streamCtx context.Context, send func() error) error {
+	if ctx.Err() != nil {
+		return status.FromContextError(ctx.Err()).Err()
+	}
+	done := make(chan error, 1)
+	go func() { done <- send() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+	if streamCtx.Err() != nil {
+		return <-done
+	}
+	select {
+	case err := <-done:
+		return err
+	default:
+		return status.FromContextError(ctx.Err()).Err()
+	}
 }
 
 // startError is the status a failed Start returns: the call's own context's
@@ -131,16 +190,57 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 // the plugin's own bug; else FailedPrecondition. The image, the VM's boot,
 // its agent, its scratch disk or a disk is the job's or the operator's to
 // fix, and never Unavailable, which the runner reads as the plugin being
-// gone.
-func startError(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return status.FromContextError(ctx.Err()).Err()
+// gone. ctx derives from streamCtx, the stream's own context, and Go ends a
+// parent's Done before it cancels the contexts derived from it, so a send
+// the stream's end cut off can fail before ctx reports its end: streamCtx's
+// end then gives the code.
+func startError(ctx, streamCtx context.Context, err error) error {
+	for _, c := range []context.Context{ctx, streamCtx} {
+		if c.Err() != nil {
+			return status.FromContextError(c.Err()).Err()
+		}
 	}
 	if errors.As(err, new(*bugError)) {
 		return status.Error(codes.Internal, err.Error())
 	}
 	return status.Error(codes.FailedPrecondition, err.Error())
 }
+
+// progress sends Start's progress lines to the runner, on stdout, which
+// shows them in the job's setup log (PROTO-9): each line is `[runner-microvm
+// <seconds since Start>s] <text>`, the prefix telling them apart from the
+// runner's own lines. A line that can't be sent doesn't fail Start: only
+// StartComplete must arrive.
+type progress struct {
+	ctx    context.Context
+	stream pluginv1alpha.BackendPlugin_StartServer
+	begin  time.Time
+	log    *slog.Logger
+	// stalled is set once a line's Send outlived ctx: it may still run,
+	// so nothing more is sent on the stream.
+	stalled bool
+}
+
+// line sends one progress line of format and args.
+func (p *progress) line(format string, args ...any) {
+	if p.stalled {
+		return
+	}
+	text := fmt.Sprintf("[runner-microvm %s] %s\n", seconds(time.Since(p.begin)), fmt.Sprintf(format, args...))
+	err := await(p.ctx, func() error {
+		return p.stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_Data{Data: &pluginv1alpha.DataChunk{
+			Stream: pluginv1alpha.DataChunk_STDOUT, Data: []byte(text),
+		}}})
+	})
+	if err != nil {
+		p.stalled = p.ctx.Err() != nil
+		p.log.Warn("a progress line was not sent", "err", err)
+	}
+}
+
+// seconds formats d as seconds to two decimals, as progress lines show
+// times.
+func seconds(d time.Duration) string { return fmt.Sprintf("%.2fs", d.Seconds()) }
 
 // bugError is a failure only a bug in the plugin can cause.
 type bugError struct{ err error }
@@ -149,10 +249,10 @@ func (e *bugError) Error() string { return e.err.Error() }
 
 func (e *bugError) Unwrap() error { return e.err }
 
-// boot does Start's work on j, which is locked, and returns the image's
-// environment. On error, j.proc and j.agent may be set: the caller stops
-// them.
-func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
+// boot does Start's work on j, which is locked, sending its progress to p,
+// and returns the image's environment. On error, j.proc and j.agent may be
+// set: the caller stops them.
+func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]string, error) {
 	vmState := filepath.Join(s.jobStateDir(j.id), "0")
 	vmRuntime := filepath.Join(s.cfg.Dirs.Runtime, j.id, "0")
 	for _, d := range []string{vmState, vmRuntime} {
@@ -164,10 +264,12 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	if err != nil {
 		return nil, &bugError{err}
 	}
+	pulling := time.Now()
 	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
 	if err != nil {
 		return nil, fmt.Errorf("image %s: %w", j.image, err)
 	}
+	p.line("image %s ready (%s, %d layers) in %s", j.image, img.Digest, len(img.Layers), seconds(time.Since(pulling)))
 	boot := &agentv1.BootConfig{
 		LayerDir:      guestLayerDir,
 		LayerTag:      layerTag,
@@ -204,6 +306,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		GuestMac:         mac.String(),
 		Boot:             boot,
 	}
+	booting := time.Now()
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
 		Job:       j.id,
 		JobBinary: s.cfg.JobBinary,
@@ -226,6 +329,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	if err := s.waitReady(ctx, j, vm); err != nil {
 		return nil, err
 	}
+	p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
 	return envMap(img.Env), nil
 }
 

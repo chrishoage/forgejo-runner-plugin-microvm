@@ -9,11 +9,15 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -566,4 +570,293 @@ func TestPruneDirKeepsOnlyTheCurrentFiles(t *testing.T) {
 	if got := strings.Join(names(t, dir), " "); got != "runner-microvm-agent-new runner-microvm-job-new" {
 		t.Errorf("bin/ holds %s", got)
 	}
+}
+
+// A successful Start sends three progress lines on stdout before
+// StartComplete, in order: the image, the VM, the total, each prefixed with
+// the seconds since Start (PROTO-9).
+func TestStartSendsItsProgress(t *testing.T) {
+	t.Parallel()
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
+	stream, err := c.Start(testContext(t), &pluginv1alpha.StartRequest{EnvironmentId: create(t, c)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outs []*pluginv1alpha.StartOutput
+	for {
+		out, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		outs = append(outs, out)
+	}
+	const at = `^\[runner-microvm \d+\.\d\ds\] `
+	want := []*regexp.Regexp{
+		regexp.MustCompile(at + `image ` + regexp.QuoteMeta(testImage) + ` ready \(sha256:0, 2 layers\) in \d+\.\d\ds\n$`),
+		regexp.MustCompile(at + `VM job \(2 CPUs, 1024 MiB\) ready in \d+\.\d\ds\n$`),
+		regexp.MustCompile(at + `started in \d+\.\d\ds\n$`),
+	}
+	if len(outs) != len(want)+1 || outs[len(want)].GetStartComplete() == nil {
+		t.Fatalf("Start sent %v, want three progress lines, then StartComplete", outs)
+	}
+	for i, re := range want {
+		d := outs[i].GetData()
+		if d.GetStream() != pluginv1alpha.DataChunk_STDOUT || !re.Match(d.GetData()) {
+			t.Errorf("output %d = %v %q, want stdout matching %s", i, d.GetStream(), d.GetData(), re)
+		}
+	}
+}
+
+// progressStream is the runner's side of a Start, whose Send of a progress
+// line is data's, and of StartComplete is complete's, when set, and records
+// it.
+type progressStream struct {
+	grpc.ServerStream
+	ctx      context.Context
+	data     func() error
+	complete func() error
+
+	mu        sync.Mutex
+	sending   bool
+	completed bool
+}
+
+func (s *progressStream) Context() context.Context { return s.ctx }
+
+func (s *progressStream) Send(out *pluginv1alpha.StartOutput) error {
+	s.mu.Lock()
+	if s.sending {
+		s.mu.Unlock()
+		panic("Send called while another Send still runs")
+	}
+	s.sending = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.sending = false; s.mu.Unlock() }()
+	if out.GetStartComplete() != nil {
+		if s.complete != nil {
+			if err := s.complete(); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		s.completed = true
+		s.mu.Unlock()
+		return nil
+	}
+	return s.data()
+}
+
+// A progress line the runner can't take doesn't fail Start: only
+// StartComplete must arrive (PROTO-9).
+func TestAFailedProgressLineDoesNotFailStart(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
+	stream := &progressStream{ctx: testContext(t), data: func() error { return errors.New("the stream is full") }}
+	if err := srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: createOn(t, srv, testImage)}, stream); err != nil {
+		t.Fatalf("Start = %v, want success", err)
+	}
+	if !stream.completed {
+		t.Error("Start never sent StartComplete")
+	}
+}
+
+// A Start whose runner never takes a progress line still ends at once when
+// it is cancelled, with Canceled, and leaves no job process behind; it
+// sends nothing more while that line's Send may still run.
+func TestAStalledProgressLineEndsWithItsStart(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{}
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	ctx, cancel := context.WithCancel(testContext(t))
+	defer cancel()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	// As gRPC ends the stream once the handler returns.
+	t.Cleanup(func() { close(release) })
+	stream := &progressStream{ctx: ctx, data: func() error {
+		entered <- struct{}{}
+		<-release
+		return errors.New("the stream ended")
+	}}
+	id := createOn(t, srv, testImage)
+	started := make(chan error, 1)
+	go func() { started <- srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, stream) }()
+	within(t, entered, "the first progress line")
+	cancel()
+	if err := within(t, started, "Start's return"); status.Code(err) != codes.Canceled {
+		t.Errorf("Start = %v, want Canceled", err)
+	}
+	if launcher.alive() != 0 {
+		t.Error("the cancelled Start left its job process running")
+	}
+}
+
+// A Start cancelled once its VM is ready, while it sends its last progress
+// line or StartComplete, fails with Canceled as any cancelled Start does: it
+// kills the job process, and a second Start names the failure.
+func TestStartCancelledOnceItsVMIsReady(t *testing.T) {
+	t.Parallel()
+	for name, last := range map[string]bool{"the started line": false, "StartComplete": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			launcher := &fakeLauncher{}
+			srv := newTestServer(t, &fakeCache{}, launcher)
+			ctx, cancel := context.WithCancel(testContext(t))
+			defer cancel()
+			entered := make(chan struct{}, 1)
+			// The send blocks until the Start's context ends.
+			block := func() error {
+				entered <- struct{}{}
+				<-ctx.Done()
+				return status.FromContextError(ctx.Err()).Err()
+			}
+			lines := 0
+			stream := &progressStream{ctx: ctx, data: func() error {
+				lines++
+				if !last && lines == 3 {
+					return block()
+				}
+				return nil
+			}}
+			if last {
+				stream.complete = block
+			}
+			id := createOn(t, srv, testImage)
+			started := make(chan error, 1)
+			go func() { started <- srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, stream) }()
+			within(t, entered, "the blocked send")
+			cancel()
+			if err := within(t, started, "Start's return"); status.Code(err) != codes.Canceled {
+				t.Errorf("Start = %v, want Canceled", err)
+			}
+			if launcher.alive() != 0 {
+				t.Error("the cancelled Start left its job process running")
+			}
+			err := srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, &progressStream{ctx: testContext(t), data: func() error { return nil }})
+			if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "failed to start earlier") {
+				t.Errorf("a second Start = %v, want FailedPrecondition naming the earlier failure", err)
+			}
+		})
+	}
+}
+
+// A Start whose StartComplete send the stream's end cut off fails with
+// Canceled even while its own context, derived from the stream's, does not
+// yet report its end: Go ends a parent context's Done before it cancels the
+// contexts derived from it, so the send can fail first.
+func TestStartCutOffBeforeItsContextEnds(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{}
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	ctx := &endingContext{Context: testContext(t)}
+	stream := &progressStream{ctx: ctx, data: func() error { return nil }, complete: func() error {
+		ctx.ended.Store(true)
+		return status.Error(codes.Canceled, "the stream ended")
+	}}
+	id := createOn(t, srv, testImage)
+	if err := srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, stream); status.Code(err) != codes.Canceled {
+		t.Errorf("Start = %v, want Canceled", err)
+	}
+	if launcher.alive() != 0 {
+		t.Error("the cut-off Start left its job process running")
+	}
+}
+
+// endingContext is a stream's context that reports its end through Err once
+// ended is set, before the contexts derived from it know: its Done never
+// closes.
+type endingContext struct {
+	context.Context
+	ended atomic.Bool
+}
+
+func (c *endingContext) Err() error {
+	if c.ended.Load() {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
+// A Start whose StartComplete the runner takes, and which it cancels at
+// once, as its client does once it reads StartComplete, has succeeded: the
+// Send returned without error, so its job process keeps running.
+func TestStartCancelledAsStartCompleteArrives(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{}
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	ctx, cancel := context.WithCancel(testContext(t))
+	defer cancel()
+	stream := &progressStream{ctx: ctx, data: func() error { return nil }, complete: func() error {
+		cancel()
+		return nil
+	}}
+	id := createOn(t, srv, testImage)
+	if err := srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, stream); err != nil {
+		t.Fatalf("Start = %v, want it to succeed", err)
+	}
+	if launcher.alive() != 1 {
+		t.Error("the Start whose StartComplete was sent ended its job process")
+	}
+	if _, err := srv.Remove(testContext(t), &pluginv1alpha.RemoveRequest{EnvironmentId: id}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// awaitDelivery returns the Send's own result once the stream's context
+// ends during it, even when the Send returns only after the call's context
+// has ended: a Send that succeeded wins over a cancel at the same moment,
+// and one the stream's end cut off fails.
+func TestAwaitDeliveryTakesTheSendsResult(t *testing.T) {
+	t.Parallel()
+	for name, sendErr := range map[string]error{"sent": nil, "cut off": status.Error(codes.Canceled, "stream ended")} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				streamCtx, cancel := context.WithCancel(t.Context())
+				ctx, stop := context.WithCancel(streamCtx)
+				defer stop()
+				err := awaitDelivery(ctx, streamCtx, func() error {
+					cancel()
+					// Returns only once every other goroutine in the
+					// bubble blocks: after the caller saw ctx end.
+					time.Sleep(time.Second)
+					return sendErr
+				})
+				if !errors.Is(err, sendErr) || (sendErr == nil) != (err == nil) {
+					t.Errorf("awaitDelivery = %v, want %v", err, sendErr)
+				}
+			})
+		})
+	}
+}
+
+// awaitDelivery sends nothing once ctx has ended, and, while the stream is
+// still open, returns ctx's status as soon as ctx ends during a Send that
+// still blocks, as await does: Remove or the VM's death ended the call,
+// and the runner may never read again.
+func TestAwaitDeliveryEndsWithItsContext(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		sent := false
+		err := awaitDelivery(ctx, t.Context(), func() error { sent = true; return nil })
+		wantCode(t, err, codes.Canceled)
+		if sent {
+			t.Error("awaitDelivery sent once its context had ended")
+		}
+
+		ctx, cancel = context.WithCancel(t.Context())
+		release := make(chan struct{})
+		returned := make(chan error, 1)
+		go func() { returned <- awaitDelivery(ctx, t.Context(), func() error { <-release; return nil }) }()
+		synctest.Wait()
+		cancel()
+		wantCode(t, <-returned, codes.Canceled)
+		// As gRPC ends the stream once the handler returns.
+		close(release)
+	})
 }
