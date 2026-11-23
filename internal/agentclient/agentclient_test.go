@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 )
@@ -126,5 +128,35 @@ func TestWaitReadyGivesUpAtTheDeadline(t *testing.T) {
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("WaitReady took %v past a 300ms deadline", d)
+	}
+}
+
+// Ping answers while the agent serves, and fails at once with Unavailable,
+// well before its deadline, once the agent is gone.
+func TestPingFailsAtOnceWithoutTheAgent(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	lis, err := new(net.ListenConfig).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer()
+	agentv1.RegisterAgentServiceServer(gs, fakeAgent{})
+	served := make(chan struct{})
+	go func() { defer close(served); _ = gs.Serve(lis) }()
+	c := newClient(t, sock)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("Ping of a serving agent: %v", err)
+	}
+	gs.Stop()
+	<-served
+	start := time.Now()
+	if err := c.Ping(ctx); status.Code(err) != codes.Unavailable {
+		t.Fatalf("Ping without the agent = %v, want Unavailable", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("Ping without the agent took %v", d)
 	}
 }

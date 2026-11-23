@@ -15,9 +15,10 @@ import (
 )
 
 // started returns the job id names, locked, with a call context that Remove
-// also cancels, or FailedPrecondition before Start completed (PROTO-11):
-// at once while Start is still in progress, without waiting for the job's
-// lock. Its wait for the lock ends with ctx. The caller calls done.
+// and the death of the job's VM also cancel (callContext), or
+// FailedPrecondition before Start completed (PROTO-11), at once while Start
+// is still in progress, without waiting for the job's lock, and once its VM
+// has died. Its wait for the lock ends with ctx. The caller calls done.
 func (s *Server) started(ctx context.Context, id string) (*job, context.Context, func(), error) {
 	j, err := s.lookup(id)
 	if err != nil {
@@ -33,6 +34,10 @@ func (s *Server) started(ctx context.Context, id string) (*job, context.Context,
 		j.mu.Unlock()
 		return nil, nil, nil, notStarted(id)
 	}
+	if j.gone.Err() != nil {
+		j.mu.Unlock()
+		return nil, nil, nil, context.Cause(j.gone)
+	}
 	cctx, cancel := callContext(ctx, j)
 	return j, cctx, func() { cancel(); j.mu.Unlock() }, nil
 }
@@ -41,24 +46,43 @@ func notStarted(id string) error {
 	return status.Errorf(codes.FailedPrecondition, "environment %s is not started", id)
 }
 
-// agentError is the status for an agent call that failed: the call's own
-// context's code once it ended, the agent's status otherwise.
-func agentError(ctx context.Context, err error) error {
+// agentError is the status for an agent call on j that failed with err,
+// with ctx its call context. Any failure but the call's own end may be how
+// the call first sees its VM die, moments before the job process reports
+// it, so the call then waits for that report, at most the lost agent grace,
+// and the handler's callError returns the VM's status. A failure other than
+// a broken connection (Unavailable) waits only once a Ping shows the agent
+// gone: an agent that answers is alive, and the call returns its own error
+// at once. A VM not reported exited by the end of the grace fails the call
+// with FailedPrecondition, naming the VM: never Unavailable, which the
+// runner reads as the plugin being gone.
+func (s *Server) agentError(ctx context.Context, j *job, err error) error {
 	if ctx.Err() != nil {
-		return status.FromContextError(ctx.Err()).Err()
+		return err
 	}
-	return err
+	graceCtx, cancel := context.WithTimeout(ctx, s.cfg.LostAgentGrace)
+	defer cancel()
+	if status.Code(err) != codes.Unavailable && j.agent.Ping(graceCtx) == nil {
+		return err
+	}
+	<-graceCtx.Done()
+	if ctx.Err() != nil {
+		return err
+	}
+	return status.Errorf(codes.FailedPrecondition, "VM %s: the connection to its agent broke, and the VM has not exited: %s",
+		j.hostname, status.Convert(err).Message())
 }
 
 // Exec runs the command through the job's container's agent and relays its
 // output, then its exit code or why it could not start. The env values are
 // secrets: they are never logged (LOG-2).
-func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.BackendPlugin_ExecServer) error {
+func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.BackendPlugin_ExecServer) (err error) {
 	j, ctx, done, err := s.started(stream.Context(), req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
 	defer done()
+	defer func() { err = callError(ctx, j, err) }()
 	out, err := j.agent.Exec(ctx, &agentv1.ExecRequest{
 		Argv:       req.GetCommand(),
 		Env:        req.GetEnv(),
@@ -66,15 +90,16 @@ func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.Backe
 		WorkingDir: req.GetWorkdir(),
 	})
 	if err != nil {
-		return agentError(ctx, err)
+		return s.agentError(ctx, j, err)
 	}
 	for {
 		resp, err := out.Recv()
 		if errors.Is(err, io.EOF) {
-			return status.Error(codes.Unavailable, "the agent ended Exec without an exit code")
+			// The agent ships in the plugin: its bug is the plugin's own.
+			err = status.Errorf(codes.Internal, "VM %s: its agent ended Exec without an exit code", j.hostname)
 		}
 		if err != nil {
-			return agentError(ctx, err)
+			return s.agentError(ctx, j, err)
 		}
 		var o *pluginv1alpha.ExecOutput
 		switch ev := resp.GetEvent().(type) {
@@ -110,7 +135,7 @@ func execData(s pluginv1alpha.DataChunk_Stream, b []byte) *pluginv1alpha.ExecOut
 
 // CopyIn relays a tar to the agent, which extracts it at the destination
 // the first chunk names.
-func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) error {
+func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err error) {
 	first, err := stream.Recv()
 	if err != nil {
 		return err
@@ -123,9 +148,10 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) error {
 		return err
 	}
 	defer done()
+	defer func() { err = callError(ctx, j, err) }()
 	in, err := j.agent.CopyIn(ctx)
 	if err != nil {
-		return agentError(ctx, err)
+		return s.agentError(ctx, j, err)
 	}
 	// Send's own errors surface in CloseAndRecv.
 	sendErr := in.Send(&agentv1.CopyInRequest{Destination: first.GetDestPath(), Chunk: first.GetData()})
@@ -149,21 +175,22 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) error {
 		sendErr = in.Send(&agentv1.CopyInRequest{Chunk: chunk.GetData()})
 	}
 	if _, err := in.CloseAndRecv(); err != nil {
-		return agentError(ctx, err)
+		return s.agentError(ctx, j, err)
 	}
 	return await(ctx, func() error { return stream.SendAndClose(&pluginv1alpha.CopyInResponse{}) })
 }
 
 // CopyOut relays the agent's tar of a guest path.
-func (s *Server) CopyOut(req *pluginv1alpha.CopyOutRequest, stream pluginv1alpha.BackendPlugin_CopyOutServer) error {
+func (s *Server) CopyOut(req *pluginv1alpha.CopyOutRequest, stream pluginv1alpha.BackendPlugin_CopyOutServer) (err error) {
 	j, ctx, done, err := s.started(stream.Context(), req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
 	defer done()
+	defer func() { err = callError(ctx, j, err) }()
 	out, err := j.agent.CopyOut(ctx, &agentv1.CopyOutRequest{Path: req.GetSrcPath()})
 	if err != nil {
-		return agentError(ctx, err)
+		return s.agentError(ctx, j, err)
 	}
 	for {
 		resp, err := out.Recv()
@@ -171,7 +198,7 @@ func (s *Server) CopyOut(req *pluginv1alpha.CopyOutRequest, stream pluginv1alpha
 			return nil
 		}
 		if err != nil {
-			return agentError(ctx, err)
+			return s.agentError(ctx, j, err)
 		}
 		// A runner that stops reading can't keep the job held (await).
 		if err := await(ctx, func() error { return stream.Send(&pluginv1alpha.CopyOutChunk{Data: resp.GetChunk()}) }); err != nil {

@@ -16,6 +16,7 @@ import (
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 )
 
 // jobFiles lists every path under the state, runtime and cache directories
@@ -238,6 +239,234 @@ func TestStartsOfDifferentJobsRunInParallel(t *testing.T) {
 		if err := within(t, started, "Start"); err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// hangingAgent's Exec sends on entered, then blocks until its call ends.
+type hangingAgent struct {
+	fakeAgent
+	entered chan struct{}
+}
+
+func (a *hangingAgent) Exec(_ *agentv1.ExecRequest, stream agentv1.AgentService_ExecServer) error {
+	a.entered <- struct{}{}
+	<-stream.Context().Done()
+	return stream.Context().Err()
+}
+
+// startedWith returns a client, its server, and a started job's id, on a
+// fake job process serving agent.
+func startedWith(t *testing.T, launcher *fakeLauncher, lostAgentGrace time.Duration) (pluginv1alpha.BackendPluginClient, string) {
+	t.Helper()
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	if lostAgentGrace != 0 {
+		srv.cfg.LostAgentGrace = lostAgentGrace
+	}
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+	id := create(t, c)
+	if _, err := start(testContext(t), c, id); err != nil {
+		t.Fatal(err)
+	}
+	return c, id
+}
+
+// wantGone fails t unless err is FailedPrecondition with the message want.
+func wantGone(t *testing.T, what string, err error, want string) {
+	t.Helper()
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != want {
+		t.Errorf("%s: %v; want FailedPrecondition: %s", what, err, want)
+	}
+}
+
+// Once the job process reports that the job's VM exited, an Exec in flight
+// and every later Exec, CopyIn and CopyOut fail with FailedPrecondition
+// naming the VM, its exit code and its console tail, not with the broken
+// connection's Unavailable. A job process that fails, or exits with
+// neither said, fails them the same way, naming the VM. Remove then works
+// as usual.
+func TestCallsOnAJobWhoseVMDied(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		last []*jobv1.Event
+		want string
+	}{
+		"VM exits": {
+			[]*jobv1.Event{{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
+				ExitCode: 1, ConsoleTail: "Kernel panic - not syncing: Attempted to kill init!\n", LogTail: "the VM log",
+			}}}},
+			"VM job exited (1): Kernel panic - not syncing: Attempted to kill init!",
+		},
+		"job process fails": {
+			[]*jobv1.Event{{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "the job network stopped"}}}},
+			"VM job: its job process failed: the job network stopped",
+		},
+		"job process exits": {nil, "VM job: its job process exited"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			agent := &hangingAgent{entered: make(chan struct{}, 1)}
+			launcher := &fakeLauncher{agent: agent}
+			c, id := startedWith(t, launcher, 0)
+			inFlight := make(chan error, 1)
+			go func() {
+				_, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"sleep", "600"}})
+				inFlight <- err
+			}()
+			within(t, agent.entered, "Exec reaching the agent")
+			launcher.die(t, id, tc.last...)
+			wantGone(t, "the Exec in flight", within(t, inFlight, "the Exec in flight"), tc.want)
+
+			_, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"true"}})
+			wantGone(t, "a later Exec", err, tc.want)
+			dest := "/var/run/act/"
+			err = copyInAll(t, c, &pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: &dest, Data: []byte("ok")})
+			wantGone(t, "a later CopyIn", err, tc.want)
+			_, err = copyOutAll(t, c, id, "/x")
+			wantGone(t, "a later CopyOut", err, tc.want)
+
+			if _, err := c.Remove(testContext(t), &pluginv1alpha.RemoveRequest{EnvironmentId: id}); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+			if launcher.alive() != 0 {
+				t.Error("the job process outlived Remove")
+			}
+		})
+	}
+}
+
+// A connection to the agent that breaks while the job process reports no
+// exit fails the call, after the lost agent grace, with FailedPrecondition
+// naming the VM, not the broken connection's Unavailable.
+func TestCallWhoseAgentConnectionBroke(t *testing.T) {
+	t.Parallel()
+	agent := &hangingAgent{entered: make(chan struct{}, 1)}
+	launcher := &fakeLauncher{agent: agent}
+	c, id := startedWith(t, launcher, 100*time.Millisecond)
+	inFlight := make(chan error, 1)
+	go func() {
+		_, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"sleep", "600"}})
+		inFlight <- err
+	}()
+	within(t, agent.entered, "Exec reaching the agent")
+	launcher.breakAgent(t, id)
+	err := within(t, inFlight, "the Exec in flight")
+	if status.Code(err) != codes.FailedPrecondition ||
+		!strings.HasPrefix(status.Convert(err).Message(), "VM job: the connection to its agent broke, and the VM has not exited: ") {
+		t.Errorf("Exec = %v; want FailedPrecondition naming the VM and the broken connection", err)
+	}
+}
+
+// failingAgent's Exec sends on entered, then, once fail closes, fails with
+// err, or with err nil ends without an exit code. Once dying closes, its
+// Ping fails, as a dying VM's agent does, after sending on pinged.
+type failingAgent struct {
+	fakeAgent
+	err     error
+	entered chan struct{}
+	fail    chan struct{}
+	dying   chan struct{}
+	pinged  chan struct{}
+}
+
+func newFailingAgent(err error) *failingAgent {
+	return &failingAgent{
+		err: err, entered: make(chan struct{}, 1), fail: make(chan struct{}),
+		dying: make(chan struct{}), pinged: make(chan struct{}, 1),
+	}
+}
+
+func (a *failingAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
+	select {
+	case <-a.dying:
+		select {
+		case a.pinged <- struct{}{}:
+		default:
+		}
+		return nil, status.Error(codes.Unavailable, "the agent is gone")
+	default:
+		return &agentv1.PingResponse{}, nil
+	}
+}
+
+func (a *failingAgent) Exec(_ *agentv1.ExecRequest, _ agentv1.AgentService_ExecServer) error {
+	a.entered <- struct{}{}
+	<-a.fail
+	return a.err
+}
+
+// A call whose agent fails other than with Unavailable, here with the
+// Internal of a reset stream or by ending Exec without an exit code, while
+// its VM dies, fails as one whose connection broke does: with the VM's
+// exit, once the job process reports it.
+func TestCallWhoseAgentFailsAsItsVMDies(t *testing.T) {
+	t.Parallel()
+	for name, err := range map[string]error{
+		"reset stream": status.Error(codes.Internal, "stream terminated by RST_STREAM with error code: PROTOCOL_ERROR"),
+		"no exit code": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			agent := newFailingAgent(err)
+			launcher := &fakeLauncher{agent: agent}
+			c, id := startedWith(t, launcher, time.Minute)
+			inFlight := make(chan error, 1)
+			go func() {
+				_, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"sleep", "600"}})
+				inFlight <- err
+			}()
+			within(t, agent.entered, "Exec reaching the agent")
+			close(agent.dying)
+			close(agent.fail)
+			// The plugin checks the agent before it waits for the VM's exit.
+			select {
+			case <-agent.pinged:
+			case err := <-inFlight:
+				t.Fatalf("the Exec returned %v without waiting for its VM's exit", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the plugin did not check the agent within 10s")
+			}
+			launcher.report(t, id, &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
+				ExitCode: 1, ConsoleTail: "Kernel panic - not syncing: Attempted to kill init!\n",
+			}}})
+			wantGone(t, "the Exec in flight", within(t, inFlight, "the Exec in flight"),
+				"VM job exited (1): Kernel panic - not syncing: Attempted to kill init!")
+		})
+	}
+}
+
+// A call whose agent fails while the agent still answers fails at once,
+// without the lost agent grace, with the agent's own error, or Internal
+// naming the VM for an Exec that ended without an exit code: never
+// Unavailable.
+func TestCallWhoseLiveAgentFails(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		err  error
+		want error
+	}{
+		"agent's error": {
+			status.Error(codes.Internal, "copy out /x: permission denied"),
+			status.Error(codes.Internal, "copy out /x: permission denied"),
+		},
+		"no exit code": {nil, status.Error(codes.Internal, "VM job: its agent ended Exec without an exit code")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			agent := newFailingAgent(tc.err)
+			close(agent.fail)
+			launcher := &fakeLauncher{agent: agent}
+			// within's 10 s is far below the grace.
+			c, id := startedWith(t, launcher, time.Hour)
+			done := make(chan error, 1)
+			go func() {
+				_, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"true"}})
+				done <- err
+			}()
+			err := within(t, done, "the Exec")
+			if status.Code(err) != status.Code(tc.want) || status.Convert(err).Message() != status.Convert(tc.want).Message() {
+				t.Errorf("Exec = %v; want %v", err, tc.want)
+			}
+		})
 	}
 }
 

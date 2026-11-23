@@ -23,6 +23,7 @@ import (
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
 
 // The boot root's files, by their names in it, and where the agent mounts
@@ -85,6 +86,9 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 	}
 	j.ready.Store(true)
 	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(begin).Round(time.Millisecond))
+	gone, markGone := context.WithCancelCause(context.Background())
+	j.gone, j.watched = gone, make(chan struct{})
+	go s.watch(j, j.proc, markGone, j.watched)
 	return await(ctx, func() error {
 		return stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{
 			StartComplete: &pluginv1alpha.StartComplete{ImageEnv: env},
@@ -245,6 +249,65 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 			exited = nil
 		}
 	}
+}
+
+// lostAgentGrace is how long a call whose agent failed, and is gone, waits
+// for the job process to report its VM exited. A failing agent call is how
+// the plugin first sees a VM die, moments before the job process has reaped the
+// VM child and says so; the agent is the VM's workload, so a VM whose agent
+// is gone exits.
+const lostAgentGrace = 10 * time.Second
+
+// watch reads the events of p, the job process of j once its Start
+// succeeded, and marks j gone with markGone at the first that ends its job's
+// container's VM: that VM exited, or the job process failed, or the job
+// process exited with neither said. It returns, closing watched, once p has
+// exited and its events have ended.
+func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCauseFunc, watched chan<- struct{}) {
+	defer close(watched)
+	gone := func(err error) {
+		if j.gone.Err() != nil {
+			return
+		}
+		markGone(err)
+		// Remove kills the job process; only a VM that died on its own
+		// is news.
+		if j.ctx.Err() == nil {
+			s.log.Warn("the job's VM died; its calls fail until the runner removes it", "job", j.id, "err", err)
+		}
+	}
+	events, exited := p.Events, p.Exited
+	for events != nil || exited != nil {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			if x := ev.GetVmExited(); x != nil && x.GetVm() == 0 {
+				gone(vmExitedError(j.hostname, x))
+			}
+			if f := ev.GetFailed(); f != nil {
+				gone(status.Errorf(codes.FailedPrecondition, "VM %s: its job process failed: %s", j.hostname, f.GetReason()))
+			}
+		case <-exited:
+			exited = nil
+		}
+	}
+	// Events end only once the job process is gone.
+	gone(status.Errorf(codes.FailedPrecondition, "VM %s: its job process exited", j.hostname))
+}
+
+// vmExitedError is the status of every call on a job whose VM, named name,
+// exited after Start: FailedPrecondition, naming the VM, its exit code and
+// its console tail. It is not Unavailable, which the runner reads as the
+// plugin being gone.
+func vmExitedError(name string, x *jobv1.VMExited) error {
+	msg := fmt.Sprintf("VM %s exited (%d)", name, x.GetExitCode())
+	if c := strings.TrimSpace(x.GetConsoleTail()); c != "" {
+		msg += ": " + c
+	}
+	return status.Error(codes.FailedPrecondition, msg)
 }
 
 // lastOutput formats a VM's last console and log output for an error.

@@ -166,10 +166,12 @@ type fakeLauncher struct {
 	specs   []*jobv1.Spec
 	logs    []string
 	running map[*joblaunch.Process]*fakeProcess
+	byJob   map[string]*fakeProcess
 	kills   int
 }
 
 type fakeProcess struct {
+	events chan *jobv1.Event
 	exited chan struct{}
 	once   sync.Once
 	gs     *grpc.Server
@@ -178,7 +180,9 @@ type fakeProcess struct {
 	dir *sockDir
 }
 
-func (p *fakeProcess) end() {
+// end ends the fake job process: its agent goes, then, after the events
+// last says, its events end and it exits, as a job process does.
+func (p *fakeProcess) end(last ...*jobv1.Event) {
 	p.once.Do(func() {
 		if p.gs != nil {
 			p.gs.Stop()
@@ -189,6 +193,10 @@ func (p *fakeProcess) end() {
 		if p.dir != nil {
 			_ = p.dir.Close()
 		}
+		for _, ev := range last {
+			p.events <- ev
+		}
+		close(p.events)
 		close(p.exited)
 	})
 }
@@ -202,7 +210,7 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 		return nil, l.err
 	}
 	events := make(chan *jobv1.Event, 4)
-	fp := &fakeProcess{exited: make(chan struct{})}
+	fp := &fakeProcess{events: events, exited: make(chan struct{})}
 	p := &joblaunch.Process{Events: events, Exited: fp.exited}
 	switch l.does {
 	case boots:
@@ -245,14 +253,14 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 	case networkFails:
 		// The job process says why and exits, so its events end and Exited
 		// closes, both ready by the time Start looks.
-		events <- &jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "network: cannot reserve gateway IP"}}}
-		close(events)
-		fp.end()
+		fp.end(&jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: "network: cannot reserve gateway IP"}}})
 	}
 	if l.running == nil {
 		l.running = map[*joblaunch.Process]*fakeProcess{}
+		l.byJob = map[string]*fakeProcess{}
 	}
 	l.running[p] = fp
+	l.byJob[spec.GetJob()] = fp
 	return p, nil
 }
 
@@ -267,6 +275,48 @@ func (l *fakeLauncher) Kill(_ context.Context, p *joblaunch.Process) error {
 	}
 	fp.end()
 	return nil
+}
+
+// die makes the job process of the job id end on its own, as when its VM
+// exits: its agent's connection breaks, then it reports last, and exits. It
+// stays the launcher's to Kill, which is then no error.
+func (l *fakeLauncher) die(t *testing.T, id string, last ...*jobv1.Event) {
+	t.Helper()
+	l.mu.Lock()
+	fp := l.byJob[id]
+	l.mu.Unlock()
+	if fp == nil {
+		t.Fatalf("no job process of %s was launched", id)
+	}
+	fp.end(last...)
+}
+
+// breakAgent breaks the connection to the agent of the job id's job process
+// without ending the process: its VM is not reported to exit.
+func (l *fakeLauncher) breakAgent(t *testing.T, id string) {
+	t.Helper()
+	l.mu.Lock()
+	fp := l.byJob[id]
+	l.mu.Unlock()
+	if fp == nil || fp.gs == nil {
+		t.Fatalf("no agent of %s was served", id)
+	}
+	fp.gs.Stop()
+	<-fp.served
+}
+
+// report makes the job process of the job id report ev while its agent
+// still serves: the order in which a VM whose agent failed first, then
+// exited, is seen.
+func (l *fakeLauncher) report(t *testing.T, id string, ev *jobv1.Event) {
+	t.Helper()
+	l.mu.Lock()
+	fp := l.byJob[id]
+	l.mu.Unlock()
+	if fp == nil {
+		t.Fatalf("no job process of %s was launched", id)
+	}
+	fp.events <- ev
 }
 
 // alive returns how many job processes are not killed.
