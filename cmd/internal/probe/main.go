@@ -4,11 +4,35 @@
 // with CopyIn and run with Exec. It is built by the test, static
 // (CGO_ENABLED=0), so it runs on any image, and never ships.
 //
-//	probe connect <host:port>         open a TCP connection, print "connected"
-//	probe resolve <name> <server:53>  ask server for name's A records
-//	probe netinfo                     print lo's and eth0's state, addresses and the default route
+//	probe connect [-timeout d] [-send line] <host:port>
+//	    open a TCP connection, send line if given, print "connected"
+//	probe unreachable [-timeout d] [-send line] <port> <addr|prefix>...
+//	    connect to port at each address, every address of each prefix
+//	    included; fail if any connection opens, sending it line first
+//	probe refuses [-timeout d] <host> <first>-<last>
+//	    connect to every port in the range; fail if any port does anything
+//	    but refuse
+//	probe listen [-for d] <host:port> <control host:port>
+//	    accept connections, print each one's peer and first line; once up,
+//	    connect to the listener at eth0's address saying "ready", then to
+//	    control, and exit at the line "stop" from it, or fail after d
+//	probe udp <host:port>...
+//	    send each a UDP datagram, written raw on eth0 to the default
+//	    gateway's MAC, as a root guest can, so the guest's own routing
+//	    can't keep it (it takes 0.0.0.0 as its own loopback)
+//	probe resolve [-tcp] <name> <server:53>
+//	    ask server for name's A records, over UDP or TCP
+//	probe dhcp [-n count] [-timeout d]
+//	    broadcast count DHCP DISCOVERs from eth0's MAC, print every reply's
+//	    offered address
+//	probe vsock [-cid cid] <first>-<last>...
+//	    open an AF_VSOCK connection to cid on every port in the ranges; fail
+//	    if any opens
+//	probe netinfo
+//	    print lo's and eth0's state, addresses and the default route
 //
-// Each exits 0 on success, and 1 with the error on stderr otherwise.
+// Each exits 0 on success, and 1 with the error on stderr otherwise. Every
+// network wait is bounded by a timeout.
 package main
 
 import (
@@ -17,18 +41,28 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/sys/unix"
 )
 
-// timeout bounds each check.
+// timeout bounds each check that expects an answer.
 const timeout = 10 * time.Second
+
+// workers bounds the connections a scan has open at once.
+const workers = 256
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -37,37 +71,427 @@ func main() {
 	}
 }
 
+const usage = "usage: probe connect|unreachable|refuses|listen|udp|resolve|dhcp|vsock|netinfo [flags] [args]"
+
 func run(args []string) error {
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	wait := fs.Duration("timeout", timeout, "how long each connection may take")
+	send := fs.String("send", "", "a line to send on each connection that opens")
+	listenFor := fs.Duration("for", 5*time.Minute, "how long to listen")
+	overTCP := fs.Bool("tcp", false, "resolve over TCP")
+	count := fs.Int("n", 3, "how many DISCOVERs to send")
+	cid := fs.Uint("cid", unix.VMADDR_CID_HOST, "the vsock CID to connect to")
+	if err := fs.Parse(args[1:]); err != nil {
+		return fmt.Errorf("%s: %w", args[0], err)
+	}
+	rest := fs.Args()
 	switch {
-	case len(args) == 2 && args[0] == "connect":
-		return connect(args[1])
-	case len(args) == 3 && args[0] == "resolve":
-		return resolve(args[1], args[2])
-	case len(args) == 1 && args[0] == "netinfo":
+	case args[0] == "connect" && len(rest) == 1:
+		return connect(rest[0], *wait, *send)
+	case args[0] == "unreachable" && len(rest) >= 2:
+		return unreachable(rest[0], rest[1:], *wait, *send)
+	case args[0] == "refuses" && len(rest) == 2:
+		return refuses(rest[0], rest[1], *wait)
+	case args[0] == "listen" && len(rest) == 2:
+		return listen(rest[0], rest[1], *listenFor)
+	case args[0] == "udp" && len(rest) >= 1:
+		return rawUDP(rest)
+	case args[0] == "resolve" && len(rest) == 2:
+		return resolve(rest[0], rest[1], *overTCP)
+	case args[0] == "dhcp" && len(rest) == 0:
+		return dhcp(*count, *wait)
+	case args[0] == "vsock" && len(rest) >= 1:
+		return vsock(uint32(*cid), rest) //nolint:gosec // G115: a flag value; a CID is 32 bits
+	case args[0] == "netinfo" && len(rest) == 0:
 		return netinfo()
 	default:
-		return errors.New("usage: probe connect <host:port> | resolve <name> <server:53> | netinfo")
+		return errors.New(usage)
 	}
 }
 
-func connect(addr string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// dial opens a TCP connection to addr within wait.
+func dial(addr string, wait time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	c, err := new(net.Dialer).DialContext(ctx, "tcp", addr)
+	return new(net.Dialer).DialContext(ctx, "tcp", addr)
+}
+
+// sendLine sends line on c within wait, if line isn't empty.
+func sendLine(c net.Conn, line string, wait time.Duration) error {
+	if line == "" {
+		return nil
+	}
+	if err := c.SetWriteDeadline(time.Now().Add(wait)); err != nil {
+		return err
+	}
+	_, err := io.WriteString(c, line+"\n")
+	return err
+}
+
+func connect(addr string, wait time.Duration, line string) error {
+	c, err := dial(addr, wait)
 	if err != nil {
 		return err
+	}
+	if err := sendLine(c, line, wait); err != nil {
+		return errors.Join(err, c.Close())
 	}
 	fmt.Printf("connected %s -> %s\n", c.LocalAddr(), c.RemoteAddr())
 	return c.Close()
 }
 
-// resolve asks server for name's A records over UDP, directly, so the
-// answer can only have come from server, never from the image's
+// scan runs try on each of items, workers at a time, and returns the
+// errors it returned, by item.
+func scan[T comparable](items []T, try func(T) error) map[T]error {
+	var mu sync.Mutex
+	errs := make(map[T]error, len(items))
+	next := make(chan T)
+	var wg sync.WaitGroup
+	for range min(workers, len(items)) {
+		wg.Go(func() {
+			for it := range next {
+				err := try(it)
+				mu.Lock()
+				errs[it] = err
+				mu.Unlock()
+			}
+		})
+	}
+	for _, it := range items {
+		next <- it
+	}
+	close(next)
+	wg.Wait()
+	return errs
+}
+
+// unreachable connects to port at every target, an address or a prefix of
+// addresses, each within wait, and fails if any connection opens. It
+// asserts no particular error: an address nothing answers ARP for only
+// times out.
+func unreachable(port string, targets []string, wait time.Duration, line string) error {
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("port %q: %w", port, err)
+	}
+	var addrs []netip.Addr
+	for _, t := range targets {
+		if p, err := netip.ParsePrefix(t); err == nil {
+			for a := p.Masked().Addr(); p.Contains(a); a = a.Next() {
+				addrs = append(addrs, a)
+			}
+			continue
+		}
+		a, err := netip.ParseAddr(t)
+		if err != nil {
+			return fmt.Errorf("target %q: neither an address nor a prefix", t)
+		}
+		addrs = append(addrs, a)
+	}
+	errs := scan(addrs, func(a netip.Addr) error {
+		c, err := dial(net.JoinHostPort(a.String(), port), wait)
+		if err != nil {
+			return err
+		}
+		// The connection opened, so a is reached, whether or not the
+		// line gets through.
+		_ = sendLine(c, line, wait)
+		_ = c.Close()
+		return nil
+	})
+	var reached []string
+	for _, a := range addrs {
+		if errs[a] == nil {
+			reached = append(reached, a.String())
+		}
+	}
+	fmt.Printf("unreachable: %d of %d addresses on port %s\n", len(addrs)-len(reached), len(addrs), port)
+	if len(reached) > 0 {
+		return fmt.Errorf("reached port %s at %s", port, strings.Join(reached, " "))
+	}
+	return nil
+}
+
+// refuses connects to every port of host in ports, "first-last", and fails
+// if any port does anything but refuse within wait.
+func refuses(host, ports string, wait time.Duration) error {
+	all, err := portRange(ports, 1, 65535)
+	if err != nil {
+		return err
+	}
+	errs := scan(all, func(p uint32) error {
+		c, err := dial(net.JoinHostPort(host, strconv.FormatUint(uint64(p), 10)), wait)
+		if err != nil {
+			return err
+		}
+		return errors.Join(errors.New("connected"), c.Close())
+	})
+	var bad []string
+	for _, p := range all {
+		if err := errs[p]; !errors.Is(err, syscall.ECONNREFUSED) {
+			bad = append(bad, fmt.Sprintf("%d: %v", p, err))
+		}
+	}
+	fmt.Printf("refused: %d of %d ports of %s\n", len(all)-len(bad), len(all), host)
+	if len(bad) > 0 {
+		return fmt.Errorf("%d ports did not refuse, the first: %s", len(bad), strings.Join(bad[:min(len(bad), 10)], "; "))
+	}
+	return nil
+}
+
+// portRange parses "first-last", or a single port, within lo and hi.
+func portRange(s string, lo, hi uint64) ([]uint32, error) {
+	first, last, ok := strings.Cut(s, "-")
+	if !ok {
+		last = first
+	}
+	a, err := strconv.ParseUint(first, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("range %q: %w", s, err)
+	}
+	b, err := strconv.ParseUint(last, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("range %q: %w", s, err)
+	}
+	if a < lo || b > hi || a > b {
+		return nil, fmt.Errorf("range %q: not within %d-%d", s, lo, hi)
+	}
+	ports := make([]uint32, 0, b-a+1)
+	for p := a; p <= b; p++ {
+		ports = append(ports, uint32(p)) //nolint:gosec // G115: p <= hi, which callers keep within 32 bits
+	}
+	return ports, nil
+}
+
+// listen accepts connections on addr, printing each one's peer and first
+// line, from when it is up until the stop. Once its listener is up, it
+// connects to it at eth0's address, saying "ready", then connects to
+// control and waits for the line "stop" from it. It fails if a step fails
+// or there is no stop within d.
+//
+// One process does it all because the plugin runs one call on a job at a
+// time: while this Exec runs, the job takes no other, so the test tells it
+// to stop through a connection it opens to the test.
+func listen(addr, control string, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = ln.Close() }()
+	if err := ln.(*net.TCPListener).SetDeadline(deadline); err != nil {
+		return err
+	}
+	fmt.Printf("listening %s\n", ln.Addr())
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	var accepting sync.WaitGroup
+	accepting.Go(func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			line, err := firstLine(c)
+			fmt.Printf("accepted %s %q\n", c.RemoteAddr(), line)
+			if err == nil && line == "ready" {
+				readyOnce.Do(func() { close(ready) })
+			}
+		}
+	})
+	err = untilStop(ln.Addr().(*net.TCPAddr).Port, control, ready, deadline)
+	// Closing the listener ends Accept; firstLine is bounded by timeout.
+	_ = ln.Close()
+	accepting.Wait()
+	return err
+}
+
+// untilStop connects to port at eth0's address, saying "ready", waits until
+// ready is closed, then connects to control and waits for the line "stop"
+// from it, all before deadline.
+func untilStop(port int, control string, ready <-chan struct{}, deadline time.Time) error {
+	own, err := eth0Addr()
+	if err != nil {
+		return err
+	}
+	if err := connect(net.JoinHostPort(own.String(), strconv.Itoa(port)), timeout, "ready"); err != nil {
+		return fmt.Errorf("own listener: %w", err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(timeout):
+		return fmt.Errorf("own listener: no \"ready\" accepted within %s", timeout)
+	}
+	c, err := dial(control, timeout)
+	if err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	line, err := bufio.NewReaderSize(io.LimitReader(c, 64), 64).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("control: no stop: %w", err)
+	}
+	if line != "stop\n" {
+		return fmt.Errorf("control: %q, not stop", line)
+	}
+	return nil
+}
+
+// eth0Addr returns eth0's IPv4 address.
+func eth0Addr() (netip.Addr, error) {
+	ifi, err := net.InterfaceByName("eth0")
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, a := range addrs {
+		if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() {
+			return p.Addr(), nil
+		}
+	}
+	return netip.Addr{}, errors.New("eth0 has no IPv4 address")
+}
+
+// firstLine reads c's first line, of at most 64 bytes, within timeout, and
+// closes c.
+func firstLine(c net.Conn) (string, error) {
+	defer func() { _ = c.Close() }()
+	if err := c.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
+	}
+	line, err := bufio.NewReaderSize(io.LimitReader(c, 64), 64).ReadString('\n')
+	return strings.TrimSuffix(line, "\n"), err
+}
+
+// ethPIP is ETH_P_IP in network byte order, as AF_PACKET takes it.
+var ethPIP = binary.NativeEndian.Uint16(binary.BigEndian.AppendUint16(nil, unix.ETH_P_IP))
+
+// rawUDP sends each target a UDP datagram from eth0's address, written on
+// an AF_PACKET socket to the default gateway's MAC, so it leaves eth0
+// whatever the guest's routing would do with its destination.
+func rawUDP(targets []string) error {
+	dsts := make([]netip.AddrPort, 0, len(targets))
+	for _, t := range targets {
+		dst, err := netip.ParseAddrPort(t)
+		if err != nil || !dst.Addr().Is4() {
+			return fmt.Errorf("%q: not an IPv4 address and port", t)
+		}
+		dsts = append(dsts, dst)
+	}
+	ifi, err := net.InterfaceByName("eth0")
+	if err != nil {
+		return err
+	}
+	src, err := eth0Addr()
+	if err != nil {
+		return err
+	}
+	gw, _, err := defaultRoute()
+	if err != nil {
+		return err
+	}
+	mac, err := neighbour(gw, timeout)
+	if err != nil {
+		return err
+	}
+	// Protocol 0: the socket sends and receives nothing.
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("packet socket: %w", err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	to := &unix.SockaddrLinklayer{Protocol: ethPIP, Ifindex: ifi.Index, Halen: 6}
+	copy(to.Addr[:], mac)
+	for _, dst := range dsts {
+		if err := unix.Sendto(fd, udpPacket(src, dst), 0, to); err != nil {
+			return fmt.Errorf("send to %s: %w", dst, err)
+		}
+		fmt.Printf("sent %s via %s\n", dst, mac)
+	}
+	return nil
+}
+
+// udpPacket returns an IPv4 packet from src holding a UDP datagram to dst,
+// with no UDP checksum, which IPv4 allows.
+func udpPacket(src netip.Addr, dst netip.AddrPort) []byte {
+	payload := []byte("probe\n")
+	b := make([]byte, 20+8+len(payload))
+	// IPv4, a 20-byte header.
+	b[0] = 0x45
+	binary.BigEndian.PutUint16(b[2:4], uint16(len(b))) //nolint:gosec // G115: under 64 bytes
+	b[8], b[9] = 64, unix.IPPROTO_UDP
+	copy(b[12:16], src.AsSlice())
+	copy(b[16:20], dst.Addr().AsSlice())
+	var sum uint32
+	for i := 0; i < 20; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(b[i:]))
+	}
+	for sum > 0xffff {
+		sum = sum&0xffff + sum>>16
+	}
+	binary.BigEndian.PutUint16(b[10:12], ^uint16(sum))
+	udp := b[20:]
+	binary.BigEndian.PutUint16(udp[0:2], 40000)
+	binary.BigEndian.PutUint16(udp[2:4], dst.Port())
+	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp))) //nolint:gosec // G115: under 64 bytes
+	copy(udp[8:], payload)
+	return b
+}
+
+// neighbour returns addr's MAC from the kernel's ARP table, first sending
+// addr a datagram to its discard port so the kernel resolves it, and fails
+// if it isn't resolved within wait.
+func neighbour(addr netip.Addr, wait time.Duration) (net.HardwareAddr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	c, err := new(net.Dialer).DialContext(ctx, "udp4", net.JoinHostPort(addr.String(), "9"))
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.Write([]byte{0})
+	_ = c.Close()
+	if err != nil {
+		return nil, err
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); <-tick.C {
+		b, err := os.ReadFile("/proc/net/arp")
+		if err != nil {
+			return nil, err
+		}
+		// IP address, HW type, Flags, HW address, Mask, Device.
+		for line := range strings.Lines(string(b)) {
+			f := strings.Fields(line)
+			if len(f) < 4 || f[0] != addr.String() || f[2] != "0x2" {
+				continue
+			}
+			return net.ParseMAC(f[3])
+		}
+	}
+	return nil, fmt.Errorf("%s's MAC: not resolved within %s", addr, wait)
+}
+
+// resolve asks server for name's A records over UDP or TCP, directly, so
+// the answer can only have come from server, never from the image's
 // /etc/hosts.
-func resolve(name, server string) error {
+func resolve(name, server string, overTCP bool) error {
+	network := "udp"
+	if overTCP {
+		network = "tcp"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	c, err := new(net.Dialer).DialContext(ctx, "udp", server)
+	c, err := new(net.Dialer).DialContext(ctx, network, server)
 	if err != nil {
 		return err
 	}
@@ -87,16 +511,33 @@ func resolve(name, server string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.Write(b); err != nil {
-		return err
-	}
-	buf := make([]byte, 1500)
-	size, err := c.Read(buf)
-	if err != nil {
-		return err
+	var answer []byte
+	if overTCP {
+		// RFC 1035 4.2.2: each message is prefixed with its length.
+		if _, err := c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(b))), b...)); err != nil { //nolint:gosec // G115: a one-question message is far under 64 KiB
+			return err
+		}
+		var size [2]byte
+		if _, err := io.ReadFull(c, size[:]); err != nil {
+			return err
+		}
+		answer = make([]byte, binary.BigEndian.Uint16(size[:]))
+		if _, err := io.ReadFull(c, answer); err != nil {
+			return err
+		}
+	} else {
+		if _, err := c.Write(b); err != nil {
+			return err
+		}
+		buf := make([]byte, 1500)
+		size, err := c.Read(buf)
+		if err != nil {
+			return err
+		}
+		answer = buf[:size]
 	}
 	var m dnsmessage.Message
-	if err := m.Unpack(buf[:size]); err != nil {
+	if err := m.Unpack(answer); err != nil {
 		return err
 	}
 	if m.ID != q.ID || m.RCode != dnsmessage.RCodeSuccess {
@@ -111,7 +552,118 @@ func resolve(name, server string) error {
 	if len(found) == 0 {
 		return fmt.Errorf("%s: no A record for %s", server, name)
 	}
-	fmt.Printf("resolved %s via %s: %s\n", name, server, strings.Join(found, " "))
+	fmt.Printf("resolved %s via %s/%s: %s\n", name, server, network, strings.Join(found, " "))
+	return nil
+}
+
+// dhcp broadcasts count DHCP DISCOVERs on eth0, each from eth0's MAC with a
+// transaction id of its own, and prints the address every reply to it
+// offers. It reads replies to each until wait passes with none, and fails
+// if a DISCOVER got none.
+func dhcp(count int, wait time.Duration) error {
+	ifi, err := net.InterfaceByName("eth0")
+	if err != nil {
+		return err
+	}
+	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
+		var serr error
+		err := rc.Control(func(fd uintptr) {
+			serr = errors.Join(
+				unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1),
+				unix.BindToDevice(int(fd), ifi.Name),
+			)
+		})
+		return errors.Join(err, serr)
+	}}
+	conn, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:68")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	for i := range count {
+		xid := 0x63630000 + uint32(i)
+		if _, err := conn.WriteTo(discover(xid, ifi.HardwareAddr), &net.UDPAddr{IP: net.IPv4bcast, Port: 67}); err != nil {
+			return err
+		}
+		replies := 0
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+				return err
+			}
+			buf := make([]byte, 1500)
+			n, from, err := conn.ReadFrom(buf)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			r := buf[:n]
+			if len(r) < 240 || r[0] != 2 || binary.BigEndian.Uint32(r[4:8]) != xid {
+				continue
+			}
+			replies++
+			fmt.Printf("offer xid=%#x from=%s yiaddr=%s\n", xid, from, netip.AddrFrom4([4]byte(r[16:20])))
+		}
+		if replies == 0 {
+			return fmt.Errorf("DISCOVER %#x: no reply within %s", xid, wait)
+		}
+	}
+	return nil
+}
+
+// discover returns a DHCPDISCOVER from mac with transaction id xid, asking
+// for a broadcast reply.
+func discover(xid uint32, mac net.HardwareAddr) []byte {
+	b := make([]byte, 240, 300)
+	b[0], b[1], b[2] = 1, 1, 6 // BOOTREQUEST, Ethernet, 6-byte address
+	binary.BigEndian.PutUint32(b[4:8], xid)
+	binary.BigEndian.PutUint16(b[10:12], 0x8000) // broadcast reply
+	copy(b[28:], mac)
+	copy(b[236:], []byte{99, 130, 83, 99}) // the magic cookie
+	return append(b, 53, 1, 1, 255)        // DHCPDISCOVER, end
+}
+
+// vsock opens an AF_VSOCK stream connection to cid on every port in ranges
+// and fails if any opens. The kernel bounds each connect (2 s by default).
+func vsock(cid uint32, ranges []string) error {
+	var ports []uint32
+	for _, r := range ranges {
+		p, err := portRange(r, 0, unix.VMADDR_PORT_ANY-1)
+		if err != nil {
+			return err
+		}
+		ports = append(ports, p...)
+	}
+	slices.Sort(ports)
+	ports = slices.Compact(ports)
+	// A guest that can't make a vsock socket at all must not pass.
+	errNoSocket := errors.New("no vsock socket")
+	errs := scan(ports, func(port uint32) error {
+		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errNoSocket, err)
+		}
+		defer func() { _ = unix.Close(fd) }()
+		return unix.Connect(fd, &unix.SockaddrVM{CID: cid, Port: port})
+	})
+	var opened []string
+	reasons := map[string]int{}
+	for _, p := range ports {
+		err := errs[p]
+		if errors.Is(err, errNoSocket) {
+			return err
+		}
+		if err == nil {
+			opened = append(opened, strconv.FormatUint(uint64(p), 10))
+		} else {
+			reasons[err.Error()]++
+		}
+	}
+	fmt.Printf("vsock: %d of %d ports of CID %d failed: %v\n", len(ports)-len(opened), len(ports), cid, reasons)
+	if len(opened) > 0 {
+		return fmt.Errorf("connected to CID %d on ports %s", cid, strings.Join(opened, " "))
+	}
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -52,9 +53,9 @@ type vm struct {
 	id string
 }
 
-// bootVM creates and starts a job on p's plugin with the image e2e/image
-// pins, and removes it on cleanup.
-func bootVM(t *testing.T, p *plugin) *vm {
+// bootVM creates and starts a job named name on p's plugin with the image
+// e2e/image pins, and removes it on cleanup.
+func bootVM(t *testing.T, p *plugin, name string) *vm {
 	t.Helper()
 	conn, err := grpclib.NewClient("unix://"+p.sock, grpclib.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -64,7 +65,7 @@ func bootVM(t *testing.T, p *plugin) *vm {
 	c := pluginv1alpha.NewBackendPluginClient(conn)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	resp, err := c.Create(ctx, &pluginv1alpha.CreateRequest{Name: "network", LabelArg: readImage(t)})
+	resp, err := c.Create(ctx, &pluginv1alpha.CreateRequest{Name: name, LabelArg: readImage(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,18 +138,29 @@ func (v *vm) exec(t *testing.T, argv ...string) (int32, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	stream, err := v.c.Exec(ctx, &pluginv1alpha.ExecRequest{EnvironmentId: v.id, Command: argv, Workdir: "/"})
+	code, out, err := v.run(ctx, argv...)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return code, out
+}
+
+// run runs argv in the guest with Exec until it exits or ctx ends, and
+// returns its exit code and output, stdout then stderr. Unlike exec, it
+// may run in a goroutine of its own.
+func (v *vm) run(ctx context.Context, argv ...string) (int32, string, error) {
+	stream, err := v.c.Exec(ctx, &pluginv1alpha.ExecRequest{EnvironmentId: v.id, Command: argv, Workdir: "/"})
+	if err != nil {
+		return 0, "", fmt.Errorf("Exec %v: %w", argv, err)
 	}
 	var stdout, stderr bytes.Buffer
 	for {
 		out, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			t.Fatalf("Exec %v: no exit code", argv)
+			return 0, "", fmt.Errorf("Exec %v: no exit code", argv)
 		}
 		if err != nil {
-			t.Fatalf("Exec %v: %v", argv, err)
+			return 0, "", fmt.Errorf("Exec %v: %w", argv, err)
 		}
 		switch o := out.GetOutput().(type) {
 		case *pluginv1alpha.ExecOutput_Data:
@@ -158,9 +170,9 @@ func (v *vm) exec(t *testing.T, argv ...string) (int32, string) {
 				stdout.Write(o.Data.GetData())
 			}
 		case *pluginv1alpha.ExecOutput_ExecComplete:
-			return o.ExecComplete.GetExitCode(), stdout.String() + stderr.String()
+			return o.ExecComplete.GetExitCode(), stdout.String() + stderr.String(), nil
 		case *pluginv1alpha.ExecOutput_ExecFailed:
-			t.Fatalf("Exec %v: %s", argv, o.ExecFailed.GetErrorMessage())
+			return 0, "", fmt.Errorf("Exec %v: %s", argv, o.ExecFailed.GetErrorMessage())
 		}
 	}
 }
@@ -212,7 +224,7 @@ func TestGuestNetwork(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close(); <-done })
 
 	probe := buildProbe(t)
-	v := bootVM(t, startPlugin(t, buildPlugin(t)))
+	v := bootVM(t, startPlugin(t, buildPlugin(t)), "network")
 	v.copyIn(t, probe, probeDir)
 	bin := probeDir + "/probe"
 
