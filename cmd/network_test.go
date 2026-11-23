@@ -34,14 +34,21 @@ const probeDir = "/opt/runner-microvm-probe"
 // buildProbe builds the network probe, static, and returns its path.
 func buildProbe(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "probe")
+	return buildStatic(t, "probe")
+}
+
+// buildStatic builds the test program cmd/internal/<name>, static, and
+// returns its path.
+func buildStatic(t *testing.T, name string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), name)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", bin, module+"/cmd/internal/probe")
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", bin, module+"/cmd/internal/"+name)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	cmd.WaitDelay = 10 * time.Second
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build the probe: %v\n%s", err, out)
+		t.Fatalf("build %s: %v\n%s", name, err, out)
 	}
 	return bin
 }
@@ -64,6 +71,19 @@ func bootVM(t *testing.T, p *plugin, name string) *vm {
 // label argument image, and removes it on cleanup.
 func bootImage(t *testing.T, p *plugin, name, image string) *vm {
 	t.Helper()
+	v := createImage(t, p, name, image)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	if err := v.start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return v
+}
+
+// createImage creates a job named name on p's plugin with the label
+// argument image, and removes it on cleanup.
+func createImage(t *testing.T, p *plugin, name, image string) *vm {
+	t.Helper()
 	conn, err := grpclib.NewClient("unix://"+p.sock, grpclib.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -84,15 +104,20 @@ func bootImage(t *testing.T, p *plugin, name, image string) *vm {
 			t.Errorf("Remove: %v", err)
 		}
 	})
-	stream, err := c.Start(ctx, &pluginv1alpha.StartRequest{EnvironmentId: v.id})
+	return v
+}
+
+// start runs Start on v to its end.
+func (v *vm) start(ctx context.Context) error {
+	stream, err := v.c.Start(ctx, &pluginv1alpha.StartRequest{EnvironmentId: v.id})
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	for {
 		if _, err := stream.Recv(); errors.Is(err, io.EOF) {
-			return v
+			return nil
 		} else if err != nil {
-			t.Fatalf("Start: %v", err)
+			return err
 		}
 	}
 }

@@ -189,15 +189,19 @@ func readImage(t *testing.T) string {
 	return strings.TrimSpace(string(b))
 }
 
-// buildPlugin builds runner-microvm with its payload, as it ships. `just
+// buildPlugin builds runner-microvm with its payload, as it ships, plus the
+// given -ldflags, which only a test that needs a seam passes. `just
 // test-kvm` builds the payload first.
-func buildPlugin(t *testing.T) string {
+func buildPlugin(t *testing.T, ldflags ...string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "runner-microvm")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-tags", "payload", "-trimpath", "-buildvcs=false",
-		"-o", bin, module+"/cmd/runner-microvm")
+	args := []string{"build", "-tags", "payload", "-trimpath", "-buildvcs=false"}
+	if len(ldflags) > 0 {
+		args = append(args, "-ldflags", strings.Join(ldflags, " "))
+	}
+	cmd := exec.CommandContext(ctx, "go", append(args, "-o", bin, module+"/cmd/runner-microvm")...)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	cmd.WaitDelay = 10 * time.Second
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -213,8 +217,10 @@ type plugin struct {
 	// config is its config file, and dirs the config file's directory
 	// keys, which every version of the file keeps.
 	config, dirs string
-	pid          int
-	log          *syncBuffer
+	// state is its state directory.
+	state string
+	pid   int
+	log   *syncBuffer
 }
 
 // writeConfig replaces p's config file with its directory keys and
@@ -312,7 +318,7 @@ func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			return &plugin{sock: sock, config: cfg, dirs: dirs, pid: cmd.Process.Pid, log: log}
+			return &plugin{sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: cmd.Process.Pid, log: log}
 		}
 		select {
 		case <-done:
