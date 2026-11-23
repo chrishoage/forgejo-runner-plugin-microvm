@@ -196,7 +196,20 @@ The plugin's settings and its profiles come from the config file, one YAML file 
   - `max_memory_mib` is read, validated and kept for #10, which builds the admission behind it.
   - A plugin-level 0 is taken literally, except `max_memory_mib`, where 0 means no limit: literal values are honest.
   - `cache_max_gib` arrives with #70, which passes it to the image cache's cap.
-- **`profiles` is a map from profile name to profile.** A name must match `[a-z0-9][a-z0-9_-]*`: a name with `;`, `=`, a space, or an empty name can never appear in a label, so it's a mistake best caught at load. Each profile key arrives with the change that gives it meaning (#67, #69, #70), so today a profile with any key fails as an unknown key, and an empty profile (`big: {}`, or `big:` with no value) decodes.
+- **`profiles` is a map from profile name to profile.** A name must match `[a-z0-9][a-z0-9_-]*`: a name with `;`, `=`, a space, or an empty name can never appear in a label, so it's a mistake best caught at load. Each profile key arrives with the change that gives it meaning; `scratch_paths` (#69) and `force_pull` (#70) are still unknown keys.
+- **The profile keys:**
+
+  | Key | Built-in value | Rule |
+  |---|---|---|
+  | `cpus` | 2 | an integer, 1 to 255 |
+  | `memory_mib` | 1024 | an integer, 1 to 4294967295 |
+  | `scratch_gib` | 10 | an integer ≥ 1 whose byte size fits an `int64` (at most 8589934591): the scratch file's size is an `int64` of bytes |
+
+  - The scratch size key is `scratch_gib`, not `disk_gib`: `disk_gib` would sit next to #9's `disks:` list, which means something else.
+  - A key left out takes its built-in value; `0` is an invalid value that stops startup (CFG-3). Having `cpus: 0` silently mean 2 is magic, and the decoder can tell a missing key from a 0. So is a negative value, a quoted number, or no value.
+  - The only upper bounds are the ones that can't work (CFG-10): `cpus` above 255 (libkrun's one-byte field), and `memory_mib` above what libkrun's `uint32` of MiB holds. There is no minimum memory and no scratch cap: a VM too small to boot fails Start with its console tail (PROTO-10). The mounts-plus-disks limit is #9's.
+  - When `max_memory_mib` is set, a profile the file defines whose `memory_mib`, its own or the built-in value, is more than it stops startup, naming both values: no job on that profile could ever run, so the operator finds out at load. The implicit `default` isn't checked, since the file doesn't define it; a job on it fails at Create (Admission, below). (Flagged decision; rejected: failing startup for `max_memory_mib` below the built-in 1024 when no `default` is defined, which would refuse a file whose labels all name small profiles.)
+  - Profiles never inherit from each other, `default` included (CFG-5): each is the built-in values plus its own keys. A profile with no keys (`name:` or `name: {}`) is all built-in values.
 
 ## On-disk layout
 
@@ -279,7 +292,7 @@ The plugin process pulls and converts images, each layer pull in its own gorouti
 
 - **Admission is capped by memory, not by VM count.** The plugin config key `max_memory_mib` caps the sum of `memory_mib` over every running VM, across all jobs. Unset or `0` means no limit: an exception to #1's rule that a plugin-level `0` is taken literally, because a budget of 0 MiB admits no job and would only make every job fail at Create. This replaces #1's `max_vms` (QUE-1): the runner's capacity already caps concurrent jobs, a VM count stops meaning anything once a job brings services, and memory is what actually runs out on a host. No CPU or disk cap is added now; they may come later.
 - **A job is admitted with all its VMs at once, or it waits.** Waiting jobs are admitted in arrival order (QUE-2). Admission is never VM by VM, because two half-placed jobs could each hold memory the other needs and deadlock.
-- **A job that needs more than `max_memory_mib` on its own fails at Create,** naming its need and the cap. Otherwise it would wait forever.
+- **A job that needs more than `max_memory_mib` on its own fails at Create,** naming its need and the cap. Otherwise it would wait forever. A profile the file defines can't need more on its own: loading the file refuses it (Configuration, above). The implicit `default` can, and services will.
 - #10 builds the queue and #8 the config key; this section is the rule they build.
 
 ## Failure handling and startup cleanup

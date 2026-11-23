@@ -19,7 +19,7 @@ func wantBuiltin(file string) *Config {
 		StateDir:   "/var/lib/runner-microvm",
 		CacheDir:   "/var/cache/runner-microvm",
 		RuntimeDir: "/run/runner-microvm/jobs",
-		Profiles:   map[string]Profile{},
+		Profiles:   Profiles{},
 	}
 }
 
@@ -158,7 +158,7 @@ max_memory_mib: 16384
 		CacheDir:     base + "/cache",
 		RuntimeDir:   base + "/runtime",
 		MaxMemoryMiB: 16384,
-		Profiles:     map[string]Profile{},
+		Profiles:     Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v, want %+v", cfg, want)
@@ -176,8 +176,9 @@ func TestUnknownKeysFail(t *testing.T) {
 		{"top level", "max_memory_mib: 1\ncache: /x\n", `line 2: cache: unknown key`},
 		{"after profiles", "profiles:\n  default: {}\n  big: {}\nlisten_dir: /x\n", `line 4: listen_dir: unknown key`},
 		{"compose-style x- key", "x-base: &b {}\nprofiles:\n  default: *b\n", `line 1: x-base: unknown key`},
-		{"in a profile", "profiles:\n  default:\n  big:\n    cpus: 8\n", `line 4: profile "big": cpus: unknown key`},
-		{"merged into a profile", "profiles:\n  a: &a\n    memory_mib: 1\n  b:\n    <<: *a\n", `line 3: profile "a": memory_mib: unknown key`},
+		{"in a profile", "profiles:\n  default:\n  big:\n    disk_gib: 8\n", `line 4: profile "big": disk_gib: unknown key`},
+		{"merged into a profile", "profiles:\n  a: &a\n    vcpus: 1\n  b:\n    <<: *a\n", `line 3: profile "a": vcpus: unknown key`},
+		{"case-sensitive", "profiles:\n  a:\n    CPUs: 1\n", `line 3: profile "a": CPUs: unknown key`},
 	} {
 		path, msg := loadErr(t, tc.content)
 		wantErr(t, path, msg, tc.want)
@@ -186,8 +187,8 @@ func TestUnknownKeysFail(t *testing.T) {
 		}
 	}
 	// A key merged into two profiles fails in each, naming each.
-	path, msg := loadErr(t, "profiles:\n  a: &a\n    memory_mib: 1\n  b:\n    <<: *a\n")
-	wantErr(t, path, msg, `line 3: profile "b": memory_mib: unknown key`)
+	path, msg := loadErr(t, "profiles:\n  a: &a\n    vcpus: 1\n  b:\n    <<: *a\n")
+	wantErr(t, path, msg, `line 3: profile "b": vcpus: unknown key`)
 }
 
 // Each plugin-level key's invalid values fail naming the line and the key
@@ -263,12 +264,12 @@ func TestSyntaxErrorFails(t *testing.T) {
 // Every error in a file is reported, not only the first.
 func TestEveryErrorIsReported(t *testing.T) {
 	t.Parallel()
-	path, msg := loadErr(t, "state_dir: rel\nbogus: 1\nprofiles:\n  Big: {}\n  ok:\n    cpus: 2\n")
+	path, msg := loadErr(t, "state_dir: rel\nbogus: 1\nprofiles:\n  Big: {}\n  ok:\n    cpus: 0\n")
 	for _, want := range []string{
 		`line 1: state_dir: must be an absolute path`,
 		`line 2: bogus: unknown key`,
 		`line 4: profile "Big": the name must match [a-z0-9][a-z0-9_-]*`,
-		`line 6: profile "ok": cpus: unknown key`,
+		`line 6: profile "ok": cpus: must be from 1 to 255, not 0`,
 	} {
 		wantErr(t, path, msg, want)
 	}
@@ -282,7 +283,8 @@ func TestEveryErrorIsReported(t *testing.T) {
 func TestProfileNames(t *testing.T) {
 	t.Parallel()
 	cfg := mustLoad(t, "profiles:\n  default:\n  big-2_x: {}\n  '0': {}\n")
-	want := map[string]Profile{"default": {}, "big-2_x": {}, "0": {}}
+	b := BuiltinProfile()
+	want := Profiles{"default": b, "big-2_x": b, "0": b}
 	if !reflect.DeepEqual(cfg.Profiles, want) {
 		t.Errorf("Profiles = %+v, want %+v", cfg.Profiles, want)
 	}
@@ -314,13 +316,21 @@ func TestAnchorsAndMergeKeys(t *testing.T) {
 	t.Parallel()
 	cfg := mustLoad(t, `
 profiles:
-  default: &default {}
+  default: &default {cpus: 4}
   big:
     <<: *default
+    memory_mib: 2048
   both:
-    <<: [*default, {}]
+    <<: [*default, {cpus: 8, scratch_gib: 20}]
+  plain: {}
 `)
-	want := map[string]Profile{"default": {}, "big": {}, "both": {}}
+	b := BuiltinProfile()
+	want := Profiles{
+		"default": {CPUs: 4, MemoryMiB: b.MemoryMiB, ScratchGiB: b.ScratchGiB},
+		"big":     {CPUs: 4, MemoryMiB: 2048, ScratchGiB: b.ScratchGiB},
+		"both":    {CPUs: 4, MemoryMiB: b.MemoryMiB, ScratchGiB: 20},
+		"plain":   b,
+	}
 	if !reflect.DeepEqual(cfg.Profiles, want) {
 		t.Errorf("Profiles = %+v, want %+v", cfg.Profiles, want)
 	}
@@ -335,6 +345,148 @@ profiles:
 	if cfg.MaxMemoryMiB != 2 {
 		t.Errorf("MaxMemoryMiB = %d, want the explicit 2", cfg.MaxMemoryMiB)
 	}
+}
+
+// Each profile is the built-in values plus its own keys, never default's
+// (CFG-5), and a profile with no keys is every built-in value.
+func TestProfileKeys(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoad(t, `
+profiles:
+  default:
+    cpus: 4
+    memory_mib: 4096
+    scratch_gib: 40
+  fast:
+    cpus: 8
+  empty:
+  braces: {}
+  max:
+    cpus: 255
+    memory_mib: 4294967295
+    scratch_gib: 8589934591
+  min: {cpus: 1, memory_mib: 1, scratch_gib: 1}
+`)
+	b := BuiltinProfile()
+	if b != (Profile{CPUs: 2, MemoryMiB: 1024, ScratchGiB: 10}) {
+		t.Errorf("BuiltinProfile = %+v, want 2 CPUs, 1024 MiB, 10 GiB", b)
+	}
+	want := Profiles{
+		"default": {CPUs: 4, MemoryMiB: 4096, ScratchGiB: 40},
+		"fast":    {CPUs: 8, MemoryMiB: 1024, ScratchGiB: 10},
+		"empty":   b,
+		"braces":  b,
+		"max":     {CPUs: 255, MemoryMiB: 4294967295, ScratchGiB: 8589934591},
+		"min":     {CPUs: 1, MemoryMiB: 1, ScratchGiB: 1},
+	}
+	if !reflect.DeepEqual(cfg.Profiles, want) {
+		t.Errorf("Profiles = %+v, want %+v", cfg.Profiles, want)
+	}
+	if got := cfg.Profiles["max"].ScratchBytes(); got != 8589934591<<30 {
+		t.Errorf("ScratchBytes = %d", got)
+	}
+}
+
+// Lookup finds a defined profile, and default even when the file defines
+// none (CFG-4), but no other undefined profile.
+func TestLookup(t *testing.T) {
+	t.Parallel()
+	ps := Profiles{"big": {CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4}}
+	if p, ok := ps.Lookup("big"); !ok || p != ps["big"] {
+		t.Errorf("Lookup(big) = %+v, %v", p, ok)
+	}
+	if p, ok := ps.Lookup("default"); !ok || p != BuiltinProfile() {
+		t.Errorf("Lookup(default) with none defined = %+v, %v; want the built-in values", p, ok)
+	}
+	ps["default"] = Profile{CPUs: 1, MemoryMiB: 1, ScratchGiB: 1}
+	if p, ok := ps.Lookup("default"); !ok || p != ps["default"] {
+		t.Errorf("Lookup(default) = %+v, %v; want the defined one", p, ok)
+	}
+	for _, name := range []string{"small", "Big", ""} {
+		if p, ok := ps.Lookup(name); ok {
+			t.Errorf("Lookup(%q) = %+v, want none", name, p)
+		}
+	}
+}
+
+// A profile key's invalid value fails naming its line, the profile and the
+// key (CFG-3, CFG-10). 0 is invalid, not the built-in value.
+func TestInvalidProfileValuesFail(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value, want string
+	}{
+		{"cpus: 0", `cpus: must be from 1 to 255, not 0`},
+		{"cpus: -1", `cpus: must be from 1 to 255, not -1`},
+		{"cpus: 256", `cpus: must be from 1 to 255, not 256`},
+		{"cpus: 1.5", `cpus: must be an integer, not "1.5"`},
+		{`cpus: "2"`, `cpus: must be an integer, not "2"`},
+		{"cpus: [2]", `cpus: must be an integer`},
+		{"cpus:", `cpus: has no value`},
+		{"memory_mib: 0", `memory_mib: must be from 1 to 4294967295, not 0`},
+		{"memory_mib: -1024", `memory_mib: must be from 1 to 4294967295, not -1024`},
+		{"memory_mib: 4294967296", `memory_mib: must be from 1 to 4294967295, not 4294967296`},
+		{"scratch_gib: 0", `scratch_gib: must be from 1 to 8589934591, not 0`},
+		{"scratch_gib: -10", `scratch_gib: must be from 1 to 8589934591, not -10`},
+		{"scratch_gib: 8589934592", `scratch_gib: must be from 1 to 8589934591, not 8589934592`},
+		{"scratch_gib: 17179869184", `scratch_gib: must be from 1 to 8589934591, not 17179869184`},
+		{"scratch_gib: 18446744073709551615", `scratch_gib: must be from 1 to 8589934591, not 18446744073709551615`},
+		{"scratch_gib: 99999999999999999999", `scratch_gib: must be from 1 to 8589934591, not 99999999999999999999`},
+		{"scratch_gib: -99999999999999999999", `scratch_gib: must be from 1 to 8589934591, not -99999999999999999999`},
+	} {
+		path, msg := loadErr(t, "profiles:\n  ok: {}\n  big:\n    "+tc.value+"\n")
+		wantErr(t, path, msg, `line 4: profile "big": `+tc.want)
+	}
+	// A profile with an invalid key is not kept, and its other errors are
+	// still reported.
+	path, msg := loadErr(t, "profiles:\n  big:\n    cpus: 0\n    memory_mib: 0\n")
+	wantErr(t, path, msg, `line 3: profile "big": cpus:`)
+	wantErr(t, path, msg, `line 4: profile "big": memory_mib:`)
+}
+
+// With max_memory_mib set, a profile whose memory_mib is more than it fails,
+// naming both values, since no job on it could ever run. The implicit
+// default profile isn't checked.
+func TestProfileAboveMaxMemoryFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		content string
+		want    []string
+	}{
+		{
+			"profiles:\n  big:\n    memory_mib: 2048\n  default: {memory_mib: 512}\nmax_memory_mib: 1024\n",
+			[]string{`line 3: profile "big": memory_mib: 2048 is more than max_memory_mib, 1024 (line 5)`},
+		},
+		// A profile that leaves memory_mib out has the built-in 1024 MiB,
+		// and the error is on the profile's line.
+		{
+			"max_memory_mib: 1000\nprofiles:\n  default: {memory_mib: 1000}\n  small:\n",
+			[]string{`line 4: profile "small": memory_mib: 1024 is more than max_memory_mib, 1000 (line 1)`},
+		},
+	} {
+		path, msg := loadErr(t, tc.content)
+		for _, want := range tc.want {
+			wantErr(t, path, msg, want)
+		}
+		if n := strings.Count(msg, "\n") + 1; n != len(tc.want) {
+			t.Errorf("%q: %d errors, want %d:\n%s", tc.content, n, len(tc.want), msg)
+		}
+	}
+	// Equal is fine, and so is any profile when max_memory_mib is 0 or
+	// unset, or invalid (its own error is enough).
+	for _, content := range []string{
+		"max_memory_mib: 1024\nprofiles:\n  big: {memory_mib: 1024}\n",
+		"max_memory_mib: 0\nprofiles:\n  big: {memory_mib: 4294967295}\n",
+		"profiles:\n  big: {memory_mib: 4294967295}\n",
+		"max_memory_mib: 512\nprofiles:\n  small: {memory_mib: 512}\n",
+	} {
+		mustLoad(t, content)
+	}
+	path, msg := loadErr(t, "max_memory_mib: -1\nprofiles:\n  big: {memory_mib: 4096}\n")
+	if strings.Contains(msg, "more than") {
+		t.Errorf("an invalid max_memory_mib is compared:\n%s", msg)
+	}
+	wantErr(t, path, msg, `line 1: max_memory_mib: must be 0 or more`)
 }
 
 // dirsConfig is a config file setting the four paths under base.

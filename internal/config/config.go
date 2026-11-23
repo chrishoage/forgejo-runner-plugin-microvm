@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,13 +50,65 @@ type Config struct {
 	StateDir, CacheDir, RuntimeDir string
 	// MaxMemoryMiB caps the memory of every running VM; 0 means no limit.
 	MaxMemoryMiB uint64
-	// Profiles are the profiles by name; never nil.
-	Profiles map[string]Profile
+	// Profiles are the profiles the file defines, by name; never nil.
+	Profiles Profiles
 }
 
-// Profile is one profile. Each key arrives with the change that gives it
-// meaning, so today a profile has none, and any key in one is unknown.
-type Profile struct{}
+// DefaultProfile is the profile a label that names none uses (CFG-4).
+const DefaultProfile = "default"
+
+// Profile is one profile: the VM shape a label picks (VM-4, VM-5). Each key
+// the file leaves out has its built-in value (CFG-5).
+type Profile struct {
+	// CPUs is the VM's vCPU count, 1 to MaxCPUs.
+	CPUs uint32
+	// MemoryMiB is the VM's memory, at least 1.
+	MemoryMiB uint32
+	// ScratchGiB is the scratch disk's size, at least 1 and at most
+	// MaxScratchGiB.
+	ScratchGiB uint64
+}
+
+// The profile keys' built-in values (#1, Configuration and profiles).
+const (
+	builtinCPUs       = 2
+	builtinMemoryMiB  = 1024
+	builtinScratchGiB = 10
+)
+
+// The profile keys' bounds: only those a larger value can't work past
+// (CFG-10). libkrun takes the vCPU count in one byte and the memory as a
+// uint32 of MiB, and the job process makes the scratch file with an int64
+// of bytes.
+const (
+	MaxCPUs       = 255
+	MaxMemoryMiB  = math.MaxUint32
+	MaxScratchGiB = math.MaxInt64 >> 30
+)
+
+// BuiltinProfile returns the profile with every built-in value: the implicit
+// default profile, and what each profile starts from.
+func BuiltinProfile() Profile {
+	return Profile{CPUs: builtinCPUs, MemoryMiB: builtinMemoryMiB, ScratchGiB: builtinScratchGiB}
+}
+
+// ScratchBytes is the scratch disk's size in bytes.
+func (p Profile) ScratchBytes() uint64 { return p.ScratchGiB << 30 }
+
+// Profiles are profiles by name.
+type Profiles map[string]Profile
+
+// Lookup returns the profile name names. DefaultProfile always exists: when
+// the file defines none, it is BuiltinProfile (CFG-4).
+func (ps Profiles) Lookup(name string) (Profile, bool) {
+	if p, ok := ps[name]; ok {
+		return p, true
+	}
+	if name == DefaultProfile {
+		return BuiltinProfile(), true
+	}
+	return Profile{}, false
+}
 
 // profileName is the rule for a profile's name: one a label can carry.
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -135,7 +189,7 @@ func builtin() *Config {
 		StateDir:   builtinStateDir,
 		CacheDir:   builtinCacheDir,
 		RuntimeDir: builtinRuntimeDir,
-		Profiles:   map[string]Profile{},
+		Profiles:   Profiles{},
 	}
 }
 
@@ -152,6 +206,16 @@ type decoder struct {
 	// merged counts the key-value pairs merge keys have expanded, against
 	// maxMerged.
 	merged int
+	// memLines holds, for each profile decoded, the line its memory_mib is
+	// set on, or else its name's line, in the file's order, for the check
+	// against max_memory_mib.
+	memLines []profileLine
+}
+
+// profileLine is a line in the profile name.
+type profileLine struct {
+	name string
+	line int
 }
 
 // maxMerged bounds what merge keys may expand to, so a file that nests
@@ -203,9 +267,28 @@ func (d *decoder) decode(c *Config, data []byte) bool {
 			d.errorf(root.Line, "", "", "must be a mapping of keys")
 		default:
 			d.top(c, root)
+			d.checkMemory(c)
 		}
 	}
 	return true
+}
+
+// checkMemory fails each profile the file defines whose memory_mib is more
+// than a max_memory_mib that is set and valid: no job on it could ever run.
+// The implicit default profile isn't checked: the file doesn't define it.
+// Nothing refuses a job on it yet; #10's admission check will, at Create
+// (Admission, docs/architecture.md).
+func (d *decoder) checkMemory(c *Config) {
+	maxLine, ok := d.lines["max_memory_mib"]
+	if !ok || c.MaxMemoryMiB == 0 {
+		return
+	}
+	for _, pl := range d.memLines {
+		if mem := uint64(c.Profiles[pl.name].MemoryMiB); mem > c.MaxMemoryMiB {
+			d.errorf(pl.line, inProfile(pl.name), "memory_mib", "%d is more than max_memory_mib, %d (line %d): no job on this profile could ever run",
+				mem, c.MaxMemoryMiB, maxLine)
+		}
+	}
 }
 
 // top decodes the top-level mapping.
@@ -262,6 +345,7 @@ func (d *decoder) profiles(c *Config, p pair) {
 			d.errorf(line, inProfile(name), "", "the name must match %s", strings.Trim(profileName.String(), "^$"))
 			ok = false
 		}
+		prof, memLine := BuiltinProfile(), line
 		pv := deref(pp.value)
 		switch {
 		case isNull(pv):
@@ -269,15 +353,38 @@ func (d *decoder) profiles(c *Config, p pair) {
 			d.errorf(line, inProfile(name), "", "must be a mapping of profile keys")
 			ok = false
 		default:
-			for _, kp := range d.pairs(pv, inProfile(name), false, nil) {
-				d.errorf(kp.key.Line, inProfile(name), kp.key.Value, "unknown key")
-				ok = false
-			}
+			ok = d.profile(name, pv, &prof, &memLine) && ok
 		}
 		if ok {
-			c.Profiles[name] = Profile{}
+			c.Profiles[name] = prof
+			d.memLines = append(d.memLines, profileLine{name, memLine})
 		}
 	}
+}
+
+// profile decodes the keys of the profile name, from m, into prof, which
+// holds the built-in values, and sets *memLine to memory_mib's line. It
+// reports whether every key was valid.
+func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int) bool {
+	scope, ok := inProfile(name), true
+	for _, kp := range d.pairs(m, scope, false, nil) {
+		switch kp.key.Value {
+		case "cpus":
+			n, valid := d.integer(kp, scope, 1, MaxCPUs)
+			prof.CPUs, ok = uint32(n), ok && valid //nolint:gosec // G115: integer bounds n by MaxCPUs
+		case "memory_mib":
+			n, valid := d.integer(kp, scope, 1, MaxMemoryMiB)
+			prof.MemoryMiB, ok = uint32(n), ok && valid //nolint:gosec // G115: integer bounds n by MaxMemoryMiB, a uint32
+			*memLine = kp.key.Line
+		case "scratch_gib":
+			n, valid := d.integer(kp, scope, 1, MaxScratchGiB)
+			prof.ScratchGiB, ok = n, ok && valid
+		default:
+			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
+			ok = false
+		}
+	}
+	return ok
 }
 
 // inProfile is the scope of an error inside the profile name.
@@ -410,6 +517,41 @@ func (d *decoder) absPath(p pair, dst *string) bool {
 	}
 	*dst = filepath.Clean(s)
 	return true
+}
+
+// integer returns p's value, in scope, an integer from lo to hi. 0 is no
+// different from any other value out of range: a key left out is how a
+// profile takes a built-in value.
+func (d *decoder) integer(p pair, scope string, lo, hi uint64) (uint64, bool) {
+	v := deref(p.value)
+	if isNull(v) {
+		d.errorf(p.key.Line, scope, p.key.Value, "has no value")
+		return 0, false
+	}
+	if v.Kind != yaml.ScalarNode {
+		d.errorf(p.key.Line, scope, p.key.Value, "must be an integer")
+		return 0, false
+	}
+	if v.ShortTag() != "!!int" {
+		// YAML resolves an integer too large for 64 bits as a float.
+		if _, isInt := new(big.Int).SetString(v.Value, 0); !isInt || v.Style != 0 {
+			d.errorf(p.key.Line, scope, p.key.Value, "must be an integer, not %q", v.Value)
+			return 0, false
+		}
+	}
+	// An integer too large for an int64 may still fit a uint64; one that
+	// fits neither is out of range, whatever its sign.
+	var n int64
+	var u uint64
+	if v.Decode(&n) == nil {
+		if n >= 0 && uint64(n) >= lo && uint64(n) <= hi {
+			return uint64(n), true
+		}
+	} else if v.Decode(&u) == nil && u >= lo && u <= hi {
+		return u, true
+	}
+	d.errorf(p.key.Line, scope, p.key.Value, "must be from %d to %d, not %s", lo, hi, v.Value)
+	return 0, false
 }
 
 // uint sets *dst to p's value, an integer of 0 or more.
