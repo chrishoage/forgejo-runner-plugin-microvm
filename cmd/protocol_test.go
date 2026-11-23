@@ -241,11 +241,20 @@ func (p *plugin) reload(t *testing.T) {
 
 // startPlugin runs the plugin's serve by path, with RUNNER_MICROVM_CONFIG
 // naming a config file that puts its directories in a fresh directory and
-// defines testProfiles, and returns it once its listen socket exists. On
+// defines testProfiles: startPluginWith with testProfiles.
+func startPlugin(t *testing.T, bin string) *plugin {
+	t.Helper()
+	return startPluginWith(t, bin, testProfiles)
+}
+
+// startPluginWith runs the plugin's serve by path, with
+// RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
+// fresh directory and holds profiles, the profiles section, and returns it
+// once its listen socket exists. On
 // cleanup it stops the plugin with SIGTERM, which removes every job; a
 // plugin still running after that, or at the timeout, is killed with each
 // job process's group (killWithJobs).
-func startPlugin(t *testing.T, bin string) *plugin {
+func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
 	// Short, so the runner's client can connect to the socket by its path.
 	base, err := os.MkdirTemp("", "rm-")
@@ -256,7 +265,7 @@ func startPlugin(t *testing.T, bin string) *plugin {
 	cfg := filepath.Join(base, "config.yaml")
 	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
 		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"))
-	if err := os.WriteFile(cfg, []byte(dirs+testProfiles), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte(dirs+profiles), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)
 	}
