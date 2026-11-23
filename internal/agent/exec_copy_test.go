@@ -294,13 +294,15 @@ func TestExecLargeOutput(t *testing.T) {
 	}
 }
 
-// Cancelling Exec kills the command's whole process group (GST-8).
+// Cancelling Exec kills the command's whole process group at once (GST-8):
+// the command and a background child it started in its group are both gone
+// within 5 s, and the call has returned.
 func TestExecCancelKillsTheGroup(t *testing.T) {
 	t.Parallel()
 	c := startAgent(t)
 	ctx, cancel := context.WithCancel(testContext(t))
 	defer cancel()
-	stream, err := c.Exec(ctx, sh(`sleep 1000 & echo $!; wait`))
+	stream, err := c.Exec(ctx, sh(`sleep 1000 & echo $$ $!; wait`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,19 +310,47 @@ func TestExecCancelKillsTheGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(resp.GetStdout())))
-	if err != nil {
-		t.Fatalf("pid %q: %v", resp.GetStdout(), err)
-	}
-	cancel()
-	deadline := time.Now().Add(10 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatal("the command's child outlived the cancelled Exec")
+	var pids []int
+	for _, f := range strings.Fields(string(resp.GetStdout())) {
+		pid, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatalf("pids %q: %v", resp.GetStdout(), err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		pids = append(pids, pid)
 	}
+	if len(pids) != 2 {
+		t.Fatalf("pids %q: want the command's and its child's", resp.GetStdout())
+	}
+	t.Cleanup(func() {
+		for _, pid := range pids {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	cancel()
+	if _, err := stream.Recv(); status.Code(err) != codes.Canceled {
+		t.Errorf("the cancelled Exec's stream ended with %v, want Canceled", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for _, pid := range pids {
+		for alive(pid) {
+			if time.Now().After(deadline) {
+				t.Fatalf("process %d of the command's group outlived the cancelled Exec by 5 s", pid)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// alive says whether pid is a process that has not exited: a zombie, which
+// has exited but is not yet reaped, is not alive.
+func alive(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	// The state follows the command's name, in parentheses.
+	i := bytes.LastIndexByte(b, ')')
+	return i < 0 || i+2 >= len(b) || b[i+2] != 'Z'
 }
 
 type entry struct {

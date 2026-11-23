@@ -134,7 +134,20 @@ func runWorkflow(t *testing.T, workflow string, images map[string]string) (strin
 // runWorkflowOn is runWorkflow against the running plugin p.
 func runWorkflowOn(t *testing.T, p *plugin, workflow string, images map[string]string) (string, error) {
 	t.Helper()
-	sock := p.sock
+	log := &syncBuffer{}
+	run := planExecutor(t, p, workflow, images, log)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	err := run(ctx)
+	t.Logf("job log:\n%s", log.String())
+	return log.String(), err
+}
+
+// planExecutor returns act/runner's executor for the workflow file against
+// the running plugin p, with each label in images mapped to its image,
+// writing the job log to log. It may run in any goroutine.
+func planExecutor(t *testing.T, p *plugin, workflow string, images map[string]string, log *syncBuffer) func(context.Context) error {
+	t.Helper()
 	planner, err := model.NewWorkflowPlanner(workflow, true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -155,18 +168,15 @@ func runWorkflowOn(t *testing.T, p *plugin, workflow string, images map[string]s
 		LogOutput:            true,
 		ContainerMaxLifetime: 10 * time.Minute,
 		Platforms:            platforms,
-		Plugins:              map[string]runner.PluginConfig{"runner-microvm": {Address: "unix://" + sock}},
+		Plugins:              map[string]runner.PluginConfig{"runner-microvm": {Address: "unix://" + p.sock}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
-	log := &syncBuffer{}
-	ctx = runner.WithJobLoggerFactory(ctx, jobLogger{log})
-	err = r.NewPlanExecutor(plan)(ctx)
-	t.Logf("job log:\n%s", log.String())
-	return log.String(), err
+	executor := r.NewPlanExecutor(plan)
+	return func(ctx context.Context) error {
+		return executor(runner.WithJobLoggerFactory(ctx, jobLogger{log}))
+	}
 }
 
 // readImage returns the image e2e/image pins.
