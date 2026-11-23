@@ -64,6 +64,7 @@ func testBootConfig() *agentv1.BootConfig {
 		LayerDir:      "/dev/.runner-microvm/layers",
 		Layers:        []string{"0.erofs", "1.erofs", "2.erofs"},
 		ScratchDevice: "/dev/vda",
+		VsockPort:     1024,
 	}
 }
 
@@ -239,6 +240,7 @@ func TestBootRefusesABadConfig(t *testing.T) {
 	t.Parallel()
 	for name, edit := range map[string]func(*agentv1.BootConfig){
 		"no scratch device":  func(c *agentv1.BootConfig) { c.ScratchDevice = "" },
+		"no vsock port":      func(c *agentv1.BootConfig) { c.VsockPort = 0 },
 		"relative layer dir": func(c *agentv1.BootConfig) { c.LayerDir = "layers" },
 		"layer path":         func(c *agentv1.BootConfig) { c.Layers = []string{"../x"} },
 		"empty layer":        func(c *agentv1.BootConfig) { c.Layers = []string{""} },
@@ -270,17 +272,17 @@ func TestReadBootConfig(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readBootConfig(path)
+	got, err := ReadBootConfig(path)
 	if err != nil || !proto.Equal(got, testBootConfig()) {
-		t.Errorf("readBootConfig = %v, %v", got, err)
+		t.Errorf("ReadBootConfig = %v, %v", got, err)
 	}
-	if _, err := readBootConfig(filepath.Join(dir, "missing")); err == nil {
+	if _, err := ReadBootConfig(filepath.Join(dir, "missing")); err == nil {
 		t.Error("a missing boot config was read")
 	}
 	if err := os.WriteFile(path, []byte("\xff\xff\xff"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readBootConfig(path); err == nil {
+	if _, err := ReadBootConfig(path); err == nil {
 		t.Error("a garbled boot config was read")
 	}
 }

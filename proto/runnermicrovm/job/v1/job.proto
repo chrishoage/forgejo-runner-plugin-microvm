@@ -72,7 +72,8 @@ message VM {
   string vm_log = 6;
   string console = 7;
   // The unix socket libkrun maps to the agent's vsock port, which the plugin
-  // dials, in <runtime>/<id>/<n>/. The port is #6's.
+  // dials, in <runtime>/<id>/<n>/, and that port: 1024, the same value as
+  // the boot config's vsock_port, which the agent listens on.
   string agent_socket = 8;
   uint32 agent_port = 9;
   // The VM's boot root, <state>/jobs/<id>/<n>/root/, which libkrun shares

@@ -18,6 +18,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	// Only to read the boot config as the agent does: the plugin itself
+	// never imports the agent.
+	guestagent "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agent"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
@@ -76,34 +79,40 @@ func TestStartBootsTheVM(t *testing.T) {
 	if req := cache.acquired[0]; req.Job != id || req.VM != 0 || req.Ref != testImage {
 		t.Errorf("Acquire(%+v)", req)
 	}
-	// The boot root: mount points, a hard link to the agent, and the boot
-	// config.
-	if got := names(t, root); strings.Join(got, " ") != ".runner-microvm-agent .runner-microvm-boot dev proc sys" {
+	// The boot root: mount points, and in .runner-microvm a hard link to
+	// the agent and the boot config.
+	if got := names(t, root); strings.Join(got, " ") != ".runner-microvm dev proc sys" {
 		t.Errorf("the boot root holds %v", got)
+	}
+	if got := names(t, filepath.Join(root, ".runner-microvm")); strings.Join(got, " ") != "agent boot-config.binpb" {
+		t.Errorf("the boot root's .runner-microvm holds %v", got)
 	}
 	agent, err := os.Stat(srv.cfg.Agent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if linked, err := os.Stat(filepath.Join(root, ".runner-microvm-agent")); err != nil || !os.SameFile(agent, linked) {
+	if linked, err := os.Stat(filepath.Join(root, ".runner-microvm", "agent")); err != nil || !os.SameFile(agent, linked) {
 		t.Errorf("the boot root's agent is not a hard link to %s: %v", srv.cfg.Agent, err)
 	}
-	b, err := os.ReadFile(filepath.Join(root, ".runner-microvm-boot"))
-	if err != nil {
-		t.Fatal(err)
+	// The agent reads the file the plugin wrote, at the path it reads, and
+	// gets back the message the plugin built, its vsock port included.
+	bootFile := filepath.Join(root, guestagent.BootConfigPath)
+	if fi, err := os.Stat(bootFile); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the boot config at %s: %v, %v", guestagent.BootConfigPath, fi, err)
 	}
-	boot := &agentv1.BootConfig{}
-	if err := proto.Unmarshal(b, boot); err != nil {
+	boot, err := guestagent.ReadBootConfig(bootFile)
+	if err != nil {
 		t.Fatal(err)
 	}
 	// The job's name made DNS-safe is the VM's hostname, and the hosts
 	// list names it at its address; there is no search domain to carry.
 	wantBoot := &agentv1.BootConfig{
 		LayerDir: "/dev/.runner-microvm/layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
-		Network:  &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
-		Hostname: "forgejo-actions-task-7-job-build",
-		Hosts:    []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
-		Image:    &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+		Network:   &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
+		Hostname:  "forgejo-actions-task-7-job-build",
+		Hosts:     []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
+		Image:     &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+		VsockPort: 1024,
 	}
 	if !proto.Equal(boot, wantBoot) {
 		t.Errorf("boot config = %v, want %v", boot, wantBoot)

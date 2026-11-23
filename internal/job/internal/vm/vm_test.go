@@ -44,7 +44,7 @@ func fakeKrun(calls *[]string, fail string) krun {
 		},
 		setConsoleOutput: func(c uint32, p string) int32 { return rec("set_console_output", c, p) },
 		setExec: func(c uint32, p string, argv, envp []string) int32 {
-			return rec("set_exec", c, p, argv, envp)
+			return rec("set_exec", c, p, argv, envp, "envp nil:", envp == nil)
 		},
 		startEnter: func(c uint32) int32 { return rec("start_enter", c) },
 	}
@@ -78,7 +78,9 @@ func TestBootConfiguresTheVM(t *testing.T) {
 		"add_vsock 7 0",
 		"add_vsock_port2 7 1024 agent.sock true",
 		"set_console_output 7 /state/jobs/j/0/console",
-		"set_exec 7 /.runner-microvm-agent [] [PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin]",
+		// The agent's environment is empty, and not nil: libkrun passes
+		// the host's environment for a NULL one.
+		"set_exec 7 /.runner-microvm/agent [] [] envp nil: false",
 		"start_enter 7",
 	}
 	if !slices.Equal(calls, want) {

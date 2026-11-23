@@ -10,8 +10,8 @@
 // agent inside each of a job's VMs. The plugin dials a VM's agent over the
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
-// (docs/adr/0003-plugin-talks-to-agent-directly.md). The vsock port and the
-// readiness details (timeouts, polling) are #6's.
+// (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
+// vsock port its boot config names, and the VM is ready when it answers Ping.
 
 package agentv1
 

@@ -20,15 +20,17 @@ import (
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
 )
 
-// AgentPath is where the agent is in the VM's root, and what libkrun starts
-// as its workload.
-//
-// SHORTCUT(#6): provisional pick, and the same path is written by the plugin
-// (internal/plugin's agentPath); the protocol test fails if they part.
-const AgentPath = "/.runner-microvm-agent"
+// AgentPath is where the agent is in the VM's boot root, and what libkrun's
+// init, which stays PID 1, starts as its workload. The plugin links the
+// agent there (internal/plugin's agentPath); every booted VM's test fails if
+// they part.
+const AgentPath = "/.runner-microvm/agent"
 
-// agentEnv is the agent's whole environment.
-var agentEnv = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+// agentEnv is the agent's whole environment: empty, and never nil, since
+// libkrun passes the host's environment into the guest for a NULL one. The
+// agent looks nothing up in PATH, and every step gets its environment from
+// its Exec.
+var agentEnv = []string{}
 
 // rootTag is the virtiofs tag libkrun boots from (KRUN_FS_ROOT_TAG).
 const rootTag = "/dev/root"
