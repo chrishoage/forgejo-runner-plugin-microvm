@@ -584,10 +584,16 @@ type BootConfig struct {
 	// The guest's address on the job network.
 	Network *Network `protobuf:"bytes,7,opt,name=network,proto3" json:"network,omitempty"`
 	// The guest's hostname, its VM's name on the job network. The job's
-	// container's is the job's name made DNS-safe, or `job` (GST-12).
+	// container's is the job's name made DNS-safe, or `job` (GST-12). The
+	// agent sets it with sethostname and writes it to /etc/hostname.
 	Hostname string `protobuf:"bytes,8,opt,name=hostname,proto3" json:"hostname,omitempty"`
 	// The image's defaults for Exec.
-	Image         *Image `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+	Image *Image `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
+	// The names on the job network, which the agent writes into /etc/hosts
+	// after localhost's lines. There is no DNS zone for them. Today it holds
+	// one entry, the VM's own name at its address; each service will add
+	// one.
+	Hosts         []*Host `protobuf:"bytes,10,rep,name=hosts,proto3" json:"hosts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -685,6 +691,68 @@ func (x *BootConfig) GetImage() *Image {
 	return nil
 }
 
+func (x *BootConfig) GetHosts() []*Host {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
+// Host is one name on the job network and its address.
+type Host struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A DNS label.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// An IPv4 address.
+	Address       string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Host) Reset() {
+	*x = Host{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Host) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Host) ProtoMessage() {}
+
+func (x *Host) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Host.ProtoReflect.Descriptor instead.
+func (*Host) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *Host) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Host) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
 // Mount is a host directory shared into the VM (STO-1).
 type Mount struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -701,7 +769,7 @@ type Mount struct {
 
 func (x *Mount) Reset() {
 	*x = Mount{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -713,7 +781,7 @@ func (x *Mount) String() string {
 func (*Mount) ProtoMessage() {}
 
 func (x *Mount) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -726,7 +794,7 @@ func (x *Mount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Mount.ProtoReflect.Descriptor instead.
 func (*Mount) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Mount) GetTag() string {
@@ -766,7 +834,7 @@ type Disk struct {
 
 func (x *Disk) Reset() {
 	*x = Disk{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -778,7 +846,7 @@ func (x *Disk) String() string {
 func (*Disk) ProtoMessage() {}
 
 func (x *Disk) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -791,7 +859,7 @@ func (x *Disk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disk.ProtoReflect.Descriptor instead.
 func (*Disk) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Disk) GetDevice() string {
@@ -817,7 +885,8 @@ func (x *Disk) GetReadWrite() bool {
 
 // Network is the guest's static configuration on the job network, which the
 // agent sets with no DHCP client: lo up, then the address, MTU and up on
-// eth0, then the default route via the gateway.
+// eth0, then the default route via the gateway. The gateway is also the
+// guest's only name server, in /etc/resolv.conf.
 type Network struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The guest interface's address, in CIDR notation: an ordinary subnet,
@@ -826,16 +895,14 @@ type Network struct {
 	// The gateway's address, which also serves DNS (NET-5).
 	Gateway string `protobuf:"bytes,2,opt,name=gateway,proto3" json:"gateway,omitempty"`
 	// The interface's MTU.
-	Mtu uint32 `protobuf:"varint,3,opt,name=mtu,proto3" json:"mtu,omitempty"`
-	// The search domain for /etc/resolv.conf. Empty: none.
-	SearchDomain  string `protobuf:"bytes,4,opt,name=search_domain,json=searchDomain,proto3" json:"search_domain,omitempty"`
+	Mtu           uint32 `protobuf:"varint,3,opt,name=mtu,proto3" json:"mtu,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Network) Reset() {
 	*x = Network{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -847,7 +914,7 @@ func (x *Network) String() string {
 func (*Network) ProtoMessage() {}
 
 func (x *Network) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -860,7 +927,7 @@ func (x *Network) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Network.ProtoReflect.Descriptor instead.
 func (*Network) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Network) GetAddress() string {
@@ -884,13 +951,6 @@ func (x *Network) GetMtu() uint32 {
 	return 0
 }
 
-func (x *Network) GetSearchDomain() string {
-	if x != nil {
-		return x.SearchDomain
-	}
-	return ""
-}
-
 // Image is the image config's defaults for Exec.
 type Image struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -906,7 +966,7 @@ type Image struct {
 
 func (x *Image) Reset() {
 	*x = Image{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -918,7 +978,7 @@ func (x *Image) String() string {
 func (*Image) ProtoMessage() {}
 
 func (x *Image) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -931,7 +991,7 @@ func (x *Image) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Image.ProtoReflect.Descriptor instead.
 func (*Image) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Image) GetEnv() []string {
@@ -987,7 +1047,7 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\x84\x03\n" +
+	"\rFlushResponse\"\xb8\x03\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
 	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x16\n" +
@@ -998,7 +1058,12 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x05disks\x18\x06 \x03(\v2\x1c.runnermicrovm.agent.v1.DiskR\x05disks\x129\n" +
 	"\anetwork\x18\a \x01(\v2\x1f.runnermicrovm.agent.v1.NetworkR\anetwork\x12\x1a\n" +
 	"\bhostname\x18\b \x01(\tR\bhostname\x123\n" +
-	"\x05image\x18\t \x01(\v2\x1d.runnermicrovm.agent.v1.ImageR\x05image\"P\n" +
+	"\x05image\x18\t \x01(\v2\x1d.runnermicrovm.agent.v1.ImageR\x05image\x122\n" +
+	"\x05hosts\x18\n" +
+	" \x03(\v2\x1c.runnermicrovm.agent.v1.HostR\x05hosts\"4\n" +
+	"\x04Host\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"P\n" +
 	"\x05Mount\x12\x10\n" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12\x1d\n" +
@@ -1008,12 +1073,11 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x03 \x01(\bR\treadWrite\"t\n" +
+	"read_write\x18\x03 \x01(\bR\treadWrite\"d\n" +
 	"\aNetwork\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\agateway\x18\x02 \x01(\tR\agateway\x12\x10\n" +
-	"\x03mtu\x18\x03 \x01(\rR\x03mtu\x12#\n" +
-	"\rsearch_domain\x18\x04 \x01(\tR\fsearchDomain\"N\n" +
+	"\x03mtu\x18\x03 \x01(\rR\x03mtuJ\x04\b\x04\x10\x05R\rsearch_domain\"N\n" +
 	"\x05Image\x12\x10\n" +
 	"\x03env\x18\x01 \x03(\tR\x03env\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x1f\n" +
@@ -1040,7 +1104,7 @@ func file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescData
 }
 
-var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_runnermicrovm_agent_v1_agent_proto_goTypes = []any{
 	(*PingRequest)(nil),     // 0: runnermicrovm.agent.v1.PingRequest
 	(*PingResponse)(nil),    // 1: runnermicrovm.agent.v1.PingResponse
@@ -1053,33 +1117,35 @@ var file_runnermicrovm_agent_v1_agent_proto_goTypes = []any{
 	(*FlushRequest)(nil),    // 8: runnermicrovm.agent.v1.FlushRequest
 	(*FlushResponse)(nil),   // 9: runnermicrovm.agent.v1.FlushResponse
 	(*BootConfig)(nil),      // 10: runnermicrovm.agent.v1.BootConfig
-	(*Mount)(nil),           // 11: runnermicrovm.agent.v1.Mount
-	(*Disk)(nil),            // 12: runnermicrovm.agent.v1.Disk
-	(*Network)(nil),         // 13: runnermicrovm.agent.v1.Network
-	(*Image)(nil),           // 14: runnermicrovm.agent.v1.Image
-	nil,                     // 15: runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	(*Host)(nil),            // 11: runnermicrovm.agent.v1.Host
+	(*Mount)(nil),           // 12: runnermicrovm.agent.v1.Mount
+	(*Disk)(nil),            // 13: runnermicrovm.agent.v1.Disk
+	(*Network)(nil),         // 14: runnermicrovm.agent.v1.Network
+	(*Image)(nil),           // 15: runnermicrovm.agent.v1.Image
+	nil,                     // 16: runnermicrovm.agent.v1.ExecRequest.EnvEntry
 }
 var file_runnermicrovm_agent_v1_agent_proto_depIdxs = []int32{
-	15, // 0: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
-	11, // 1: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
-	12, // 2: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
-	13, // 3: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
-	14, // 4: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
-	0,  // 5: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
-	2,  // 6: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
-	4,  // 7: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
-	6,  // 8: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
-	8,  // 9: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
-	1,  // 10: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
-	3,  // 11: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
-	5,  // 12: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
-	7,  // 13: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
-	9,  // 14: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	16, // 0: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	12, // 1: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
+	13, // 2: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
+	14, // 3: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
+	15, // 4: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
+	11, // 5: runnermicrovm.agent.v1.BootConfig.hosts:type_name -> runnermicrovm.agent.v1.Host
+	0,  // 6: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
+	2,  // 7: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
+	4,  // 8: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
+	6,  // 9: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
+	8,  // 10: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
+	1,  // 11: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
+	3,  // 12: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
+	5,  // 13: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
+	7,  // 14: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
+	9,  // 15: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
+	11, // [11:16] is the sub-list for method output_type
+	6,  // [6:11] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_runnermicrovm_agent_v1_agent_proto_init() }
@@ -1099,7 +1165,7 @@ func file_runnermicrovm_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runnermicrovm_agent_v1_agent_proto_rawDesc), len(file_runnermicrovm_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

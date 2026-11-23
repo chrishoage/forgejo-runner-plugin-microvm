@@ -41,13 +41,9 @@ const (
 	scratchDevice = "/dev/vda"
 )
 
-// The job's container's agent's vsock port and name.
-const (
-	// SHORTCUT(#6): provisional pick: the agent's vsock port.
-	agentPort = 1024
-	// The VM's name; GST-12's hostname rule is #6's.
-	vmName = "job"
-)
+// SHORTCUT(#6): provisional pick: the job's container's agent's vsock
+// port.
+const agentPort = 1024
 
 // The most of a console or VM log a failed Start's error carries.
 const tailBytes = 300
@@ -139,14 +135,16 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		ScratchDevice: scratchDevice,
 		ScratchPaths:  j.profile.ScratchPaths,
 		Network:       bootNetwork(addr),
+		Hostname:      j.hostname,
 		Image:         &agentv1.Image{Env: img.Env},
+		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
 	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
 		return nil, fmt.Errorf("boot root %s: %w", root, err)
 	}
 	vm := &jobv1.VM{
-		Name:             vmName,
+		Name:             j.hostname,
 		Cpus:             j.profile.CPUs,
 		MemoryMib:        j.profile.MemoryMiB,
 		ScratchDisk:      filepath.Join(vmState, "scratch.ext4"),
