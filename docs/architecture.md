@@ -66,7 +66,7 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 - **Each VM child's inputs:**
   - stdin: its VM child spec, one length-delimited protobuf message, in a memory file (`memfd`), not a pipe, so no goroutine of the job process copies it in and a VM child that never reads it, or a process it left holding stdin, can't keep the job process waiting;
   - fd 3: the liveness pipe;
-  - fd 4: its VM's end of the job network socket;
+  - fd 4: its VM's end of the job network's frame socket (Job network, The VM's link, below);
   - fd 5 and up: each of its VM's read-write disks' locked file, so the lock lasts as long as any process that can write the disk;
   - stdout and stderr: its VM's log file. libkrun's console goes to its VM's console file.
 
@@ -130,8 +130,50 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
 
 ## Job network
 
+Every job gets its own private job network, run inside its job process, and its VMs reach the outside through it (NET-1, NET-2, NET-3, NET-5). A step can resolve names through the gateway and open TCP connections to anything the host can reach except the host's loopback and link-local addresses, and those connections leave the host as the job process's own, under the plugin's user. The network ends with the job process: at Remove, or when the plugin dies.
+
 - **The job network is gvisor-tap-vsock, run inside the job process.** Its stack isn't freed on `Close`, which is harmless because the job process ends with the job. The alternatives, passt and slirp4netns, are separate C binaries, which breaks the single-binary decision.
-- **Its DHCP and HTTP API stay off** (NET-6). Port forwarding is off today: the only ports the plugin protocol passes are a service's `ports`, and a job that declares services fails at Create.
+- **It is the library's `virtualnetwork.New`, configured only: no NAT table, no gateway virtual IPs, no port forwards, no DNS zones, link-local access off.** It is the library's whole switch, gateway, DNS and forwarders with no code of ours. The loopback mapping and the extra virtual IP are only `gvproxy`'s command-line defaults, so leaving them out is what makes NET-4 hold. Building the stack ourselves to drop its DHCP server would copy about 40 unexported lines we would then track upstream. Its HTTP API is never served: nothing calls its handler.
+- **Its DHCP server runs but no VM uses it, and `DHCPStaticLeases` reserves each VM's address for its MAC.** `virtualnetwork.New` always starts it and no setting turns it off. Nothing in the guest asks it (no VM runs a DHCP client, below), and a step that runs one gets its own VM's address back, so the server can't hand one VM's address to another (NET-6: the gateway serves DNS to the guest, and a DHCP server no VM uses whose leases are fixed by the plugin; nothing it serves exposes host ports or the host's loopback).
+- **Link-local addresses (`169.254.0.0/16`) are refused** (the library's `Ec2MetadataAccess` off, its default). On a cloud host a job could otherwise read the instance's credentials from the metadata service (NET-5: the plugin filters none of the guest's connections, except that link-local addresses are unreachable).
+- **ICMP echo is forwarded** (the library's handler). `ping` is a common step diagnostic and costs no code. It goes out through an unprivileged ping socket, so a host whose `net.ipv4.ping_group_range` excludes the plugin's user drops it; #12's operator docs say so.
+- **The library's logger (logrus's standard one) passes only its errors on, through the job process's own logger to the job process log file, at most 10 at once and one a second after that, counting what it drops; logrus's own output is discarded.** A guest can make the library log a line per packet, and the job process log file has no cap. Once the job network closes, it drops the switch's error for each port's read that the close ended: every normal teardown would otherwise log one per VM. With `golang.org/x/time/rate` for the bound, already in the module graph.
+- **Names the gateway's DNS can't answer from a zone go to the host's resolver** (there are no zones), from inside the job process. A loopback name server on the host (systemd-resolved, Docker's embedded DNS in the harness) therefore works, though the guest can't reach the host's loopback itself.
+- **IPv4 only:** no IPv6 address in the guest beyond loopback's `::1`, and no AAAA filtering. gvisor-tap-vsock has no IPv6. The agent sets `eth0`'s IPv6 address generation mode to none before bringing it up, through rtnetlink since `/proc/sys` need not be mounted, so the kernel gives it no `fe80::` address either. With no IPv6 route a connect to an AAAA address fails at once, and clients fall back to IPv4; filtering AAAA would be our own code in the DNS path.
+
+### Addressing
+
+- **Subnet `198.18.0.0/24`, fixed, with no config key.** Every job network can use one subnet, because each is its own switch. A real host inside the subnet can't be reached from a job, and RFC 2544's benchmarking range never appears on a real LAN, unlike gvisor-tap-vsock's default `192.168.127.0/24` or CGNAT's `100.64/10` (Tailscale). A key can be added if a collision is ever reported.
+- **The gateway (and DNS) is `.1`; the VM at index *n* in the job spec is `.(2+n)`, so the job's container is `198.18.0.2`. MACs are locally administered and derived from the address: `02:00` and the address's four bytes (the job's container `02:00:c6:12:00:02`, the gateway `02:00:c6:12:00:01`).** The plugin computes both when it builds the job spec, with no allocator, so a later VM needs no change to the job network. It caps a job at 253 VMs.
+- **The guest has an ordinary `/24` with a default route via the gateway, not a `/32`.** It is the simplest shape, it lets VMs of one job reach each other later, and the gateway answers ARP for no unused address, so a connection to one never leaves through the forwarder.
+- **Static addressing by the agent, from the boot config, with no DHCP client in the guest.** libkrun init's DHCP client takes the first reply within 100 ms with no retry, and checks neither the transaction id nor the client MAC, so VMs booting together on one network can take each other's addresses, and one slow reply leaves a VM with no address and no error.
+
+### The VM's link
+
+- **A `SOCK_DGRAM` socketpair, one Ethernet frame per datagram (vfkit framing), served by the switch; the VM's end is the VM child's fd 4, attached with libkrun's `krun_add_net_unixgram` with no path, the VM's MAC, no features and flags 0** (no DHCP client, no vfkit handshake). Proven by the spike. Flags 0 means libkrun's init never runs its DHCP client. The job process passes nothing as fd 3 until the liveness pipe exists, and closes its copy of the VM's end once the VM child has started, so the switch's writes fail, rather than fill the socket, once the VM child is gone.
+- **Both ends get 1 MiB send and 4 MiB receive buffers; MTU 1500.** Proven by the spike. The kernel caps each at its `wmem_max` and `rmem_max`. Throughput tuning (a larger MTU) is a follow-up only once a problem is measured.
+- **libkrun's implicit vsock and transparent socket impersonation stay off; the only vsock port is the agent's.** With TSI on, guest sockets become host sockets, loopback included, bypassing NET-4 and NET-6.
+
+### In the job process
+
+- **It starts the job network before any VM child, sends `NetworkUp`, then starts the VMs.** A VM must never boot before its switch serves its socket. A network that fails to start sends `Failed` with the reason `network: <err>`, which Start reports as `FailedPrecondition`.
+- **The job network attaches VMs one call per VM socket, not a constructor wired to one VM.** It costs nothing today and a second VM needs no refactor. The job process still rejects a spec with other than one VM. Closing the network closes every switch port and waits until each port's goroutine has returned.
+
+### In the guest
+
+- **The agent configures the guest's network with `github.com/vishvananda/netlink`, on the agent's dependency allow-list:** `lo` up (explicitly, not trusting libkrun's init), then on `eth0` the address, MTU, IPv6 address generation off and up, then the default route via the gateway, once the root is built and before it listens. A maintained library instead of our own rtnetlink code. A failure fails the boot, naming the step, so Start fails with the VM's console tail.
+- **IPv4 forwarding is left at the kernel's default (off).** The plugin does nothing for a specific workload; a job that needs it (dockerd's nftables backend) sets it as root.
+- The hostname, `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` are #64's.
+
+### Room for services
+
+Nothing below is built; it is written down so the services epic starts from decisions:
+
+- addresses and MACs come from the VM's index (Addressing, above);
+- every VM's `/etc/hosts` lists all the job's VMs (the boot config's hosts list, #64);
+- a service's name on the job network is its workflow key, made DNS-safe by the hostname's rule; two VMs whose names map to one name fail at Create;
+- a service's `ports:` never become host ports (NET-3): they become forwards inside the job's container, from its loopback to the service, in the agent, so workflows written for `localhost:<port>` work;
+- the job network never reads where a VM's shape comes from (a profile or the job spec).
 
 ## Extracting the job binary and agent
 
@@ -353,6 +395,7 @@ The plugin process pulls and converts images, each layer pull in its own gorouti
 cmd/runner-microvm/                 thin main → plugin
 cmd/runner-microvm-job/             thin main → job (dispatches `vm`)
 cmd/runner-microvm-agent/           thin main → agent (static)
+cmd/internal/probe/                 the network probe the KVM tests run in a guest; never shipped
 proto/runnermicrovm/agent/v1/       agent protocol
 proto/runnermicrovm/job/v1/         control channel (plugin ↔ job process)
 proto/runnermicrovm/vm/v1/          VM child spec (private to the job binary)
@@ -392,7 +435,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 | `internal/job` | the job process; dispatches `vm` to the VM child | `job/internal/...`, `logging`, `secret`, the job protocol | `cmd/runner-microvm-job` |
 | `internal/job/internal/jobnet` | the job network (gvisor-tap-vsock) | `logging` | `job` only (compiler-enforced) |
 | `internal/job/internal/vm` | the VM child: libkrun via purego | `logging`, the VM child spec | `job` only (compiler-enforced) |
-| `internal/agent` | the agent: boot mounts, Exec, CopyIn, CopyOut | `logging`, `secret`, the agent protocol | `cmd/runner-microvm-agent` |
+| `internal/agent` | the agent: boot mounts, the guest's network, Exec, CopyIn, CopyOut | `logging`, `secret`, the agent protocol | `cmd/runner-microvm-agent` |
 | `internal/logging` | slog setup | none | all three programs |
 | `internal/secret` | the self-redacting secret type | none | all three programs |
 
@@ -414,7 +457,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 - **A Go test (`cmd/deps_test.go`) runs `go list -deps` on each binary and asserts:**
   - the plugin binary's dependencies exclude purego, gvisor, gvisor-tap-vsock, `internal/job`, `internal/agent` and forgejo-runner's module;
   - the job binary's dependencies *include* purego and gvisor-tap-vsock, so a renamed import path can't make the check pass silently, and exclude forgejo-runner's module;
-  - the agent binary's dependencies are only from an allow-list: the standard library, grpc and protobuf and the modules they bring in, `internal/agent`, `internal/logging`, `internal/secret` and the agent protocol's generated package.
+  - the agent binary's dependencies are only from an allow-list: the standard library, grpc, protobuf and `vishvananda/netlink` and the modules they bring in, `internal/agent`, `internal/logging`, `internal/secret` and the agent protocol's generated package.
 - **It checks each binary's graph as it ships** (`CGO_ENABLED=0`, and `-tags payload` for the plugin), not as the test process is built, because a file behind a build constraint is in only one of the two.
 - **It runs under plain `go test ./...`.** It checks transitive dependencies, which is the property that matters. depguard checks only direct imports, so it isn't used.
 - **It lives beside the mains, in `cmd/`,** because it is a test of the binaries, not of any one package.
@@ -439,9 +482,11 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
 - **Plain `go test ./...` needs no KVM and no root:**
   - the image cache is tested against go-containerregistry's in-process registry, with real conversion;
   - the agent's Exec and Copy, and its resolving of scratch paths inside the job's root, are tested on the host in temporary directories;
-  - the job network is tested in-process, with a test peer on the frame socket;
+  - the job network is tested in-process: a second gvisor netstack on the VM's end of the frame socket plays the guest, and resolves a name the host resolves through the gateway, connects to a listener on the host's non-loopback address, which sees the connection come from the host, can't reach a listener on the host's `127.0.0.1` at the gateway, another subnet address or `127.0.0.1`, gets only its own address in answer to a DHCP DISCOVER from its MAC, and is refused at `169.254.169.254`;
+  - the agent's network configuration is tested against a fake of the kernel's side, as its boot mounts are;
   - the plugin is tested with fakes for its two seams.
 - **Tests that boot VMs carry `//go:build kvm`, and `just test-kvm` runs them** with `-tags kvm,payload`, in the `kvm` CI job. That covers the VM child, the job process, the agent's boot mounts, and the protocol test. The tests of the guest's root (`cmd/layers_test.go`: 120 layers, an image without `/proc`, `/sys` or `/dev`, the read-only layer share, a fresh root for each job) build their images in Go on top of `e2e/image` and serve them from go-containerregistry's in-process registry in the test process. So do the scratch path tests (`cmd/scratch_test.go`): on the scratch disk's ext4 and empty although the image has files there, the image directory's owner and mode, also for a path under another one, or root's 0755, a path under an absolute symlink landing at its target in the job's root, a file in the image or a symlink to `/dev` failing Start with its path in the error, and nothing left for the next job.
+- **The guest's network test (`cmd/network_test.go`) drives the plugin through its own protocol, as the runner does: Create, Start, CopyIn of a static probe program (`cmd/internal/probe`, built by the test with `CGO_ENABLED=0`), Exec of it, and Remove.** The probe connects to a TCP listener the test opens on the CI host's non-loopback address, which must see the connection come from the host; resolves `localhost` by asking the gateway directly, so the answer can't come from the image's `/etc/hosts`; and reports `lo`, `eth0` and the default route: `eth0` must have `198.18.0.2/24`, no IPv6 address and MTU 1500, the default route must be via `198.18.0.1`, and `lo` must be up. A probe program, not the image's tools, so a check does exactly what it needs and doesn't depend on what busybox in the pinned image offers. It never needs the internet.
 - **The protocol test (`cmd/protocol_test.go`) runs `e2e/workflows/echo.yml` through forgejo-runner's own job executor (`act/runner`), with no Forgejo and no runner daemon.** `act/runner` is the code inside forgejo-runner that calls plugins, through `act/plugin`, so the plugin sees exactly the runner's calls at the pinned version, and a runner bump re-runs the real sequence with nothing recorded to redo.
   - Its config maps the workflow's `microvm` label to `runner-microvm://<the image in e2e/image>`, and the `runner-microvm` plugin to the listen socket of the plugin under test.
   - The plugin's config file defines a second profile, `big` (3 CPUs, 1536 MiB, 4 GiB scratch). The echo workflow's second step prints its VM's CPU count (`nproc`), `MemTotal` and `/sys/block/vda/size`, and the test checks they are the built-in profile's; a second workflow, on a `microvm-big` label naming `profile=big`, runs the same step and must see `big`'s. `MemTotal` may be up to 15% below the profile's memory, for what the kernel reserves. Then the test rewrites the config file with `big`'s CPU count raised by one, in one step (a temp file renamed into place), sends the plugin SIGHUP, waits for its log to show the reload, and runs the `microvm-big` workflow again on the same plugin: its VM must have the new count (CFG-7).
