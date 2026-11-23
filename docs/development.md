@@ -144,7 +144,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **Forgejo's container creates the admin with `forgejo admin user create`.** No manual first-run setup.
 - **The runner is registered offline on both sides with the shared secret:** `forgejo forgejo-cli actions register --secret …` in Forgejo, then `forgejo-runner create-runner-file --secret …` as the runner's container starts. This needs no registration token and no API round trip. forgejo-runner v13 logs `create-runner-file` as deprecated in favour of declaring connections in its config; it still works, and moving off it is a change to `e2e/compose.yaml` alone.
 - **The runner's config, `e2e/runner-config.yaml`, which `up` writes to `.e2e/runner-config.yaml` with `@IMAGE@` replaced by the image in `e2e/image`:**
-  - two labels routed to the plugin: `microvm:runner-microvm://<the image in e2e/image>`, which names no profile, so its jobs get `default`, and `microvm-big:runner-microvm://<the image in e2e/image>;profile=big`. The workflows don't name the backend, so `echo.yml` stayed the same when the label moved from the runner's `host` backend to the plugin;
+  - three labels routed to the plugin: `microvm:runner-microvm://<the image in e2e/image>`, which names no profile, so its jobs get `default`; `microvm-big:runner-microvm://<the image in e2e/image>;profile=big`; and `microvm-node:runner-microvm://<the image in e2e/node-image>`, with `@NODE_IMAGE@` replaced, which gets `default` too (The Node image, below). The workflows don't name the backend, so `echo.yml` stayed the same when the label moved from the runner's `host` backend to the plugin;
   - `plugins.runner-microvm.address`, the plugin's listen socket as mounted in the runner's container;
   - `capacity: 1`;
   - the act cache server **off**, because nothing here needs a cache, and the guest can't reach a cache server on the host's loopback (NET-4).
@@ -183,6 +183,12 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
   - **A fork's PRs get no secrets,** so the job skips the login there and pulls anonymously, under the shared limit.
   - Locally, and in the harness, the pull is anonymous: a developer's address isn't shared.
 - **Renovate keeps its tag and digest current** (`docs/conventions.md`, Renovate).
+
+### The Node image
+
+- **The `microvm-node` label's image is in `e2e/node-image`: the official Node image on Debian, `node:26-trixie`, from ECR Public's mirror of Docker's official images (`public.ecr.aws/docker/library/node`), pinned by tag and digest, as one line.** The test image has neither `git` nor `node`, and actions need `node`; the full Debian variant carries `git` and `curl`, which the slim one lacks. 26 is Node's current LTS major. ECR Public avoids Docker Hub's anonymous pull limits (#46), and the digest keeps the harness reproducible. It is about 420 MiB compressed, pulled once per `up` into the plugin's image cache.
+- **Only the harness reads it;** the protocol test and the other tests keep `e2e/image`.
+- **Renovate keeps its tag and digest current,** through the same regex manager as `e2e/image` (`docs/conventions.md`, Renovate). `config:recommended` applies Renovate's Node versioning to it, so it proposes LTS majors only.
 
 ### Versions
 
