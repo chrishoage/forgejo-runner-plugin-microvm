@@ -10,4 +10,4 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/plugin"
 )
 
-func main() { os.Exit(plugin.Main(os.Args[1:])) }
+func main() { os.Exit(plugin.Main(os.Args[1:], os.Stdout, os.Stderr, os.Getenv)) }

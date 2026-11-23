@@ -167,31 +167,6 @@ func TestRemove(t *testing.T) {
 	wantCode(t, err, codes.NotFound)
 }
 
-func TestDirsFromEnv(t *testing.T) {
-	t.Parallel()
-	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	got, err := DirsFromEnv(env(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != builtinDirs {
-		t.Errorf("with no %s: %+v, want the built-in paths", BaseDirEnv, got)
-	}
-	got, err = DirsFromEnv(env(map[string]string{BaseDirEnv: "/srv/rm"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := Dirs{
-		State:   "/srv/rm/state",
-		Cache:   "/srv/rm/cache",
-		Runtime: "/srv/rm/runtime",
-		Listen:  "/srv/rm/runtime/runner-microvm.sock",
-	}
-	if got != want {
-		t.Errorf("DirsFromEnv = %+v, want %+v", got, want)
-	}
-}
-
 // A socket in a directory deeper than bind's 107-byte limit still binds and
 // connects through the open directory.
 func TestSockDirDeepPath(t *testing.T) {

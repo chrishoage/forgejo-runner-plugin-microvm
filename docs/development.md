@@ -50,11 +50,18 @@ nix develop -c just build     # runs payload, then bin/runner-microvm with -tags
 
 ```sh
 nix develop -c just build
-RUNNER_MICROVM_DIR=/tmp/rm bin/runner-microvm   # listens on /tmp/rm/runtime/runner-microvm.sock
+cat >/tmp/rm.yaml <<'EOF'
+listen: unix:///tmp/rm/runtime/runner-microvm.sock
+state_dir: /tmp/rm/state
+cache_dir: /tmp/rm/cache
+runtime_dir: /tmp/rm/runtime
+EOF
+RUNNER_MICROVM_CONFIG=/tmp/rm.yaml bin/runner-microvm check   # validates the file, prints every error
+RUNNER_MICROVM_CONFIG=/tmp/rm.yaml bin/runner-microvm serve   # listens on /tmp/rm/runtime/runner-microvm.sock
 ```
 
-- **`RUNNER_MICROVM_DIR=<base>` puts the state, cache and runtime directories under `<base>` (`<base>/state`, `<base>/cache`, `<base>/runtime`), with the listen socket in the runtime directory (`<base>/runtime/runner-microvm.sock`).** Without it, the built-in paths of #1 apply. An ordinary user can't write the built-in paths, and the tests need temporary directories; one variable is the least to throw away when the config file arrives. It is marked `SHORTCUT(#8)`: #8 replaces it with the config file's keys.
-- **The plugin takes no arguments yet, and SIGINT or SIGTERM stops it at once.**
+- **`runner-microvm serve` runs the plugin; `runner-microvm check` validates the config file and exits.** Neither takes arguments. The config file is `/etc/runner-microvm/config.yaml`, or the file `RUNNER_MICROVM_CONFIG` names; its keys, built-in values and rules are in `docs/architecture.md` (Configuration). An ordinary user can't write the built-in paths, so running the plugin by hand needs a config file that sets the four path keys, as above.
+- **SIGINT or SIGTERM stops it at once.**
 - **The host must have `mkfs.ext4` (e2fsprogs) on `PATH`.** The job process formats each VM's scratch disk with it (`docs/architecture.md`, The scratch disk). The plugin looks it up at startup and stops with an error naming it when it is missing, before it writes anything. The dev shell carries e2fsprogs, so the tests and the harness find it there. Formatting in the guest would need a mkfs the image may not have, or an ext4 writer of our own; an embedded template would need `resize2fs` for each profile's size anyway.
 - **The cache directory's filesystem must support `renameat2`'s `RENAME_NOREPLACE`** (ext4, XFS, btrfs and tmpfs do). The image cache stores each layer with it, so a layer another Start stored first is never replaced under the VMs linking it (`docs/architecture.md`, Image cache). On a filesystem without it, each Start that stores a layer fails with an error naming the cache directory and the missing support.
 - **The plugin addresses its unix sockets through an open directory, as `/proc/self/fd/<fd>/<name>`.** bind and connect take at most 107 bytes of path, which a checkout's `.e2e/plugin/runtime/` can outgrow on its own.
@@ -114,7 +121,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **Each checkout gets its own compose project, `runner-microvm-e2e-` and the first 8 hex digits of the SHA-256 of the repo root's path; `COMPOSE_PROJECT_NAME` overrides it.** Several checkouts can share one host, and `up` starts with `down`: with one fixed name, a second checkout's `up` would silently destroy the first one's stack. With one project per checkout, `down` touches only its own containers and network, and a second checkout's `up` fails on the port, which only one stack can publish.
 - **`down` empties `.e2e/` from a container, as the container's root, before deleting it.** The containers write as uids the host user may not own (rootless podman maps them to subordinate uids), so a plain `rm` on the host would fail.
 - **The runner's container runs as `user: "0:0"`,** so it can open the plugin's socket, whose mode comes from the plugin's umask (a provisional pick, #11). Under rootless podman, container root is the host user who owns the socket; under rootful Docker it is real root. As root, it also writes its registration in `.e2e/runner` with no world-writable directory.
-- **The plugin runs on the host, not in the stack,** because it needs `/dev/kvm` and libkrun. `up` builds it (`just build`) and starts it in the background with `RUNNER_MICROVM_DIR=.e2e/plugin`, its pid in `.e2e/plugin.pid` and its log in `.e2e/plugin.log`: an agent can't easily keep a second terminal open. `down` stops it with SIGTERM, which removes every job and so every VM. A plugin still there after 30 seconds is killed the hard way: first each of its children's process groups, found in `/proc/<pid>/task/*/children` while it still runs, because each job process leads a group of its own, which killing the plugin's group would miss; then the plugin's group.
+- **The plugin runs on the host, not in the stack,** because it needs `/dev/kvm` and libkrun. `up` builds it (`just build`), writes its config file to `.e2e/plugin-config.yaml`, with its state, cache and runtime directories under `.e2e/plugin/` and the listen socket in the runtime directory, validates it with `check`, and starts `serve` in the background with `RUNNER_MICROVM_CONFIG` naming it, its pid in `.e2e/plugin.pid` and its log in `.e2e/plugin.log`: an agent can't easily keep a second terminal open. `down` stops it with SIGTERM, which removes every job and so every VM. A plugin still there after 30 seconds is killed the hard way: first each of its children's process groups, found in `/proc/<pid>/task/*/children` while it still runs, because each job process leads a group of its own, which killing the plugin's group would miss; then the plugin's group.
 - **The runner's container mounts the plugin's runtime directory, `.e2e/plugin/runtime`, at `/run/runner-microvm`,** and its config points `plugins.runner-microvm.address` at the listen socket there.
 - **Forgejo publishes only `127.0.0.1:3000`, for the API.** Nothing else needs to reach it from outside the stack.
 
