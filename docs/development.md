@@ -105,6 +105,7 @@ nix develop -c just e2e up     # fresh state, the plugin, Forgejo and the runner
 nix develop -c just e2e run    # pushes e2e/workflows/echo.yml, dispatches it, prints the job's log and the VM's shape
 nix develop -c just e2e run big   # the same for e2e/workflows/big.yml, or any workflow in e2e/workflows/
 nix develop -c just e2e run clone # one of the Network exit-check workflows (The workflows, below)
+nix develop -c just e2e run steps # steps' environment, user and working directory (The workflows, below)
 nix develop -c just e2e reload # sends the plugin SIGHUP and prints the reload's log lines
 nix develop -c just e2e down   # stops the plugin and every container, and deletes .e2e/
 COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman compose
@@ -155,6 +156,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The protocol test reads this same file, as it reads every workflow here on `microvm` or `microvm-big`, so each workflow has one source.
 - **`e2e/workflows/big.yml`: the same steps on `runs-on: microvm-big`,** so its VM has the `big` profile's shape.
 - **`e2e/workflows/hold.yml`: `big.yml`'s steps, then `sleep ${{ inputs.seconds }}` and the shape again,** so a job is running while the config file is edited and reloaded. `seconds` is a `workflow_dispatch` input of default `60`, which the harness's dispatch, sending no inputs, takes, and which the protocol test overrides with `1` (`workflowInputs` in `cmd/protocol_test.go`), since nothing there reloads a running job's profile.
+- **`e2e/workflows/steps.yml`: one job on `runs-on: microvm` whose steps check what a workflow author expects of a step (GST-4 to GST-7), each exiting non-zero otherwise, so the run's success is the check:** `env:` at job and step level, a step's `env:` staying in its step, `working-directory:` that exists and one, relative, that doesn't yet, a step output read by a later step, a variable written to `GITHUB_ENV` read by a later step, and `id` as the image's default user, root in `e2e/image`.
 - **The Network epic's exit check (#7) is four workflows on `runs-on: microvm-node`, one per item, so a red run names what broke.** Each starts with the same `echo` step as the others, which `run` looks for.
   - **`clone.yml`: `git clone` of the job's own repository in a `run:` step, at `github.server_url` with the job's token (`github.token`) as the password, over HTTP inside the harness.** That is what a real workflow does, and it proves the guest reaches the Forgejo server through the gateway. The repository is private, so the clone fails without the token.
   - **`fetch.yml`: an HTTPS GET of `https://example.com/` with `curl`, after printing what `getent` resolves for it.** A stable public URL, so it proves DNS and TLS to the outside world.
