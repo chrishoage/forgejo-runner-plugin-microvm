@@ -29,6 +29,9 @@
 //	    can't keep it (it takes 0.0.0.0 as its own loopback)
 //	probe resolve [-tcp] <name> <server:53>
 //	    ask server for name's A records, over UDP or TCP
+//	probe lookup <name>
+//	    resolve name's IPv4 addresses as a step's programs do, through
+//	    /etc/hosts and /etc/resolv.conf, and print each
 //	probe dhcp [-n count] [-timeout d]
 //	    broadcast count DHCP DISCOVERs from eth0's MAC, print every reply's
 //	    offered address
@@ -78,7 +81,7 @@ func main() {
 	}
 }
 
-const usage = "usage: probe connect|unreachable|refuses|listen|arp|udp|resolve|dhcp|vsock|netinfo [flags] [args]"
+const usage = "usage: probe connect|unreachable|refuses|listen|arp|udp|resolve|lookup|dhcp|vsock|netinfo [flags] [args]"
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -112,6 +115,8 @@ func run(args []string) error {
 		return rawUDP(rest)
 	case args[0] == "resolve" && len(rest) == 2:
 		return resolve(rest[0], rest[1], *overTCP)
+	case args[0] == "lookup" && len(rest) == 1:
+		return lookup(rest[0])
 	case args[0] == "dhcp" && len(rest) == 0:
 		return dhcp(*count, *wait)
 	case args[0] == "vsock" && len(rest) >= 1:
@@ -530,6 +535,22 @@ func printARP(fd int) error {
 		}
 	}
 	return errors.New("more than 256 ARP packets")
+}
+
+// lookup resolves name's IPv4 addresses with Go's own resolver, the probe
+// being static, which reads /etc/hosts and /etc/resolv.conf as glibc and
+// musl do, and prints each one as "address <addr>".
+func lookup(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", name)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		fmt.Printf("address %s\n", ip.Unmap())
+	}
+	return nil
 }
 
 // ethPIP is ETH_P_IP in network byte order, as AF_PACKET takes it.
