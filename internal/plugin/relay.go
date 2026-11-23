@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -73,6 +74,23 @@ func (s *Server) agentError(ctx context.Context, j *job, err error) error {
 		j.hostname, status.Convert(err).Message())
 }
 
+// workingDir is the working directory Exec asks the agent for: the
+// request's, with a relative one taken from the job's workspace, the
+// request's GITHUB_WORKSPACE, when that is absolute. The runner sends a
+// step's relative working-directory unchanged; its own container backend
+// takes it from the container's working directory, which is the path it
+// gives steps as GITHUB_WORKSPACE, and the plugin protocol passes the
+// plugin no other base. Otherwise it is the request's, unchanged, and the
+// agent refuses one that is relative.
+func workingDir(req *pluginv1alpha.ExecRequest) string {
+	dir := req.GetWorkdir()
+	workspace := req.GetEnv()["GITHUB_WORKSPACE"]
+	if dir == "" || path.IsAbs(dir) || !path.IsAbs(workspace) {
+		return dir
+	}
+	return path.Join(workspace, dir)
+}
+
 // Exec runs the command through the job's container's agent and relays its
 // output, then its exit code or why it could not start. The env values are
 // secrets: they are never logged (LOG-2).
@@ -87,7 +105,7 @@ func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.Backe
 		Argv:       req.GetCommand(),
 		Env:        req.GetEnv(),
 		User:       req.GetUser(),
-		WorkingDir: req.GetWorkdir(),
+		WorkingDir: workingDir(req),
 	})
 	if err != nil {
 		return s.agentError(ctx, j, err)

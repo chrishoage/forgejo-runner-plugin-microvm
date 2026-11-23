@@ -77,6 +77,38 @@ func TestExecRelaysTheAgent(t *testing.T) {
 	}
 }
 
+// A step's relative working directory is taken from the job's workspace,
+// the request's GITHUB_WORKSPACE, as the runner's own container backend
+// takes it from the container's working directory, which is the same
+// path. An absolute one, or a relative one with no absolute workspace,
+// reaches the agent unchanged.
+func TestExecTakesARelativeWorkingDirFromTheWorkspace(t *testing.T) {
+	t.Parallel()
+	c, id := startedJob(t)
+	for _, tt := range []struct {
+		workdir, workspace, want string
+	}{
+		{"not/yet/here", "/workspace/e2e/steps", "/workspace/e2e/steps/not/yet/here"},
+		{"../sibling", "/workspace/e2e/steps", "/workspace/e2e/sibling"},
+		{"/tmp", "/workspace/e2e/steps", "/tmp"},
+		{"", "/workspace/e2e/steps", ""},
+		{"not/yet/here", "", "not/yet/here"},
+		{"not/yet/here", "relative", "not/yet/here"},
+	} {
+		env := map[string]string{}
+		if tt.workspace != "" {
+			env["GITHUB_WORKSPACE"] = tt.workspace
+		}
+		outs, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"pwd"}, Env: env, Workdir: tt.workdir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(outs) == 0 || string(outs[0].GetData().GetData()) != "pwd in "+tt.want {
+			t.Errorf("Exec in %q with GITHUB_WORKSPACE %q = %v, want the agent to get %q", tt.workdir, tt.workspace, outs, tt.want)
+		}
+	}
+}
+
 // Exec, CopyIn and CopyOut on a job created but not started fail with
 // FailedPrecondition: the job exists but can't take the call yet. An unknown
 // id is NotFound (PROTO-11).
