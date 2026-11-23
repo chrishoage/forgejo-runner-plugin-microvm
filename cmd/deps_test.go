@@ -31,6 +31,8 @@ const (
 	protobuf       = "google.golang.org/protobuf"
 	// The agent configures the guest's network with it.
 	netlink = "github.com/vishvananda/netlink"
+	// The agent resolves Exec's users with it, by runc's rules.
+	mobyUser = "github.com/moby/sys/user"
 	// forgejo-runner's module: only the protocol test may use it.
 	forgejoRunner = "code.forgejo.org/forgejo/runner"
 )
@@ -93,7 +95,8 @@ func TestJobDependencies(t *testing.T) {
 }
 
 // The agent binary depends only on the standard library, grpc, protobuf,
-// netlink and what they bring in, and its own allow-listed packages.
+// netlink, moby/sys/user and what they bring in, and its own allow-listed
+// packages.
 func TestAgentDependencies(t *testing.T) {
 	t.Parallel()
 	deps := listDeps(t, module+"/cmd/runner-microvm-agent", agentBuild)
@@ -106,7 +109,7 @@ func TestAgentDependencies(t *testing.T) {
 			module + "/internal/secret",
 			module + "/internal/gen/runnermicrovm/agent/v1",
 		},
-		via: []string{grpc, protobuf, netlink},
+		via: []string{grpc, protobuf, netlink, mobyUser},
 	}
 	for _, v := range allow.outside(deps) {
 		t.Errorf("the agent binary is outside its allow-list: %s", v)

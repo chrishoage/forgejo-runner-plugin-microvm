@@ -534,6 +534,16 @@ func TestAwaitReturnsWhenCancelled(t *testing.T) {
 	})
 }
 
+// An image environment entry without `=` names no variable, and is left
+// out of StartComplete's image environment, as Exec leaves it out.
+func TestEnvMapDropsEntriesWithoutEquals(t *testing.T) {
+	t.Parallel()
+	got := envMap([]string{"PATH=/bin", "LONELY", "EMPTY=", "A=b=c"})
+	if want := map[string]string{"PATH": "/bin", "EMPTY": "", "A": "b=c"}; !maps.Equal(got, want) {
+		t.Errorf("envMap = %v, want %v", got, want)
+	}
+}
+
 // A relative library directory is made absolute, because the VM child
 // changes its working directory before it loads libkrun.
 func TestLibDirFromEnv(t *testing.T) {

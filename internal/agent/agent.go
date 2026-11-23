@@ -6,8 +6,9 @@
 // and Flush.
 //
 // The agent binary may depend only on the standard library, grpc, protobuf,
-// vishvananda/netlink, this package, internal/logging, internal/secret and the agent protocol's
-// generated package; cmd/deps_test.go checks it.
+// vishvananda/netlink, moby/sys/user, this package, internal/logging,
+// internal/secret and the agent protocol's generated package;
+// cmd/deps_test.go checks it.
 package agent
 
 import (
@@ -59,17 +60,23 @@ func Main(args []string) int {
 		return 1
 	}
 	log.Info("serving", "addr", lis.Addr())
-	if err := Serve(lis, log); err != nil {
+	if err := Serve(lis, log, cfg.GetImage()); err != nil {
 		log.Error("serve", "err", err)
 		return 1
 	}
 	return 0
 }
 
-// Serve serves the agent protocol on lis until lis fails.
-func Serve(lis net.Listener, log *slog.Logger) error {
+// Serve serves the agent protocol on lis until lis fails, in the job's
+// root, /, with image, the boot config's defaults for Exec.
+func Serve(lis net.Listener, log *slog.Logger, image *agentv1.Image) error {
+	return serve(lis, &server{log: log, image: image, root: "/"})
+}
+
+// serve serves s on lis until lis fails.
+func serve(lis net.Listener, s *server) error {
 	gs := grpc.NewServer()
-	agentv1.RegisterAgentServiceServer(gs, &server{log: log})
+	agentv1.RegisterAgentServiceServer(gs, s)
 	err := gs.Serve(lis)
 	if errors.Is(err, grpc.ErrServerStopped) {
 		return nil
@@ -81,6 +88,13 @@ func Serve(lis net.Listener, log *slog.Logger) error {
 type server struct {
 	agentv1.UnimplementedAgentServiceServer
 	log *slog.Logger
+	// image is the boot config's defaults for Exec: the image's
+	// environment, user and working directory, and the default PATH.
+	image *agentv1.Image
+	// root is the job's root, whose /etc/passwd and /etc/group Exec
+	// resolves users against: /, once the agent has moved into it; a
+	// directory of a test's.
+	root string
 	// execExited, when set, is called once Exec has told its output that
 	// the command exited: a test's view of it. Nil outside tests.
 	execExited func()
