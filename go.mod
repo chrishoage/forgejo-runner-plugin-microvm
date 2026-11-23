@@ -13,6 +13,7 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/klauspost/compress v1.20.2
 	github.com/sirupsen/logrus v1.10.2
+	github.com/vishvananda/netlink v1.3.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
@@ -81,6 +82,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
 	go.opentelemetry.io/otel v1.45.0 // indirect
