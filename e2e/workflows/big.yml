@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# echo.yml's steps on the microvm-big label, whose label names the big
+# profile: `just e2e run big` shows the VM gets big's shape
+# (docs/development.md, The local harness).
+name: big
+
+on:
+  workflow_dispatch:
+
+jobs:
+  big:
+    runs-on: microvm-big
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"
