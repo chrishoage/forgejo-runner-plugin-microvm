@@ -48,9 +48,11 @@ var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: 
 // through forgejo-runner's own job executor (act/runner), which calls the
 // real plugin through the runner's plugin client, and the plugin boots the
 // image in e2e/image as a real VM. No Forgejo, no runner daemon. Its label
-// names no profile, so its VM has the built-in shape.
+// names no profile, so its VM has the built-in shape. The job log shows
+// Start's three progress lines, in order (PROTO-9).
 func TestEchoWorkflow(t *testing.T) {
-	log, err := runWorkflow(t, workflow, map[string]string{"microvm": readImage(t)})
+	image := readImage(t)
+	log, err := runWorkflow(t, workflow, map[string]string{"microvm": image})
 	if err != nil {
 		t.Fatalf("the workflow failed: %v", err)
 	}
@@ -58,6 +60,13 @@ func TestEchoWorkflow(t *testing.T) {
 		t.Fatalf("the job log does not show the step's output %q", stepOut)
 	}
 	wantShape(t, log, 2, 1024, 10)
+	// The job log quotes each line, its newline too.
+	const at = `\[runner-microvm \d+\.\d\ds\] `
+	progress := regexp.MustCompile(`(?s)` + at + `image ` + regexp.QuoteMeta(image) + ` ready \(sha256:[0-9a-f]{64}, \d+ layers\) in \d+\.\d\ds.*` +
+		at + `VM \S+ \(2 CPUs, 1024 MiB\) ready in \d+\.\d\ds.*` + at + `started in \d+\.\d\ds`)
+	if !progress.MatchString(log) {
+		t.Errorf("the job log does not show Start's three progress lines, in order:\n%s", log)
+	}
 }
 
 // TestProfileWorkflow runs a workflow whose label names the big profile:
