@@ -3,9 +3,11 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
+	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 )
 
 // startedJob returns a client and a started job's environment id.
@@ -262,5 +265,62 @@ func TestRemoveStalled(t *testing.T) {
 			cancel()
 			within(t, stream.left, "the stream call's return")
 		})
+	}
+}
+
+// chunkAgent's CopyIn records the size of each chunk it gets, and what they
+// make up.
+type chunkAgent struct {
+	fakeAgent
+
+	mu     sync.Mutex
+	dest   string
+	sizes  []int
+	copied []byte
+}
+
+func (a *chunkAgent) CopyIn(stream agentv1.AgentService_CopyInServer) error {
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return stream.SendAndClose(&agentv1.CopyInResponse{})
+		}
+		if err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if req.GetDestination() != "" {
+			a.dest = req.GetDestination()
+		}
+		a.sizes = append(a.sizes, len(req.GetChunk()))
+		a.copied = append(a.copied, req.GetChunk()...)
+		a.mu.Unlock()
+	}
+}
+
+// CopyIn re-chunks the runner's chunks to at most 256 KiB toward the agent,
+// which keeps gRPC's 4 MiB default limit, and the agent gets every byte in
+// order, the destination in its first message.
+func TestCopyInRechunksTowardTheAgent(t *testing.T) {
+	t.Parallel()
+	agent := &chunkAgent{}
+	c, id := startedWith(t, &fakeLauncher{agent: agent}, 0)
+	data := make([]byte, 3<<20+5)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	dest := "/var/run/act/"
+	if err := copyInAll(t, c, &pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: &dest, Data: data[:3<<20]},
+		&pluginv1alpha.CopyInChunk{Data: data[3<<20:]}); err != nil {
+		t.Fatal(err)
+	}
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if agent.dest != dest || !bytes.Equal(agent.copied, data) {
+		t.Errorf("the agent got %d bytes at %q; want %d at %q", len(agent.copied), agent.dest, len(data), dest)
+	}
+	// 12 chunks of 256 KiB, then the runner's second chunk.
+	if len(agent.sizes) != 13 || slices.Max(agent.sizes) != 256<<10 || agent.sizes[12] != 5 {
+		t.Errorf("the agent got chunks of %v", agent.sizes)
 	}
 }
