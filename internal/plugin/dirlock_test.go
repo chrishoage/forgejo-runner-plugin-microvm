@@ -151,7 +151,7 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 	}
 	t.Setenv(LibDirEnv, "")
 
-	err := run(t.Context(), discardLog(), configOf(dirs), nil, newImageCache)
+	err := run(t.Context(), discardLog(), configOf(dirs), nil, newImageCache, joblaunch.New)
 	if err == nil {
 		t.Fatal("the second startup ran")
 	}
@@ -174,7 +174,7 @@ func TestStartupNeedsMkfsExt4(t *testing.T) {
 	t.Setenv(LibDirEnv, "")
 	t.Setenv("PATH", t.TempDir())
 
-	err := run(t.Context(), discardLog(), configOf(testDirs(base)), nil, newImageCache)
+	err := run(t.Context(), discardLog(), configOf(testDirs(base)), nil, newImageCache, joblaunch.New)
 	if err == nil || !strings.Contains(err.Error(), "mkfs.ext4") {
 		t.Fatalf("err = %v, want one naming mkfs.ext4", err)
 	}
@@ -317,7 +317,12 @@ func TestJobProcessInheritsNoLock(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\necho $$ >&2\nexec sleep 1000\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	launcher := joblaunch.New(discardLog())
+	launcher, err := joblaunch.New(discardLog())
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(launcher.Close)
 	logPath := filepath.Join(tmp, "job.log")
 	p, err := launcher.Launch(t.Context(), &jobv1.Spec{Job: "job-1", JobBinary: bin}, logPath)
 	if err != nil {
