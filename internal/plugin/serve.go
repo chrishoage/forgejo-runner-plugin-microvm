@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -373,18 +374,33 @@ func listen(ctx context.Context, path string) (net.Listener, func(), error) {
 	return lis, func() { _ = lis.Close(); _ = dir.Close() }, nil
 }
 
-// SHORTCUT(#6): the keepalive policy is provisional: client pings every 5 s
-// are accepted, also with no active stream, so a call that waits silently
-// for minutes is never cut off (PROTO-15).
+// keepalivePolicy accepts client pings every 5 s or slower, also with no
+// call in flight, so a call that waits silently for minutes, a queued Start
+// or a step that prints nothing, is never cut off (PROTO-15). The runner
+// pings every 30 s, which grpc-go's default policy (5 minutes) answers with
+// GOAWAY too_many_pings, ending every call on the connection.
 var keepalivePolicy = keepalive.EnforcementPolicy{
 	MinTime:             5 * time.Second,
 	PermitWithoutStream: true,
 }
 
+// keepaliveParams send no keepalive pings of the server's own: a Time this
+// long never passes. The runner's client pings; the plugin only answers.
+var keepaliveParams = keepalive.ServerParameters{Time: time.Duration(math.MaxInt64)}
+
+// maxMessage is the largest message the plugin accepts: the runner client's
+// own limit, so nothing the runner may send is refused. The agent keeps
+// gRPC's 4 MiB default; CopyIn re-chunks toward it (agentChunk).
+const maxMessage = 32 << 20
+
 // Serve serves srv and the standard health service on lis until ctx ends,
 // then stops at once, ending every call.
 func Serve(ctx context.Context, lis net.Listener, srv *Server) error {
-	gs := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalivePolicy))
+	gs := grpc.NewServer(
+		grpc.KeepaliveEnforcementPolicy(keepalivePolicy),
+		grpc.KeepaliveParams(keepaliveParams),
+		grpc.MaxRecvMsgSize(maxMessage),
+	)
 	pluginv1alpha.RegisterBackendPluginServer(gs, srv)
 	// The health service always reports SERVING.
 	healthv1.RegisterHealthServer(gs, health.NewServer())

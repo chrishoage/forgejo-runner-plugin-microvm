@@ -298,20 +298,20 @@ func (a *chunkAgent) CopyIn(stream agentv1.AgentService_CopyInServer) error {
 	}
 }
 
-// CopyIn re-chunks the runner's chunks to at most 256 KiB toward the agent,
-// which keeps gRPC's 4 MiB default limit, and the agent gets every byte in
-// order, the destination in its first message.
+// CopyIn re-chunks the runner's chunks, up to 32 MiB, to at most 256 KiB
+// toward the agent, which keeps gRPC's 4 MiB default limit, and the agent
+// gets every byte in order, the destination in its first message.
 func TestCopyInRechunksTowardTheAgent(t *testing.T) {
 	t.Parallel()
 	agent := &chunkAgent{}
 	c, id := startedWith(t, &fakeLauncher{agent: agent}, 0)
-	data := make([]byte, 3<<20+5)
+	data := make([]byte, 20<<20+5)
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
 	dest := "/var/run/act/"
-	if err := copyInAll(t, c, &pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: &dest, Data: data[:3<<20]},
-		&pluginv1alpha.CopyInChunk{Data: data[3<<20:]}); err != nil {
+	if err := copyInAll(t, c, &pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: &dest, Data: data[:20<<20]},
+		&pluginv1alpha.CopyInChunk{Data: data[20<<20:]}); err != nil {
 		t.Fatal(err)
 	}
 	agent.mu.Lock()
@@ -319,8 +319,8 @@ func TestCopyInRechunksTowardTheAgent(t *testing.T) {
 	if agent.dest != dest || !bytes.Equal(agent.copied, data) {
 		t.Errorf("the agent got %d bytes at %q; want %d at %q", len(agent.copied), agent.dest, len(data), dest)
 	}
-	// 12 chunks of 256 KiB, then the runner's second chunk.
-	if len(agent.sizes) != 13 || slices.Max(agent.sizes) != 256<<10 || agent.sizes[12] != 5 {
+	// 80 chunks of 256 KiB, then the runner's second chunk.
+	if len(agent.sizes) != 81 || slices.Max(agent.sizes) != 256<<10 || agent.sizes[80] != 5 {
 		t.Errorf("the agent got chunks of %v", agent.sizes)
 	}
 }
