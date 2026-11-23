@@ -261,8 +261,22 @@ func TestGuestCantReach(t *testing.T) {
 // its own with the same addresses, reaches it at no address of the subnet,
 // and A's listener records no connection from B (NET-1). Both guests reach
 // the host, so neither passes for lack of a network.
+//
+// Both VMs have the same address, so B scanning the subnet would pass even
+// on a switch shared with A: B's connection to A's address stays in B. So
+// B also broadcasts an ARP request carrying bMarker as its sender address,
+// which every port of B's switch gets and A's guest, sniffing ARP, must not
+// see. A's own request carrying aMarker afterwards, at its stop, is its
+// sniffer's positive control, and orders the two: the switch hands a
+// broadcast to its other ports before its gateway answers it, and a port's
+// frames reach its guest in order, so on a shared switch A's sniffer would
+// see bMarker before the gateway's reply to aMarker.
 func TestJobsCantReachEachOther(t *testing.T) {
-	const port = "7777"
+	const (
+		port    = "7777"
+		aMarker = "198.18.0.250"
+		bMarker = "198.18.0.251"
+	)
 	ext, err := listenHost(t, netip.AddrPortFrom(hostAddr(t), 0))
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +310,7 @@ func TestJobsCantReachEachOther(t *testing.T) {
 	}
 	listened := make(chan result, 1)
 	go func() {
-		code, out, err := a.run(ctx, probeDir+"/probe", "listen", "-for", "4m", "0.0.0.0:"+port, ctl.Addr().String())
+		code, out, err := a.run(ctx, probeDir+"/probe", "listen", "-for", "4m", "-arp", aMarker, "0.0.0.0:"+port, ctl.Addr().String())
 		listened <- result{code, out, err}
 	}()
 	var res *result
@@ -329,6 +343,7 @@ func TestJobsCantReachEachOther(t *testing.T) {
 	}
 
 	probeIn(t, b, "unreachable", "-timeout", unreachWait, "-send", "from-b", port, jobSubnet)
+	probeIn(t, b, "arp", bMarker, gatewayIP)
 
 	if err := stop.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -342,6 +357,12 @@ func TestJobsCantReachEachOther(t *testing.T) {
 		t.Fatalf("job A's listener: exit %d, %v:\n%s", r.code, r.err, r.out)
 	}
 	wantOnlyOwn(t, r.out)
+	if !strings.Contains(r.out, " -> "+aMarker+"\n") {
+		t.Errorf("job A's sniffer missed the gateway's reply to %s:\n%s", aMarker, r.out)
+	}
+	if strings.Contains(r.out, " "+bMarker+" ") || strings.Contains(r.out, " "+bMarker+"\n") {
+		t.Errorf("job A's guest received job B's ARP request:\n%s", r.out)
+	}
 }
 
 // wantOnlyOwn fails t unless the listen probe's output out shows it

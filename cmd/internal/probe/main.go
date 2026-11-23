@@ -12,10 +12,17 @@
 //	probe refuses [-timeout d] <host> <first>-<last>
 //	    connect to every port in the range; fail if any port does anything
 //	    but refuse
-//	probe listen [-for d] <host:port> <control host:port>
+//	probe listen [-for d] [-arp marker] <host:port> <control host:port>
 //	    accept connections, print each one's peer and first line; once up,
 //	    connect to the listener at eth0's address saying "ready", then to
-//	    control, and exit at the line "stop" from it, or fail after d
+//	    control, and exit at the line "stop" from it, or fail after d; with
+//	    -arp, sniff ARP on eth0 from before the listener is up, and at the
+//	    stop ask the default gateway as arp does, with marker as the
+//	    sender, then print every ARP packet eth0 received
+//	probe arp [-timeout d] <sender> <target>
+//	    broadcast an ARP request for target from eth0's MAC, carrying
+//	    sender as its sender address, until target's reply to sender
+//	    arrives
 //	probe udp <host:port>...
 //	    send each a UDP datagram, written raw on eth0 to the default
 //	    gateway's MAC, as a root guest can, so the guest's own routing
@@ -71,7 +78,7 @@ func main() {
 	}
 }
 
-const usage = "usage: probe connect|unreachable|refuses|listen|udp|resolve|dhcp|vsock|netinfo [flags] [args]"
+const usage = "usage: probe connect|unreachable|refuses|listen|arp|udp|resolve|dhcp|vsock|netinfo [flags] [args]"
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -82,6 +89,7 @@ func run(args []string) error {
 	wait := fs.Duration("timeout", timeout, "how long each connection may take")
 	send := fs.String("send", "", "a line to send on each connection that opens")
 	listenFor := fs.Duration("for", 5*time.Minute, "how long to listen")
+	marker := fs.String("arp", "", "sniff ARP while listening, and at the stop ask the gateway with this sender address")
 	overTCP := fs.Bool("tcp", false, "resolve over TCP")
 	count := fs.Int("n", 3, "how many DISCOVERs to send")
 	cid := fs.Uint("cid", unix.VMADDR_CID_HOST, "the vsock CID to connect to")
@@ -97,7 +105,9 @@ func run(args []string) error {
 	case args[0] == "refuses" && len(rest) == 2:
 		return refuses(rest[0], rest[1], *wait)
 	case args[0] == "listen" && len(rest) == 2:
-		return listen(rest[0], rest[1], *listenFor)
+		return listen(rest[0], rest[1], *listenFor, *marker)
+	case args[0] == "arp" && len(rest) == 2:
+		return arp(rest[0], rest[1], *wait)
 	case args[0] == "udp" && len(rest) >= 1:
 		return rawUDP(rest)
 	case args[0] == "resolve" && len(rest) == 2:
@@ -272,11 +282,24 @@ func portRange(s string, lo, hi uint64) ([]uint32, error) {
 // control and waits for the line "stop" from it. It fails if a step fails
 // or there is no stop within d.
 //
+// With a marker, it opens an ARP socket on eth0 before it listens, and at
+// the stop asks the default gateway as arp does, with marker as the
+// sender, then prints every ARP packet that socket received.
+//
 // One process does it all because the plugin runs one call on a job at a
 // time: while this Exec runs, the job takes no other, so the test tells it
 // to stop through a connection it opens to the test.
-func listen(addr, control string, d time.Duration) error {
+func listen(addr, control string, d time.Duration, marker string) error {
 	deadline := time.Now().Add(d)
+	sniffer := -1
+	if marker != "" {
+		fd, _, err := arpSocket()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = unix.Close(fd) }()
+		sniffer = fd
+	}
 	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
@@ -303,10 +326,26 @@ func listen(addr, control string, d time.Duration) error {
 		}
 	})
 	err = untilStop(ln.Addr().(*net.TCPAddr).Port, control, ready, deadline)
+	if err == nil && sniffer >= 0 {
+		err = askGateway(marker)
+	}
 	// Closing the listener ends Accept; firstLine is bounded by timeout.
 	_ = ln.Close()
 	accepting.Wait()
+	if err == nil && sniffer >= 0 {
+		err = printARP(sniffer)
+	}
 	return err
+}
+
+// askGateway asks the default gateway as arp does, with marker as the
+// sender.
+func askGateway(marker string) error {
+	gw, _, err := defaultRoute()
+	if err != nil {
+		return err
+	}
+	return arp(marker, gw.String(), timeout)
 }
 
 // untilStop connects to port at eth0's address, saying "ready", waits until
@@ -370,6 +409,127 @@ func firstLine(c net.Conn) (string, error) {
 	}
 	line, err := bufio.NewReaderSize(io.LimitReader(c, 64), 64).ReadString('\n')
 	return strings.TrimSuffix(line, "\n"), err
+}
+
+// ethPARP is ETH_P_ARP in network byte order, as AF_PACKET takes it.
+var ethPARP = binary.NativeEndian.Uint16(binary.BigEndian.AppendUint16(nil, unix.ETH_P_ARP))
+
+// arpSocket returns an AF_PACKET socket bound to eth0 that sends and
+// receives ARP packets without their Ethernet header, and eth0.
+func arpSocket() (int, *net.Interface, error) {
+	ifi, err := net.InterfaceByName("eth0")
+	if err != nil {
+		return -1, nil, err
+	}
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, int(ethPARP))
+	if err != nil {
+		return -1, nil, fmt.Errorf("ARP socket: %w", err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: ethPARP, Ifindex: ifi.Index}); err != nil {
+		return -1, nil, errors.Join(fmt.Errorf("ARP socket: %w", err), unix.Close(fd))
+	}
+	return fd, ifi, nil
+}
+
+// arpPacket is an ARP packet for IPv4 over Ethernet.
+type arpPacket struct {
+	op       uint16
+	sha      net.HardwareAddr
+	spa, tpa netip.Addr
+}
+
+// parseARP parses b as an ARP packet for IPv4 over Ethernet.
+func parseARP(b []byte) (arpPacket, bool) {
+	if len(b) < 28 || binary.BigEndian.Uint16(b[0:2]) != 1 || binary.BigEndian.Uint16(b[2:4]) != unix.ETH_P_IP || b[4] != 6 || b[5] != 4 {
+		return arpPacket{}, false
+	}
+	return arpPacket{
+		op:  binary.BigEndian.Uint16(b[6:8]),
+		sha: net.HardwareAddr(slices.Clone(b[8:14])),
+		spa: netip.AddrFrom4([4]byte(b[14:18])),
+		tpa: netip.AddrFrom4([4]byte(b[24:28])),
+	}, true
+}
+
+// arp broadcasts an ARP request for target from eth0's MAC, carrying
+// sender as its sender address, once a second until target's reply to
+// sender arrives, and fails if none does within wait. Every port of the
+// switch eth0 is on gets the request, and the switch hands a broadcast to
+// its other ports before its gateway, so the gateway's reply shows they
+// have it.
+func arp(sender, target string, wait time.Duration) error {
+	spa, err := netip.ParseAddr(sender)
+	if err != nil || !spa.Is4() {
+		return fmt.Errorf("sender %q: not an IPv4 address", sender)
+	}
+	tpa, err := netip.ParseAddr(target)
+	if err != nil || !tpa.Is4() {
+		return fmt.Errorf("target %q: not an IPv4 address", target)
+	}
+	fd, ifi, err := arpSocket()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	req := make([]byte, 28)
+	binary.BigEndian.PutUint16(req[0:2], 1) // Ethernet
+	binary.BigEndian.PutUint16(req[2:4], unix.ETH_P_IP)
+	req[4], req[5] = 6, 4
+	binary.BigEndian.PutUint16(req[6:8], 1) // request
+	copy(req[8:14], ifi.HardwareAddr)
+	copy(req[14:18], spa.AsSlice())
+	copy(req[24:28], tpa.AsSlice())
+	bcast := &unix.SockaddrLinklayer{Protocol: ethPARP, Ifindex: ifi.Index, Halen: 6, Addr: [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
+	buf := make([]byte, 1500)
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); {
+		if err := unix.Sendto(fd, req, 0, bcast); err != nil {
+			return fmt.Errorf("send the ARP request: %w", err)
+		}
+		for resend := time.Now().Add(time.Second); ; {
+			left := min(time.Until(resend), time.Until(deadline))
+			if left <= 0 {
+				break
+			}
+			n, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}, int(left.Milliseconds())+1) //nolint:gosec // G115: a descriptor fits in 32 bits
+			if errors.Is(err, unix.EINTR) || n == 0 {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			size, _, err := unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)
+			if errors.Is(err, unix.EAGAIN) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if p, ok := parseARP(buf[:size]); ok && p.op == 2 && p.spa == tpa && p.tpa == spa {
+				fmt.Printf("arp reply %s is-at %s to %s\n", tpa, p.sha, spa)
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("no ARP reply from %s to %s within %s", target, sender, wait)
+}
+
+// printARP prints every ARP packet waiting on fd, and fails if more than
+// 256 are, since one it left unread could be the one a test looks for.
+func printARP(fd int) error {
+	buf := make([]byte, 1500)
+	for range 256 {
+		size, _, err := unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)
+		if errors.Is(err, unix.EAGAIN) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if p, ok := parseARP(buf[:size]); ok {
+			fmt.Printf("arp op %d from %s %s -> %s\n", p.op, p.sha, p.spa, p.tpa)
+		}
+	}
+	return errors.New("more than 256 ARP packets")
 }
 
 // ethPIP is ETH_P_IP in network byte order, as AF_PACKET takes it.
