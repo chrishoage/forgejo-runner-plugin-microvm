@@ -59,7 +59,11 @@ func TestStartBootsTheVM(t *testing.T) {
 	cache, launcher := &fakeCache{}, &fakeLauncher{}
 	srv := newTestServer(t, cache, launcher)
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
-	id := create(t, c)
+	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{Name: "FORGEJO-ACTIONS-TASK-7_JOB-Build", LabelArg: testImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := resp.GetEnvironmentId()
 	done, err := start(testContext(t), c, id)
 	if err != nil {
 		t.Fatal(err)
@@ -92,10 +96,14 @@ func TestStartBootsTheVM(t *testing.T) {
 	if err := proto.Unmarshal(b, boot); err != nil {
 		t.Fatal(err)
 	}
+	// The job's name made DNS-safe is the VM's hostname, and the hosts
+	// list names it at its address; there is no search domain to carry.
 	wantBoot := &agentv1.BootConfig{
 		LayerDir: "/dev/.runner-microvm/layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
-		Network: &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
-		Image:   &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+		Network:  &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
+		Hostname: "forgejo-actions-task-7-job-build",
+		Hosts:    []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
+		Image:    &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
 	}
 	if !proto.Equal(boot, wantBoot) {
 		t.Errorf("boot config = %v, want %v", boot, wantBoot)
@@ -110,7 +118,7 @@ func TestStartBootsTheVM(t *testing.T) {
 		t.Errorf("job network = %v, want %v", spec.GetNetwork(), wantNet)
 	}
 	vm := spec.GetVms()[0]
-	if vm.GetRootDir() != root || vm.GetAgentPort() != 1024 || vm.GetCpus() != 2 || vm.GetMemoryMib() != 1024 ||
+	if vm.GetName() != "forgejo-actions-task-7-job-build" || vm.GetRootDir() != root || vm.GetAgentPort() != 1024 || vm.GetCpus() != 2 || vm.GetMemoryMib() != 1024 ||
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
 		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
 		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 ||
@@ -155,6 +163,25 @@ func names(t *testing.T, dir string) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+// A job whose name maps to nothing is `job` on the job network.
+func TestStartNamesAnUnnamedJobJob(t *testing.T) {
+	t.Parallel()
+	cache, launcher := &fakeCache{}, &fakeLauncher{}
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, cache, launcher)))
+	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{Name: "_.!", LabelArg: testImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	vm := launcher.specs[0].GetVms()[0]
+	if vm.GetName() != "job" || vm.GetBoot().GetHostname() != "job" ||
+		!proto.Equal(vm.GetBoot().GetHosts()[0], &agentv1.Host{Name: "job", Address: "198.18.0.2"}) {
+		t.Errorf("VM %q, hostname %q, hosts %v", vm.GetName(), vm.GetBoot().GetHostname(), vm.GetBoot().GetHosts())
+	}
 }
 
 func TestStartUnknownJob(t *testing.T) {

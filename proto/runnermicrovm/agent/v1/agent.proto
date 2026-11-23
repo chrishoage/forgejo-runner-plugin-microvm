@@ -124,10 +124,24 @@ message BootConfig {
   // The guest's address on the job network.
   Network network = 7;
   // The guest's hostname, its VM's name on the job network. The job's
-  // container's is the job's name made DNS-safe, or `job` (GST-12).
+  // container's is the job's name made DNS-safe, or `job` (GST-12). The
+  // agent sets it with sethostname and writes it to /etc/hostname.
   string hostname = 8;
   // The image's defaults for Exec.
   Image image = 9;
+  // The names on the job network, which the agent writes into /etc/hosts
+  // after localhost's lines. There is no DNS zone for them. Today it holds
+  // one entry, the VM's own name at its address; each service will add
+  // one.
+  repeated Host hosts = 10;
+}
+
+// Host is one name on the job network and its address.
+message Host {
+  // A DNS label.
+  string name = 1;
+  // An IPv4 address.
+  string address = 2;
 }
 
 // Mount is a host directory shared into the VM (STO-1).
@@ -154,8 +168,13 @@ message Disk {
 
 // Network is the guest's static configuration on the job network, which the
 // agent sets with no DHCP client: lo up, then the address, MTU and up on
-// eth0, then the default route via the gateway.
+// eth0, then the default route via the gateway. The gateway is also the
+// guest's only name server, in /etc/resolv.conf.
 message Network {
+  // search_domain: there is no DNS zone, so no search domain (GST-12).
+  reserved 4;
+  reserved "search_domain";
+
   // The guest interface's address, in CIDR notation: an ordinary subnet,
   // not a /32.
   string address = 1;
@@ -163,8 +182,6 @@ message Network {
   string gateway = 2;
   // The interface's MTU.
   uint32 mtu = 3;
-  // The search domain for /etc/resolv.conf. Empty: none.
-  string search_domain = 4;
 }
 
 // Image is the image config's defaults for Exec.

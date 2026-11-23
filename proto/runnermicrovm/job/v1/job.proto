@@ -51,12 +51,12 @@ message Spec {
 
 // VM is one of the job's VMs, run by one VM child.
 message VM {
-  // The VM's name, unique within the spec: its name in Network.hosts, log
-  // lines and Failed reasons. It is never a path component or a cache key: a
-  // service's name would be its DNS name on the job network, its key in the
-  // workflow, which the workflow chooses and which may be `job`, `0` or
-  // `../x`. Today the job's container's name is the job's name
-  // made DNS-safe, as for its BootConfig.hostname (GST-12).
+  // The VM's name, unique within the spec: its hostname and its name in
+  // every VM's BootConfig.hosts, log lines and Failed reasons. It is never a
+  // path component or a cache key: a service's name would be its key in the
+  // workflow, which the workflow chooses and which may be `job` or `0`, made
+  // DNS-safe by the same rule. The job's container's name is the job's name
+  // made DNS-safe, or `job` (GST-12).
   string name = 1;
   // The VM's shape (VM-4).
   uint32 cpus = 2;
@@ -129,6 +129,11 @@ message Disk {
 // gateway serves DNS, and a DHCP server no VM uses whose leases are fixed to
 // each VM's address and MAC (NET-6).
 message Network {
+  // hosts: the gateway's DNS serves no names of its own; each VM's names are
+  // in its boot config's hosts.
+  reserved 5;
+  reserved "hosts";
+
   // The job network's subnet, in CIDR notation.
   string subnet = 1;
   // The gateway's address and MAC: every VM's default route and its only
@@ -136,16 +141,6 @@ message Network {
   string gateway_address = 2;
   string gateway_mac = 3;
   uint32 mtu = 4;
-  // Not used: the gateway's DNS serves no names of its own, and forwards
-  // every name to the host's resolver. Each VM's own address is in its VM
-  // entry.
-  repeated Host hosts = 5;
-}
-
-// Host is one name on the job network.
-message Host {
-  string name = 1;
-  string address = 2;
 }
 
 // Event is one status event from the job process, in the order they happen.

@@ -79,6 +79,9 @@ type Server struct {
 type job struct {
 	id    string
 	image string
+	// hostname is the job's container's name on the job network: the
+	// runner's name for the job made DNS-safe (GST-12).
+	hostname string
 	// profileName names the profile the job's label picked, and profile is
 	// the job's copy of it, taken at Create: a later change of the config
 	// never changes it (CFG-7).
@@ -179,11 +182,11 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	j, err := s.add(image, l.profile, prof)
+	j, err := s.add(image, dnsName(req.GetName()), l.profile, prof)
 	if err != nil {
 		return nil, err
 	}
-	s.log.Info("created", "job", j.id, "name", req.GetName(), "image", image, "profile", j.profileName,
+	s.log.Info("created", "job", j.id, "name", req.GetName(), "hostname", j.hostname, "image", image, "profile", j.profileName,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
 		"scratch_paths", j.profile.ScratchPaths, "force_pull", j.profile.ForcePull)
 	return &pluginv1alpha.CreateResponse{
@@ -227,8 +230,8 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 }
 
 // add puts a new job in the table, under a fresh environment id, with its
-// image and its copy of the profile name names.
-func (s *Server) add(image, name string, prof config.Profile) (*job, error) {
+// image, its hostname and its copy of the profile name names.
+func (s *Server) add(image, hostname, name string, prof config.Profile) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
@@ -240,7 +243,7 @@ func (s *Server) add(image, name string, prof config.Profile) (*job, error) {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, profileName: name, profile: prof, ctx: ctx, cancel: cancel}
+		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: ctx, cancel: cancel}
 		s.jobs[id] = j
 		return j, nil
 	}

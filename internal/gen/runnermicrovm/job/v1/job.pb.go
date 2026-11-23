@@ -146,12 +146,12 @@ func (x *Spec) GetMkfsExt4() string {
 // VM is one of the job's VMs, run by one VM child.
 type VM struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The VM's name, unique within the spec: its name in Network.hosts, log
-	// lines and Failed reasons. It is never a path component or a cache key: a
-	// service's name would be its DNS name on the job network, its key in the
-	// workflow, which the workflow chooses and which may be `job`, `0` or
-	// `../x`. Today the job's container's name is the job's name
-	// made DNS-safe, as for its BootConfig.hostname (GST-12).
+	// The VM's name, unique within the spec: its hostname and its name in
+	// every VM's BootConfig.hosts, log lines and Failed reasons. It is never a
+	// path component or a cache key: a service's name would be its key in the
+	// workflow, which the workflow chooses and which may be `job` or `0`, made
+	// DNS-safe by the same rule. The job's container's name is the job's name
+	// made DNS-safe, or `job` (GST-12).
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// The VM's shape (VM-4).
 	Cpus      uint32 `protobuf:"varint,2,opt,name=cpus,proto3" json:"cpus,omitempty"`
@@ -477,12 +477,8 @@ type Network struct {
 	GatewayAddress string `protobuf:"bytes,2,opt,name=gateway_address,json=gatewayAddress,proto3" json:"gateway_address,omitempty"`
 	GatewayMac     string `protobuf:"bytes,3,opt,name=gateway_mac,json=gatewayMac,proto3" json:"gateway_mac,omitempty"`
 	Mtu            uint32 `protobuf:"varint,4,opt,name=mtu,proto3" json:"mtu,omitempty"`
-	// Not used: the gateway's DNS serves no names of its own, and forwards
-	// every name to the host's resolver. Each VM's own address is in its VM
-	// entry.
-	Hosts         []*Host `protobuf:"bytes,5,rep,name=hosts,proto3" json:"hosts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Network) Reset() {
@@ -543,66 +539,6 @@ func (x *Network) GetMtu() uint32 {
 	return 0
 }
 
-func (x *Network) GetHosts() []*Host {
-	if x != nil {
-		return x.Hosts
-	}
-	return nil
-}
-
-// Host is one name on the job network.
-type Host struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Host) Reset() {
-	*x = Host{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Host) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Host) ProtoMessage() {}
-
-func (x *Host) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Host.ProtoReflect.Descriptor instead.
-func (*Host) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *Host) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *Host) GetAddress() string {
-	if x != nil {
-		return x.Address
-	}
-	return ""
-}
-
 // Event is one status event from the job process, in the order they happen.
 type Event struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -619,7 +555,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[6]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +567,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[6]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,7 +580,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{6}
+	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Event) GetEvent() isEvent_Event {
@@ -728,7 +664,7 @@ type NetworkUp struct {
 
 func (x *NetworkUp) Reset() {
 	*x = NetworkUp{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[7]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -740,7 +676,7 @@ func (x *NetworkUp) String() string {
 func (*NetworkUp) ProtoMessage() {}
 
 func (x *NetworkUp) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[7]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -753,7 +689,7 @@ func (x *NetworkUp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkUp.ProtoReflect.Descriptor instead.
 func (*NetworkUp) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{7}
+	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{6}
 }
 
 // VMStarted: one VM's VM child is running.
@@ -769,7 +705,7 @@ type VMStarted struct {
 
 func (x *VMStarted) Reset() {
 	*x = VMStarted{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[8]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -781,7 +717,7 @@ func (x *VMStarted) String() string {
 func (*VMStarted) ProtoMessage() {}
 
 func (x *VMStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[8]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -794,7 +730,7 @@ func (x *VMStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VMStarted.ProtoReflect.Descriptor instead.
 func (*VMStarted) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{8}
+	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *VMStarted) GetVm() uint32 {
@@ -834,7 +770,7 @@ type VMExited struct {
 
 func (x *VMExited) Reset() {
 	*x = VMExited{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[9]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -846,7 +782,7 @@ func (x *VMExited) String() string {
 func (*VMExited) ProtoMessage() {}
 
 func (x *VMExited) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[9]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -859,7 +795,7 @@ func (x *VMExited) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VMExited.ProtoReflect.Descriptor instead.
 func (*VMExited) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{9}
+	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *VMExited) GetVm() uint32 {
@@ -904,7 +840,7 @@ type Failed struct {
 
 func (x *Failed) Reset() {
 	*x = Failed{}
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[10]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -916,7 +852,7 @@ func (x *Failed) String() string {
 func (*Failed) ProtoMessage() {}
 
 func (x *Failed) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[10]
+	mi := &file_runnermicrovm_job_v1_job_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -929,7 +865,7 @@ func (x *Failed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failed.ProtoReflect.Descriptor instead.
 func (*Failed) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{10}
+	return file_runnermicrovm_job_v1_job_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Failed) GetReason() string {
@@ -980,17 +916,13 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\x04Disk\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x02 \x01(\bR\treadWrite\"\xaf\x01\n" +
+	"read_write\x18\x02 \x01(\bR\treadWrite\"\x8a\x01\n" +
 	"\aNetwork\x12\x16\n" +
 	"\x06subnet\x18\x01 \x01(\tR\x06subnet\x12'\n" +
 	"\x0fgateway_address\x18\x02 \x01(\tR\x0egatewayAddress\x12\x1f\n" +
 	"\vgateway_mac\x18\x03 \x01(\tR\n" +
 	"gatewayMac\x12\x10\n" +
-	"\x03mtu\x18\x04 \x01(\rR\x03mtu\x120\n" +
-	"\x05hosts\x18\x05 \x03(\v2\x1a.runnermicrovm.job.v1.HostR\x05hosts\"4\n" +
-	"\x04Host\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"\x8b\x02\n" +
+	"\x03mtu\x18\x04 \x01(\rR\x03mtuJ\x04\b\x05\x10\x06R\x05hosts\"\x8b\x02\n" +
 	"\x05Event\x12@\n" +
 	"\n" +
 	"network_up\x18\x01 \x01(\v2\x1f.runnermicrovm.job.v1.NetworkUpH\x00R\tnetworkUp\x12@\n" +
@@ -1024,37 +956,35 @@ func file_runnermicrovm_job_v1_job_proto_rawDescGZIP() []byte {
 	return file_runnermicrovm_job_v1_job_proto_rawDescData
 }
 
-var file_runnermicrovm_job_v1_job_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_runnermicrovm_job_v1_job_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_runnermicrovm_job_v1_job_proto_goTypes = []any{
 	(*Spec)(nil),          // 0: runnermicrovm.job.v1.Spec
 	(*VM)(nil),            // 1: runnermicrovm.job.v1.VM
 	(*Mount)(nil),         // 2: runnermicrovm.job.v1.Mount
 	(*Disk)(nil),          // 3: runnermicrovm.job.v1.Disk
 	(*Network)(nil),       // 4: runnermicrovm.job.v1.Network
-	(*Host)(nil),          // 5: runnermicrovm.job.v1.Host
-	(*Event)(nil),         // 6: runnermicrovm.job.v1.Event
-	(*NetworkUp)(nil),     // 7: runnermicrovm.job.v1.NetworkUp
-	(*VMStarted)(nil),     // 8: runnermicrovm.job.v1.VMStarted
-	(*VMExited)(nil),      // 9: runnermicrovm.job.v1.VMExited
-	(*Failed)(nil),        // 10: runnermicrovm.job.v1.Failed
-	(*v1.BootConfig)(nil), // 11: runnermicrovm.agent.v1.BootConfig
+	(*Event)(nil),         // 5: runnermicrovm.job.v1.Event
+	(*NetworkUp)(nil),     // 6: runnermicrovm.job.v1.NetworkUp
+	(*VMStarted)(nil),     // 7: runnermicrovm.job.v1.VMStarted
+	(*VMExited)(nil),      // 8: runnermicrovm.job.v1.VMExited
+	(*Failed)(nil),        // 9: runnermicrovm.job.v1.Failed
+	(*v1.BootConfig)(nil), // 10: runnermicrovm.agent.v1.BootConfig
 }
 var file_runnermicrovm_job_v1_job_proto_depIdxs = []int32{
 	4,  // 0: runnermicrovm.job.v1.Spec.network:type_name -> runnermicrovm.job.v1.Network
 	1,  // 1: runnermicrovm.job.v1.Spec.vms:type_name -> runnermicrovm.job.v1.VM
 	2,  // 2: runnermicrovm.job.v1.VM.mounts:type_name -> runnermicrovm.job.v1.Mount
 	3,  // 3: runnermicrovm.job.v1.VM.disks:type_name -> runnermicrovm.job.v1.Disk
-	11, // 4: runnermicrovm.job.v1.VM.boot:type_name -> runnermicrovm.agent.v1.BootConfig
-	5,  // 5: runnermicrovm.job.v1.Network.hosts:type_name -> runnermicrovm.job.v1.Host
-	7,  // 6: runnermicrovm.job.v1.Event.network_up:type_name -> runnermicrovm.job.v1.NetworkUp
-	8,  // 7: runnermicrovm.job.v1.Event.vm_started:type_name -> runnermicrovm.job.v1.VMStarted
-	9,  // 8: runnermicrovm.job.v1.Event.vm_exited:type_name -> runnermicrovm.job.v1.VMExited
-	10, // 9: runnermicrovm.job.v1.Event.failed:type_name -> runnermicrovm.job.v1.Failed
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	10, // 4: runnermicrovm.job.v1.VM.boot:type_name -> runnermicrovm.agent.v1.BootConfig
+	6,  // 5: runnermicrovm.job.v1.Event.network_up:type_name -> runnermicrovm.job.v1.NetworkUp
+	7,  // 6: runnermicrovm.job.v1.Event.vm_started:type_name -> runnermicrovm.job.v1.VMStarted
+	8,  // 7: runnermicrovm.job.v1.Event.vm_exited:type_name -> runnermicrovm.job.v1.VMExited
+	9,  // 8: runnermicrovm.job.v1.Event.failed:type_name -> runnermicrovm.job.v1.Failed
+	9,  // [9:9] is the sub-list for method output_type
+	9,  // [9:9] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_runnermicrovm_job_v1_job_proto_init() }
@@ -1062,7 +992,7 @@ func file_runnermicrovm_job_v1_job_proto_init() {
 	if File_runnermicrovm_job_v1_job_proto != nil {
 		return
 	}
-	file_runnermicrovm_job_v1_job_proto_msgTypes[6].OneofWrappers = []any{
+	file_runnermicrovm_job_v1_job_proto_msgTypes[5].OneofWrappers = []any{
 		(*Event_NetworkUp)(nil),
 		(*Event_VmStarted)(nil),
 		(*Event_VmExited)(nil),
@@ -1074,7 +1004,7 @@ func file_runnermicrovm_job_v1_job_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runnermicrovm_job_v1_job_proto_rawDesc), len(file_runnermicrovm_job_v1_job_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
