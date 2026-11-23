@@ -122,12 +122,20 @@ type job struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// ready is set once Start has booted the job's container, before Start
+	// releases mu. Exec, CopyIn and CopyOut read it before they wait for mu,
+	// so a call made while Start is still in progress fails at once with
+	// FailedPrecondition (PROTO-11) instead of waiting out the pull and the
+	// boot, and running once they succeed.
+	ready atomic.Bool
+
 	// mu is held by every call on the job for its whole length, so Remove
 	// waits until a cancelled call has unwound before it tears the job down.
 	// A call that holds it releases it promptly once ctx is cancelled, also
 	// while it is blocked on the runner's stream (await), so Remove never
-	// waits long. Everything below is guarded by it.
-	mu sync.Mutex
+	// waits long. A call waits for it only as long as its own context runs
+	// (lockJob). Everything below is guarded by it.
+	mu jobLock
 	// removed is set by Remove: a call that found the job just before
 	// Remove took it out of the table sees it and fails with NotFound.
 	removed bool
@@ -289,7 +297,7 @@ func (s *Server) add(image, hostname, name string, prof config.Profile) (*job, e
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: ctx, cancel: cancel}
+		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: ctx, cancel: cancel, mu: newJobLock()}
 		s.jobs[id] = j
 		return j, nil
 	}
@@ -309,20 +317,61 @@ func notFound(id string) error {
 	return status.Errorf(codes.NotFound, "no environment %q", id)
 }
 
-// lock returns the job id names, locked, or NotFound. The caller unlocks it.
-func (s *Server) lock(id string) (*job, error) {
+// jobLock is a job's lock: a mutex whose wait a context can end, so a call
+// queued behind another on the same job never outlives its own context.
+type jobLock struct{ held chan struct{} }
+
+func newJobLock() jobLock { return jobLock{held: make(chan struct{}, 1)} }
+
+// Lock waits for l. Only Remove uses it, which cancels every call on the
+// job first, so the wait is short.
+func (l jobLock) Lock() { l.held <- struct{}{} }
+
+// LockContext waits for l until ctx ends, and returns ctx's error then,
+// without l.
+func (l jobLock) LockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case l.held <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l jobLock) Unlock() {
+	select {
+	case <-l.held:
+	default:
+		panic("unlock of an unlocked job lock")
+	}
+}
+
+// lookup returns the job id names, or NotFound.
+func (s *Server) lookup(id string) (*job, error) {
 	s.mu.Lock()
 	j, ok := s.jobs[id]
 	s.mu.Unlock()
 	if !ok {
 		return nil, notFound(id)
 	}
-	j.mu.Lock()
+	return j, nil
+}
+
+// lockJob locks j, waiting at most as long as ctx, the call's context,
+// runs: it fails with ctx's status then, and with NotFound once Remove has
+// had j. The caller unlocks it.
+func (s *Server) lockJob(ctx context.Context, j *job) error {
+	if err := j.mu.LockContext(ctx); err != nil {
+		return status.FromContextError(err).Err()
+	}
 	if j.removed {
 		j.mu.Unlock()
-		return nil, notFound(id)
+		return notFound(j.id)
 	}
-	return j, nil
+	return nil
 }
 
 // callContext returns ctx, also cancelled when Remove starts on j.

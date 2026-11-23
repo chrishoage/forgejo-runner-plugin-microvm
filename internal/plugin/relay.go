@@ -15,19 +15,30 @@ import (
 )
 
 // started returns the job id names, locked, with a call context that Remove
-// also cancels, or FailedPrecondition before Start completed (PROTO-11). The
-// caller calls done.
+// also cancels, or FailedPrecondition before Start completed (PROTO-11):
+// at once while Start is still in progress, without waiting for the job's
+// lock. Its wait for the lock ends with ctx. The caller calls done.
 func (s *Server) started(ctx context.Context, id string) (*job, context.Context, func(), error) {
-	j, err := s.lock(id)
+	j, err := s.lookup(id)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !j.ready.Load() {
+		return nil, nil, nil, notStarted(id)
+	}
+	if err := s.lockJob(ctx, j); err != nil {
 		return nil, nil, nil, err
 	}
 	if j.agent == nil {
 		j.mu.Unlock()
-		return nil, nil, nil, status.Errorf(codes.FailedPrecondition, "environment %s is not started", id)
+		return nil, nil, nil, notStarted(id)
 	}
 	cctx, cancel := callContext(ctx, j)
 	return j, cctx, func() { cancel(); j.mu.Unlock() }, nil
+}
+
+func notStarted(id string) error {
+	return status.Errorf(codes.FailedPrecondition, "environment %s is not started", id)
 }
 
 // agentError is the status for an agent call that failed: the call's own

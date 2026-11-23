@@ -74,6 +74,9 @@ func TestExecRelaysTheAgent(t *testing.T) {
 	}
 }
 
+// Exec, CopyIn and CopyOut on a job created but not started fail with
+// FailedPrecondition: the job exists but can't take the call yet. An unknown
+// id is NotFound (PROTO-11).
 func TestCallsBeforeStart(t *testing.T) {
 	t.Parallel()
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))
@@ -82,6 +85,9 @@ func TestCallsBeforeStart(t *testing.T) {
 	wantCode(t, err, codes.FailedPrecondition)
 	_, err = execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: "job-00000000", Command: []string{"true"}})
 	wantCode(t, err, codes.NotFound)
+	dest := "/var/run/act/"
+	err = copyInAll(t, c, &pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: &dest, Data: []byte("ok")})
+	wantCode(t, err, codes.FailedPrecondition)
 	_, err = copyOutAll(t, c, id, "/x")
 	wantCode(t, err, codes.FailedPrecondition)
 }
