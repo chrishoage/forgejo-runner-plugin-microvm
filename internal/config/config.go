@@ -92,6 +92,9 @@ type Profile struct {
 	// there are none, the built-in value. Never changed once loaded: a job
 	// keeps its profile's list as it was at Create.
 	ScratchPaths []string
+	// ForcePull looks the job's tag up in the registry at every Start,
+	// even when the image cache holds it (IMG-6). False by default.
+	ForcePull bool
 }
 
 // The profile keys' built-in values (#1, Configuration and profiles).
@@ -490,6 +493,9 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 		case "scratch_paths":
 			paths, valid := d.scratchPaths(kp, scope)
 			prof.ScratchPaths, ok = paths, ok && valid
+		case "force_pull":
+			b, valid := d.boolean(kp, scope)
+			prof.ForcePull, ok = b, ok && valid
 		default:
 			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
 			ok = false
@@ -732,6 +738,25 @@ func (d *decoder) integer(p pair, scope string, lo, hi uint64) (uint64, bool) {
 	}
 	d.errorf(p.key.Line, scope, p.key.Value, "must be from %d to %d, not %s", lo, hi, v.Value)
 	return 0, false
+}
+
+// boolean returns p's value, in scope, true or false. Only YAML's plain
+// booleans count: a quoted one is a string, and YAML 1.1's yes and on are
+// strings in YAML 1.2.
+func (d *decoder) boolean(p pair, scope string) (bool, bool) {
+	v := deref(p.value)
+	var b bool
+	switch {
+	case isNull(v):
+		d.errorf(p.key.Line, scope, p.key.Value, "has no value")
+	case v.Kind != yaml.ScalarNode:
+		d.errorf(p.key.Line, scope, p.key.Value, "must be true or false")
+	case v.ShortTag() != "!!bool" || v.Decode(&b) != nil:
+		d.errorf(p.key.Line, scope, p.key.Value, "must be true or false, not %q", v.Value)
+	default:
+		return b, true
+	}
+	return false, false
 }
 
 // uint sets *dst to p's value, an integer of 0 or more.

@@ -391,6 +391,8 @@ profiles:
     scratch_gib: 40
   fast:
     cpus: 8
+    force_pull: true
+  cached: {force_pull: false}
   empty:
   braces: {}
   max:
@@ -405,7 +407,8 @@ profiles:
 	}
 	want := Profiles{
 		"default": {CPUs: 4, MemoryMiB: 4096, ScratchGiB: 40},
-		"fast":    {CPUs: 8, MemoryMiB: 1024, ScratchGiB: 10},
+		"fast":    {CPUs: 8, MemoryMiB: 1024, ScratchGiB: 10, ForcePull: true},
+		"cached":  b,
 		"empty":   b,
 		"braces":  b,
 		"max":     {CPUs: 255, MemoryMiB: 4294967295, ScratchGiB: 8589934591},
@@ -537,6 +540,11 @@ func TestInvalidProfileValuesFail(t *testing.T) {
 		{"scratch_gib: 18446744073709551615", `scratch_gib: must be from 1 to 8589934591, not 18446744073709551615`},
 		{"scratch_gib: 99999999999999999999", `scratch_gib: must be from 1 to 8589934591, not 99999999999999999999`},
 		{"scratch_gib: -99999999999999999999", `scratch_gib: must be from 1 to 8589934591, not -99999999999999999999`},
+		{"force_pull: yes", `force_pull: must be true or false, not "yes"`},
+		{`force_pull: "true"`, `force_pull: must be true or false, not "true"`},
+		{"force_pull: 1", `force_pull: must be true or false, not "1"`},
+		{"force_pull: [true]", `force_pull: must be true or false`},
+		{"force_pull:", `force_pull: has no value`},
 	} {
 		path, msg := loadErr(t, "profiles:\n  ok: {}\n  big:\n    "+tc.value+"\n")
 		wantErr(t, path, msg, `line 4: profile "big": `+tc.want)
