@@ -76,6 +76,9 @@ type Config struct {
 	Launcher JobLauncher
 	// ReadyTimeout is how long Start waits for the agent to answer Ping.
 	ReadyTimeout time.Duration
+	// LostAgentGrace is how long a call whose agent failed, and is gone,
+	// waits for the job process to report the VM exited (agentError).
+	LostAgentGrace time.Duration
 	// Arch is the runner's name for the host's architecture (runnerArch),
 	// which Create returns.
 	Arch string
@@ -147,6 +150,14 @@ type job struct {
 	proc *joblaunch.Process
 	// agent is the job's container's agent, once it answered Ping.
 	agent *agentclient.Client
+	// gone is set when Start succeeds, and cancelled, with the
+	// FailedPrecondition status every call on the job then fails with as
+	// its cause, once the job's container's VM has died: the job process
+	// reported it exited, or failed, or exited itself. watched closes once
+	// the goroutine that watches for it has returned. They are set under
+	// mu, and gone is cancelled without it.
+	gone    context.Context
+	watched chan struct{}
 }
 
 // NewServer returns a server with an empty job table. cfg.Dirs.Runtime must
@@ -161,6 +172,9 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	}
 	if cfg.ReadyTimeout == 0 {
 		cfg.ReadyTimeout = agentclient.ReadyTimeout
+	}
+	if cfg.LostAgentGrace == 0 {
+		cfg.LostAgentGrace = lostAgentGrace
 	}
 	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles}, nil
 }
@@ -374,11 +388,34 @@ func (s *Server) lockJob(ctx context.Context, j *job) error {
 	return nil
 }
 
-// callContext returns ctx, also cancelled when Remove starts on j.
+// callContext returns ctx, also cancelled when Remove starts on j, and,
+// once j is started, when its VM dies, with the status it died with as the
+// cause (callError).
 func callContext(ctx context.Context, j *job) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(j.ctx, cancel)
-	return ctx, func() { stop(); cancel() }
+	ctx, cancel := context.WithCancelCause(ctx)
+	stopRemoved := context.AfterFunc(j.ctx, func() { cancel(context.Canceled) })
+	stopGone := func() bool { return true }
+	if gone := j.gone; gone != nil {
+		stopGone = context.AfterFunc(gone, func() { cancel(context.Cause(gone)) })
+	}
+	return ctx, func() { stopRemoved(); stopGone(); cancel(context.Canceled) }
+}
+
+// callError is the status a call on j returns for err, its outcome, once
+// ctx, its call context, has ended: Canceled when Remove ended it, the
+// status the VM died with when its death did, else ctx's own code. While
+// ctx runs, and for a call that succeeded, it is err.
+func callError(ctx context.Context, j *job, err error) error {
+	if err == nil || ctx.Err() == nil {
+		return err
+	}
+	if j.ctx.Err() != nil {
+		return status.FromContextError(context.Canceled).Err()
+	}
+	if cause := context.Cause(ctx); status.Code(cause) == codes.FailedPrecondition {
+		return cause
+	}
+	return status.FromContextError(ctx.Err()).Err()
 }
 
 // await runs op, a call on the runner's stream, and returns its error, or
@@ -435,7 +472,8 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 }
 
 // stop closes j's agent connection and kills its job process, if any, and
-// waits until its process group is reaped. j.mu is held.
+// waits until its process group is reaped and its watcher has returned.
+// j.mu is held.
 func (s *Server) stop(ctx context.Context, j *job) error {
 	var err error
 	if j.agent != nil {
@@ -443,8 +481,15 @@ func (s *Server) stop(ctx context.Context, j *job) error {
 		j.agent = nil
 	}
 	if j.proc != nil {
-		err = errors.Join(err, s.cfg.Launcher.Kill(ctx, j.proc))
+		killErr := s.cfg.Launcher.Kill(ctx, j.proc)
 		j.proc = nil
+		if killErr == nil && j.watched != nil {
+			// The job process is gone, so its events end, and the
+			// watcher with them.
+			<-j.watched
+			j.watched = nil
+		}
+		err = errors.Join(err, killErr)
 	}
 	return err
 }

@@ -67,6 +67,14 @@ func (c *Client) WaitReady(ctx context.Context) error {
 	return err
 }
 
+// Ping returns once the agent answers, or at once with Unavailable while
+// the connection to it is broken: it does not wait for the agent to be
+// ready, as WaitReady does.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.rpc.Ping(ctx, &agentv1.PingRequest{})
+	return err
+}
+
 // Close closes the connection, ending every call on it.
 func (c *Client) Close() error { return c.conn.Close() }
 
