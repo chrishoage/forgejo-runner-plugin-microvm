@@ -134,7 +134,7 @@ func execData(s pluginv1alpha.DataChunk_Stream, b []byte) *pluginv1alpha.ExecOut
 }
 
 // CopyIn relays a tar to the agent, which extracts it at the destination
-// the first chunk names.
+// the first chunk names, re-chunked to at most agentChunk.
 func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err error) {
 	first, err := stream.Recv()
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err er
 		return s.agentError(ctx, j, err)
 	}
 	// Send's own errors surface in CloseAndRecv.
-	sendErr := in.Send(&agentv1.CopyInRequest{Destination: first.GetDestPath(), Chunk: first.GetData()})
+	sendErr := sendChunks(in, first.GetDestPath(), first.GetData())
 	for sendErr == nil {
 		// A runner that stops sending can't keep the job held (await).
 		var chunk *pluginv1alpha.CopyInChunk
@@ -172,12 +172,30 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err er
 		if chunk.EnvironmentId != nil || chunk.DestPath != nil {
 			return status.Error(codes.InvalidArgument, "only the first chunk may set environment_id or dest_path")
 		}
-		sendErr = in.Send(&agentv1.CopyInRequest{Chunk: chunk.GetData()})
+		sendErr = sendChunks(in, "", chunk.GetData())
 	}
 	if _, err := in.CloseAndRecv(); err != nil {
 		return s.agentError(ctx, j, err)
 	}
 	return await(ctx, func() error { return stream.SendAndClose(&pluginv1alpha.CopyInResponse{}) })
+}
+
+// agentChunk is the most of a copy the plugin sends the agent in one
+// message. The agent keeps gRPC's 4 MiB default limit, while the runner may
+// send chunks of up to 32 MiB, the plugin's own limit.
+const agentChunk = 256 << 10
+
+// sendChunks sends data to the agent's CopyIn in messages of at most
+// agentChunk, at least one, the first naming dest.
+func sendChunks(in agentv1.AgentService_CopyInClient, dest string, data []byte) error {
+	for first := true; first || len(data) > 0; first = false {
+		n := min(len(data), agentChunk)
+		if err := in.Send(&agentv1.CopyInRequest{Destination: dest, Chunk: data[:n]}); err != nil {
+			return err
+		}
+		dest, data = "", data[n:]
+	}
+	return nil
 }
 
 // CopyOut relays the agent's tar of a guest path.
