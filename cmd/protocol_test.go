@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,10 +31,24 @@ const (
 	stepOut  = "hello from runner-microvm e2e"
 )
 
+// The profile the plugin under test defines besides the implicit default,
+// and its shape.
+const (
+	bigProfile    = "big"
+	bigCPUs       = 3
+	bigMemoryMiB  = 1536
+	bigScratchGiB = 4
+)
+
+// testProfiles is the profiles section of the plugin's config file.
+var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: %d\n    scratch_gib: %d\n",
+	bigProfile, bigCPUs, bigMemoryMiB, bigScratchGiB)
+
 // TestEchoWorkflow is the protocol test: it runs e2e/workflows/echo.yml
 // through forgejo-runner's own job executor (act/runner), which calls the
 // real plugin through the runner's plugin client, and the plugin boots the
-// image in e2e/image as a real VM. No Forgejo, no runner daemon.
+// image in e2e/image as a real VM. No Forgejo, no runner daemon. Its label
+// names no profile, so its VM has the built-in shape.
 func TestEchoWorkflow(t *testing.T) {
 	log, err := runWorkflow(t, workflow, map[string]string{"microvm": readImage(t)})
 	if err != nil {
@@ -40,6 +56,55 @@ func TestEchoWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(log, stepOut) {
 		t.Fatalf("the job log does not show the step's output %q", stepOut)
+	}
+	wantShape(t, log, 2, 1024, 10)
+}
+
+// TestProfileWorkflow runs a workflow whose label names the big profile:
+// its VM has that profile's CPU count, memory and scratch size (VM-4, VM-5).
+func TestProfileWorkflow(t *testing.T) {
+	wf := writeWorkflow(t, "  big:\n    runs-on: microvm-big\n    steps:\n      - run: |\n          "+shapeStep+"\n")
+	log, err := runWorkflow(t, wf, map[string]string{"microvm-big": readImage(t) + ";profile=" + bigProfile})
+	if err != nil {
+		t.Fatalf("the workflow failed: %v", err)
+	}
+	wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB)
+}
+
+// shapeStep is the step, in e2e/workflows/echo.yml too, that prints the VM's
+// CPU count, memory and scratch disk size, each computed by the step's
+// shell, so the log's copy of the script never matches shapeLine.
+const shapeStep = `echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"`
+
+var shapeLine = regexp.MustCompile(`shape: cpus=(\d+) memtotal_kib=(\d+) vda_sectors=(\d+)`)
+
+// wantShape fails t unless log shows the shape step's line with cpus CPUs,
+// memory within the kernel's overhead of memoryMiB, and a scratch disk of
+// scratchGiB.
+func wantShape(t *testing.T, log string, cpus, memoryMiB, scratchGiB uint64) {
+	t.Helper()
+	m := shapeLine.FindStringSubmatch(log)
+	if m == nil {
+		t.Fatal("the job log does not show the shape step's line")
+	}
+	got := make([]uint64, 3)
+	for i := range got {
+		n, err := strconv.ParseUint(m[i+1], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[i] = n
+	}
+	if got[0] != cpus {
+		t.Errorf("nproc = %d, want %d", got[0], cpus)
+	}
+	// MemTotal is the memory less what the kernel reserves for itself:
+	// within 15% below it, never above.
+	if limit := memoryMiB << 10; got[1] > limit || got[1] < limit*85/100 {
+		t.Errorf("MemTotal = %d KiB, want within 15%% below %d KiB", got[1], limit)
+	}
+	if want := scratchGiB << 30 / 512; got[2] != want {
+		t.Errorf("/sys/block/vda/size = %d sectors, want %d", got[2], want)
 	}
 }
 
@@ -111,7 +176,8 @@ func buildPlugin(t *testing.T) string {
 }
 
 // startPlugin runs the plugin's serve by path, with RUNNER_MICROVM_CONFIG
-// naming a config file that puts its directories in a fresh directory, and
+// naming a config file that puts its directories in a fresh directory and
+// defines testProfiles, and
 // returns its listen socket once it exists. On
 // cleanup it stops the plugin with SIGTERM, which removes every job; a
 // plugin still running after that, or at the timeout, is killed with each
@@ -125,8 +191,8 @@ func startPlugin(t *testing.T, bin string) string {
 	}
 	sock := filepath.Join(base, "runtime", "runner-microvm.sock")
 	cfg := filepath.Join(base, "config.yaml")
-	content := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
-		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"))
+	content := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n%s",
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"), testProfiles)
 	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
@@ -46,6 +46,8 @@ type Config struct {
 	// Agent is the agent's path in <state>/bin/, which each VM's boot
 	// root hard-links.
 	Agent string
+	// Profiles are the config file's profiles, which Create picks from.
+	Profiles config.Profiles
 	// Cache and Launcher are the plugin's two seams.
 	Cache    ImageCache
 	Launcher JobLauncher
@@ -65,12 +67,20 @@ type Server struct {
 
 	mu   sync.Mutex
 	jobs map[string]*job
+	// profiles are the profiles Create picks from; SetProfiles replaces
+	// them.
+	profiles config.Profiles
 }
 
 // job is one job in the table, from Create to Remove.
 type job struct {
 	id    string
 	image string
+	// profileName names the profile the job's label picked, and profile is
+	// the job's copy of it, taken at Create: a later change of the config
+	// never changes it (CFG-7).
+	profileName string
+	profile     config.Profile
 
 	// ctx is cancelled when Remove starts, so a call still unwinding on the
 	// job ends at once (PROTO-13).
@@ -106,7 +116,16 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	if cfg.ReadyTimeout == 0 {
 		cfg.ReadyTimeout = agentclient.ReadyTimeout
 	}
-	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}}, nil
+	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles}, nil
+}
+
+// SetProfiles replaces the profiles later Creates pick from. A job already
+// created keeps its own copy of its profile (CFG-7). ps must not change
+// afterwards.
+func (s *Server) SetProfiles(ps config.Profiles) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.profiles = ps
 }
 
 // Close tears down every job still in the table, and releases the server.
@@ -129,18 +148,34 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 	return &pluginv1alpha.CapabilitiesResponse{Name: Name}, nil
 }
 
-// Create picks the job's image from the label argument and returns the job's
-// environment id, paths and platform. It boots nothing (PROTO-3).
+// Create picks the job's image and profile from the label argument and
+// returns the job's environment id, paths and platform. It boots nothing
+// (PROTO-3). The job keeps a copy of its profile for its whole life.
 func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
-	image, err := createImage(req)
+	if len(req.GetServices()) > 0 {
+		// SHORTCUT(#6): services are refused (PROTO-6) until #6 decides
+		// what the plugin does with them.
+		return nil, status.Error(codes.InvalidArgument,
+			"runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM")
+	}
+	l, err := parseLabel(req.GetLabelArg())
 	if err != nil {
 		return nil, err
 	}
-	j, err := s.add(image)
+	prof, err := s.lookupProfile(l.profile, req.GetLabelArg())
 	if err != nil {
 		return nil, err
 	}
-	s.log.Info("created", "job", j.id, "name", req.GetName(), "image", image)
+	image, err := jobImage(l, req.GetImage())
+	if err != nil {
+		return nil, err
+	}
+	j, err := s.add(image, l.profile, prof)
+	if err != nil {
+		return nil, err
+	}
+	s.log.Info("created", "job", j.id, "name", req.GetName(), "image", image, "profile", j.profileName,
+		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB)
 	return &pluginv1alpha.CreateResponse{
 		EnvironmentId: j.id,
 		RootPath:      rootPath,
@@ -152,32 +187,36 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 	}, nil
 }
 
-// createImage returns the image a Create asks for, or InvalidArgument.
-func createImage(req *pluginv1alpha.CreateRequest) (string, error) {
-	if len(req.GetServices()) > 0 {
-		// SHORTCUT(#6): services are refused (PROTO-6) until #6 decides
-		// what the plugin does with them.
-		return "", status.Error(codes.InvalidArgument,
-			"runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM")
-	}
-	if req.GetImage() != "" {
+// jobImage returns the image a job boots: its container: image, else the
+// label's (PROTO-4), or InvalidArgument when neither names one (PROTO-5).
+func jobImage(l label, container string) (string, error) {
+	if container != "" {
 		// SHORTCUT(#6): a job's container: image is refused, not used
-		// in place of the label's (PROTO-4).
+		// in place of the label's (PROTO-4, #50).
 		return "", status.Error(codes.InvalidArgument, "runner-microvm does not take a job's container: image yet")
 	}
-	image := req.GetLabelArg()
-	if image == "" {
-		return "", status.Error(codes.InvalidArgument, "no image: the label names none")
+	if l.image == "" {
+		return "", status.Error(codes.InvalidArgument, "no image: neither the label nor the job's container: names one")
 	}
-	if strings.Contains(image, ";") {
-		// SHORTCUT(#8): no profiles, so nothing may follow the image.
-		return "", status.Errorf(codes.InvalidArgument, "label argument %q: nothing may follow the image yet", image)
-	}
-	return image, nil
+	return l.image, nil
 }
 
-// add puts a new job in the table, under a fresh environment id.
-func (s *Server) add(image string) (*job, error) {
+// lookupProfile returns a copy of the profile name names, or fails with
+// InvalidArgument naming arg, the label argument, when there is none
+// (CFG-6).
+func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prof, ok := s.profiles.Lookup(name)
+	if !ok {
+		return config.Profile{}, labelError(arg, "unknown profile %q", name)
+	}
+	return prof, nil
+}
+
+// add puts a new job in the table, under a fresh environment id, with its
+// image and its copy of the profile name names.
+func (s *Server) add(image, name string, prof config.Profile) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
@@ -189,7 +228,7 @@ func (s *Server) add(image string) (*job, error) {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, ctx: ctx, cancel: cancel}
+		j := &job{id: id, image: image, profileName: name, profile: prof, ctx: ctx, cancel: cancel}
 		s.jobs[id] = j
 		return j, nil
 	}

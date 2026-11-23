@@ -41,19 +41,12 @@ const (
 	scratchDevice = "/dev/vda"
 )
 
-// The job's container's fixed shape and its agent's vsock port.
-//
-// SHORTCUT(#8): fixed CPU and memory, the built-in profile's, with no
-// profiles.
+// The job's container's agent's vsock port and name.
 const (
-	vmCPUs      = 2
-	vmMemoryMiB = 1024
 	// SHORTCUT(#6): provisional pick: the agent's vsock port.
 	agentPort = 1024
 	// The VM's name; GST-12's hostname rule is #6's.
 	vmName = "job"
-	// SHORTCUT(#8): the built-in scratch size, until profiles set it.
-	scratchSizeBytes = 10 << 30
 )
 
 // The most of a console or VM log a failed Start's error carries.
@@ -91,7 +84,7 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 		s.log.Error("start failed", "job", j.id, "err", err)
 		return startError(ctx, err)
 	}
-	s.log.Info("started", "job", j.id, "image", j.image, "took", time.Since(begin).Round(time.Millisecond))
+	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(begin).Round(time.Millisecond))
 	return await(ctx, func() error {
 		return stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_StartComplete{
 			StartComplete: &pluginv1alpha.StartComplete{ImageEnv: env},
@@ -135,10 +128,10 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	}
 	vm := &jobv1.VM{
 		Name:             vmName,
-		Cpus:             vmCPUs,
-		MemoryMib:        vmMemoryMiB,
+		Cpus:             j.profile.CPUs,
+		MemoryMib:        j.profile.MemoryMiB,
 		ScratchDisk:      filepath.Join(vmState, "scratch.ext4"),
-		ScratchSizeBytes: scratchSizeBytes,
+		ScratchSizeBytes: j.profile.ScratchBytes(),
 		VmLog:            filepath.Join(vmState, "vm.log"),
 		Console:          filepath.Join(vmState, "console"),
 		AgentSocket:      filepath.Join(vmRuntime, "agent.sock"),
