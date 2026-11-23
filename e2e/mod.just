@@ -11,7 +11,46 @@
 project := env("COMPOSE_PROJECT_NAME", "runner-microvm-e2e-" + replace_regex(sha256(justfile_directory()), '^(.{8}).*$', '$1'))
 
 # The compose command: `docker compose` (the default) or `podman compose`.
+# e2e/compose.yaml takes the host's address from E2E_ADDRESS, which `up`
+# exports once `address` has checked it, and `down` sets to a placeholder.
 compose := env("COMPOSE", "docker compose") + " -f compose.yaml --project-name " + project
+
+# Shell lines that set and export E2E_ADDRESS, the host's address that jobs
+# reach Forgejo at, and the runner too, since it hands jobs its own: the
+# source address of the host's IPv4 default route, unless E2E_ADDRESS names
+# one. A guest can't reach the host's loopback (NET-4), and its connections
+# leave the host as the job process's, so they reach what the host publishes
+# on this address. They exit 1 with the reason when there is none, or when it
+# is empty, not IPv4, loopback or the wildcard. Only `up` runs them, so no
+# other recipe, here or in the root justfile, needs a route.
+address := '''
+    if [ "${E2E_ADDRESS+set}" ]; then
+        address=$E2E_ADDRESS
+        from=E2E_ADDRESS
+    else
+        # ip exits non-zero with no route: the empty address says so below.
+        address=$(ip -4 -o route get 192.0.2.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p') || true
+        from="the host's IPv4 default route"
+        if [ -z "$address" ]; then
+            echo "No IPv4 default route to take the host's address from. Set E2E_ADDRESS to a non-loopback IPv4 address of the host's." >&2
+            exit 1
+        fi
+    fi
+    refuse() {
+        echo "$from gives '$address' as the host's address, which $1. Set E2E_ADDRESS to a non-loopback IPv4 address of the host's." >&2
+        exit 1
+    }
+    if [ -z "$address" ]; then
+        refuse "is empty"
+    elif ! [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        refuse "is not an IPv4 address"
+    elif [[ "$address" == 127.* ]]; then
+        refuse "is loopback: a job's guest can't reach the host's loopback (NET-4), and Forgejo publishes 127.0.0.1:3000 already"
+    elif [ "$address" = 0.0.0.0 ]; then
+        refuse "is the wildcard: no address a job can connect to, and it overlaps 127.0.0.1:3000"
+    fi
+    export E2E_ADDRESS=$address
+'''
 
 # Everything the stack writes, at the repo root and gitignored.
 state := justfile_directory() / ".e2e"
@@ -46,9 +85,12 @@ default:
     @just --list e2e
 
 # Build and start the plugin, then Forgejo and the runner, from fresh state; wait until the runner is online.
-up: down
+up:
     #!/usr/bin/env bash
     set -euo pipefail
+    # The address first, so a bad one fails before `down` stops a stack.
+    {{ address }}
+    just --justfile '{{ justfile_directory() }}/justfile' e2e down
     mkdir -p '{{ state }}/forgejo' '{{ state }}/runner' '{{ state }}/secrets'
     chmod 0755 '{{ state }}/secrets'
 
@@ -120,7 +162,7 @@ up: down
     while [ "$SECONDS" -lt "$deadline" ]; do
         if curl -fsS --max-time "$(left 10)" -u '{{ admin }}':"$password" '{{ api }}/admin/actions/runners' |
             jq -e '.[] | select(.name == "e2e" and (.status == "idle" or .status == "active"))' >/dev/null 2>&1; then
-            echo "runner online; Forgejo at http://127.0.0.1:3000 (user {{ admin }}, password in .e2e/admin-password, compose project {{ project }})"
+            echo "runner online; Forgejo at http://127.0.0.1:3000, and at http://$E2E_ADDRESS:3000 for jobs (user {{ admin }}, password in .e2e/admin-password, compose project {{ project }})"
             exit 0
         fi
         sleep 1
@@ -230,6 +272,9 @@ reload:
 down:
     #!/usr/bin/env bash
     set -euo pipefail
+    # down publishes nothing, so it needs no address of the host's, only one
+    # that e2e/compose.yaml accepts: TEST-NET-1's, which no host has.
+    export E2E_ADDRESS=192.0.2.1
     {{ compose }} down --volumes --remove-orphans --timeout 10
     # SIGTERM: the plugin removes every job, ending its VMs, then exits.
     if [ -f '{{ plugin_pid }}' ]; then
