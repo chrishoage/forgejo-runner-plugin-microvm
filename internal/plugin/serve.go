@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -98,8 +99,9 @@ func serveCmd(getenv func(string) string) int {
 	return 0
 }
 
-// logConfig logs the config file read, or that there was none, and every
-// plugin-level setting in effect.
+// logConfig logs the config file read, or that there was none, every
+// plugin-level setting in effect, and each profile, default always among
+// them.
 func logConfig(log *slog.Logger, cfg *config.Config) {
 	if cfg.File == "" {
 		log.Info("no config file: every setting takes its built-in value", "path", config.DefaultPath)
@@ -112,6 +114,15 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory)
+	names := slices.Sorted(maps.Keys(cfg.Profiles))
+	if _, ok := cfg.Profiles[config.DefaultProfile]; !ok {
+		names = append([]string{config.DefaultProfile}, names...)
+	}
+	for _, name := range names {
+		p, _ := cfg.Profiles.Lookup(name)
+		_, defined := cfg.Profiles[name]
+		log.Info("profile", "name", name, "defined", defined, "cpus", p.CPUs, "memory_mib", p.MemoryMiB, "scratch_gib", p.ScratchGiB)
+	}
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg *config.Config) error {
@@ -162,6 +173,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config) error {
 		JobBinary: jobBinary,
 		MkfsExt4:  mkfs,
 		Agent:     agent,
+		Profiles:  cfg.Profiles,
 		Cache:     cache,
 		Launcher:  joblaunch.New(log),
 	})

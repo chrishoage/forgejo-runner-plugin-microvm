@@ -146,7 +146,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 
 ### The workflow
 
-- **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, one `run: echo …` step that exits 0, triggered by `workflow_dispatch`.** It is the simplest real workflow. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
+- **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
 
 ### The test image
 

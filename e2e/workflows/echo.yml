@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# The simplest real workflow: one job, one step. `just e2e run` pushes it to
-# the harness, and the slice's protocol test reads this same file.
+# The simplest real workflow: one job, whose label names no profile. `just
+# e2e run` pushes it to the harness, and the protocol test reads this same
+# file. The second step prints the VM's shape, which the protocol test checks
+# against the built-in profile; its line must stay cmd/protocol_test.go's
+# shapeStep.
 name: echo
 
 on:
@@ -12,3 +15,5 @@ jobs:
     runs-on: microvm
     steps:
       - run: echo "hello from runner-microvm e2e"
+      - run: |
+          echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"

@@ -26,28 +26,38 @@ import (
 const testImage = "docker.io/library/alpine:3.24"
 
 // serve starts srv on a fresh unix socket and returns a client connection
-// to it. The server stops when the test ends.
+// to it. The server stops when the test ends. It binds and connects through
+// the open directory, as the plugin does, so the socket's path may outgrow
+// bind and connect's 107 bytes: t.TempDir holds the test's name, and the
+// host's temporary directory can be long.
 func serve(t *testing.T, srv *Server) *grpc.ClientConn {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "plugin.sock")
-	lis, err := new(net.ListenConfig).Listen(t.Context(), "unix", sock)
+	dir := t.TempDir()
+	lis, closeLis, err := listen(t.Context(), filepath.Join(dir, "plugin.sock"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := openSockDir(dir)
+	if err != nil {
+		closeLis()
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- Serve(ctx, lis, srv) }()
-	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() {
-		_ = conn.Close()
 		cancel()
 		if err := <-served; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
+		closeLis()
+		_ = d.Close()
 	})
+	conn, err := grpc.NewClient("unix://"+d.path("plugin.sock"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -122,7 +132,6 @@ func TestCreateRefuses(t *testing.T) {
 	for name, req := range map[string]*pluginv1alpha.CreateRequest{
 		"no image":        {},
 		"container image": {Image: testImage, LabelArg: testImage},
-		"label options":   {LabelArg: testImage + ";profile=big"},
 		"services":        {LabelArg: testImage, Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
