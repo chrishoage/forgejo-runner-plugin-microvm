@@ -17,6 +17,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // An image of one layer holding a single statically linked program, with no
@@ -170,8 +172,10 @@ func TestGuestKeepsTheImagesDirectories(t *testing.T) {
 	}
 }
 
-// A VM whose agent never answers fails Start once the ready timeout has
-// passed, naming the VM and the timeout, and the job is still removed.
+// A VM whose agent never answers fails Start with FailedPrecondition once
+// the ready timeout has passed, naming the VM and the timeout, then its
+// console's last lines, which the agent's stderr ends; the job is still
+// removed (VM-8).
 // The plugin is built with a ready timeout of 10 s, not the shipped 30 s,
 // through the test-only link-time seam (internal/plugin's
 // testReadyTimeout); the shipped timeout is a constant no config can change.
@@ -204,8 +208,10 @@ func TestSilentAgentFailsStart(t *testing.T) {
 	begin := time.Now()
 	err = v.start(ctx)
 	took := time.Since(begin)
-	if err == nil || !strings.Contains(err.Error(), "VM silent: the agent did not answer within "+ready.String()) {
-		t.Fatalf("Start = %v, want the ready timeout", err)
+	msg := status.Convert(err).Message()
+	if status.Code(err) != codes.FailedPrecondition || !strings.HasPrefix(msg, "VM silent: the agent did not answer within "+ready.String()+"\n") ||
+		!strings.Contains(msg, "\nconsole:\n") || !strings.HasSuffix(msg, "\nsilentagent: started; it never answers") {
+		t.Fatalf("Start = %v, want FailedPrecondition: the ready timeout, then the console's last lines", err)
 	}
 	if took < ready || took > ready+30*time.Second {
 		t.Errorf("Start failed after %v, want just over %v", took, ready)

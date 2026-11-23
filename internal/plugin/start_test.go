@@ -203,19 +203,48 @@ func TestStartUnknownJob(t *testing.T) {
 	wantCode(t, err, codes.NotFound)
 }
 
-// Every failed Start leaves no job process behind, and its error names the
-// cause (PROTO-10, VM-8).
+// What a failed Start's error carries of a VM that wrote bootLog and
+// bootConsole: under their headings, the last 20 lines of each, at most
+// their last 4 KiB, with their newlines (PROTO-10, VM-8). The VM log's 4
+// KiB start inside its sixth line, which is cut, and its last 20 lines are
+// all of those; the console's 4 KiB hold all 25 of its lines, of which the
+// last 20 are kept.
+var bootOutput = "\nVM log:\n" + bootLog[len(bootLog)-4096:len(bootLog)-1] +
+	"\nconsole:\n" + bootConsole[strings.Index(bootConsole, "console line 6\n"):len(bootConsole)-1]
+
+// Every failed Start fails with FailedPrecondition, since the runner reads
+// Unavailable as the plugin being gone, and its error names the cause
+// first, with the VM's last output once the VM got as far as booting
+// (PROTO-10, VM-8). It leaves no job process behind, and the job is still
+// removed.
 func TestStartFails(t *testing.T) {
 	t.Parallel()
 	for name, tt := range map[string]struct {
 		cache    *fakeCache
 		launcher *fakeLauncher
-		want     string
+		want     func(srv *Server, id string) string
 	}{
-		"pull":              {&fakeCache{err: errors.New("manifest unknown")}, &fakeLauncher{}, "image " + testImage + ": manifest unknown"},
-		"launch":            {&fakeCache{}, &fakeLauncher{err: errors.New("exec format error")}, "job process: exec format error"},
-		"VM exits":          {&fakeCache{}, &fakeLauncher{does: exitsDuringBoot}, "exited during boot with code 1; console: Kernel panic"},
-		"agent never ready": {&fakeCache{}, &fakeLauncher{does: hangs}, "the agent did not answer within"},
+		"pull": {&fakeCache{err: errors.New("manifest unknown")}, &fakeLauncher{}, func(*Server, string) string {
+			return "image " + testImage + ": manifest unknown"
+		}},
+		"launch": {&fakeCache{}, &fakeLauncher{err: errors.New("exec format error")}, func(*Server, string) string {
+			return "job process: exec format error"
+		}},
+		"network": {&fakeCache{}, &fakeLauncher{does: networkFails}, func(*Server, string) string {
+			return "network: cannot reserve gateway IP"
+		}},
+		"scratch disk": {&fakeCache{}, &fakeLauncher{does: scratchFails}, func(srv *Server, id string) string {
+			return "scratch disk: " + filepath.Join(srv.cfg.Dirs.State, "jobs", id, "0", "scratch.ext4") + ": no space left on device"
+		}},
+		"VM exits": {&fakeCache{}, &fakeLauncher{does: exitsDuringBoot}, func(*Server, string) string {
+			return "VM job exited during boot (1)" + bootOutput
+		}},
+		"agent never ready": {&fakeCache{}, &fakeLauncher{does: hangs}, func(*Server, string) string {
+			return "VM job: the agent did not answer within 200ms" + bootOutput
+		}},
+		"job process exits": {&fakeCache{}, &fakeLauncher{does: exitsSilently}, func(*Server, string) string {
+			return "VM job: its job process exited during boot" + bootOutput
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -224,9 +253,8 @@ func TestStartFails(t *testing.T) {
 			c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
 			id := create(t, c)
 			_, err := start(testContext(t), c, id)
-			wantCode(t, err, codes.Unavailable)
-			if !strings.Contains(status.Convert(err).Message(), tt.want) {
-				t.Errorf("error %q does not name %q", status.Convert(err).Message(), tt.want)
+			if want := tt.want(srv, id); status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != want {
+				t.Errorf("Start = %v; want FailedPrecondition: %q", err, want)
 			}
 			if tt.launcher.alive() != 0 {
 				t.Error("a failed Start left its job process running")
@@ -238,19 +266,124 @@ func TestStartFails(t *testing.T) {
 	}
 }
 
-// A job network that fails to start fails Start with FailedPrecondition,
-// naming the network, and leaves no job process behind.
-func TestStartFailsOnTheNetwork(t *testing.T) {
+// A job process that fails on the job spec, which only the plugin's bug can
+// cause, fails Start with Internal, not FailedPrecondition, naming the spec.
+func TestStartFailsOnThePluginsBug(t *testing.T) {
 	t.Parallel()
-	launcher := &fakeLauncher{does: networkFails}
+	launcher := &fakeLauncher{does: specUnreadable}
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, launcher)))
-	_, err := start(testContext(t), c, create(t, c))
-	wantCode(t, err, codes.FailedPrecondition)
-	if msg := status.Convert(err).Message(); !strings.Contains(msg, "network: cannot reserve gateway IP") {
-		t.Errorf("error %q does not name the network", msg)
+	id := create(t, c)
+	_, err := start(testContext(t), c, id)
+	if want := "read the job spec: unexpected EOF"; status.Code(err) != codes.Internal || status.Convert(err).Message() != want {
+		t.Errorf("Start = %v; want Internal: %q", err, want)
 	}
 	if launcher.alive() != 0 {
 		t.Error("a failed Start left its job process running")
+	}
+	if _, err := c.Remove(testContext(t), &pluginv1alpha.RemoveRequest{EnvironmentId: id}); err != nil {
+		t.Fatalf("Remove after a failed Start: %v", err)
+	}
+}
+
+// A Start whose stream the runner cancels, or whose deadline passes, fails
+// with its context's code, while pulling and while booting, and leaves no
+// job process behind. (A Start that Remove ends fails with Canceled:
+// TestRemoveWhileACancelledCallUnwinds.)
+func TestCancelledStartFailsWithItsContextsCode(t *testing.T) {
+	t.Parallel()
+	for name, tt := range map[string]struct {
+		ctx  func(context.Context) (context.Context, context.CancelFunc)
+		want codes.Code
+	}{
+		"cancelled": {context.WithCancel, codes.Canceled},
+		"deadline": {func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, time.Second)
+		}, codes.DeadlineExceeded},
+	} {
+		for stage, cache := range map[string]*fakeCache{
+			"pulling": {block: true, entered: make(chan string, 1)},
+			"booting": {},
+		} {
+			t.Run(name+" "+stage, func(t *testing.T) {
+				t.Parallel()
+				launcher := &fakeLauncher{does: hangs}
+				srv := newTestServer(t, cache, launcher)
+				id := createOn(t, srv, testImage)
+				ctx, cancel := tt.ctx(testContext(t))
+				defer cancel()
+				stream := &startStream{ctx: ctx}
+				started := make(chan error, 1)
+				go func() { started <- srv.Start(&pluginv1alpha.StartRequest{EnvironmentId: id}, stream) }()
+				if cache.block {
+					within(t, cache.entered, "Start reaching the image cache")
+				} else {
+					waitFor(t, "the job process's launch", func() bool { return launcher.launched() == 1 })
+				}
+				if tt.want == codes.Canceled {
+					cancel()
+				}
+				if err := within(t, started, "Start's return"); status.Code(err) != tt.want {
+					t.Errorf("Start = %v, want %v", err, tt.want)
+				}
+				if launcher.alive() != 0 {
+					t.Error("the cancelled Start left its job process running")
+				}
+			})
+		}
+	}
+}
+
+// waitFor waits up to 10 s for cond, failing t if it never holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// vmOutput keeps, of a VM's log and console, the last 20 lines of the last
+// 4 KiB of each, with their newlines and without a trailing one, less any
+// invalid UTF-8 and carriage returns, and leaves out an empty one's
+// heading.
+func TestVMOutput(t *testing.T) {
+	t.Parallel()
+	for name, tt := range map[string]struct{ log, console, want string }{
+		"both":           {"a\nb\n", "c\n", "\nVM log:\na\nb\nconsole:\nc"},
+		"neither":        {"", "\n", ""},
+		"only the log":   {"a", "", "\nVM log:\na"},
+		"only console":   {"", "panic\n\n", "\nconsole:\npanic"},
+		"CRLF":           {"", "a\r\nb\r\n", "\nconsole:\na\nb"},
+		"invalid UTF-8":  {"", "\x80bad \xffbytes", "\nconsole:\nbad bytes"},
+		"21 lines":       {"", strings.Repeat("x\n", 20) + "y\n", "\nconsole:\n" + strings.Repeat("x\n", 19) + "y"},
+		"over 4 KiB":     {strings.Repeat("z", 5000), "", "\nVM log:\n" + strings.Repeat("z", 4096)},
+		"20 blank lines": {"", "a\n" + strings.Repeat("\n", 20) + "b", "\nconsole:\n" + strings.Repeat("\n", 19) + "b"},
+		"exactly 4 KiB":  {"", strings.Repeat("q", 4095) + "\n", "\nconsole:\n" + strings.Repeat("q", 4095)},
+		"only newlines":  {"\n\n\n", "", ""},
+	} {
+		if got := vmOutput(tt.log, tt.console); got != tt.want {
+			t.Errorf("%s: vmOutput = %q, want %q", name, got, tt.want)
+		}
+	}
+}
+
+// tail reads the last 4 KiB of a file; a missing file has none.
+func TestTail(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	long := filepath.Join(dir, "long")
+	content := strings.Repeat("0123456789", 500)
+	if err := os.WriteFile(long, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := tail(long); got != content[len(content)-4096:] {
+		t.Errorf("tail of 5000 bytes = %d bytes, want the last 4096", len(got))
+	}
+	if got := tail(filepath.Join(dir, "missing")); got != "" {
+		t.Errorf("tail of a missing file = %q", got)
 	}
 }
 
@@ -356,7 +489,7 @@ func TestStartAfterAFailedStart(t *testing.T) {
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, launcher)))
 	id := create(t, c)
 	_, err := start(testContext(t), c, id)
-	wantCode(t, err, codes.Unavailable)
+	wantCode(t, err, codes.FailedPrecondition)
 	_, err = start(testContext(t), c, id)
 	wantCode(t, err, codes.FailedPrecondition)
 	if msg := status.Convert(err).Message(); !strings.Contains(msg, "failed to start earlier") || !strings.Contains(msg, "exec format error") {

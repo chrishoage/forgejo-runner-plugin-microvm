@@ -77,8 +77,10 @@ func Main(args []string) int {
 	}
 }
 
-// The most of a console or VM log file a VMExited carries.
-const tailBytes = 300
+// The most of a console or VM log file a VMExited carries: what the
+// plugin's error for the VM's exit keeps, its last 20 lines, is at most
+// this much too (PROTO-10, VM-8).
+const tailBytes = 4 << 10
 
 // maxSpec bounds the job spec read from the control channel.
 const maxSpec = 1 << 20
@@ -144,10 +146,10 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, log *s
 func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *thread, log *slog.Logger) error {
 	spec := &jobv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
-		return fail(out, fmt.Errorf("read the job spec: %w", err))
+		return failBug(out, fmt.Errorf("read the job spec: %w", err))
 	}
 	if n := len(spec.GetVms()); n != 1 {
-		return fail(out, fmt.Errorf("the job spec has %d VMs; a job has exactly one, the job's container", n))
+		return failBug(out, fmt.Errorf("the job spec has %d VMs; a job has exactly one, the job's container", n))
 	}
 	log = log.With("job", spec.GetJob())
 	network, links, err := startNetwork(spec, log)
@@ -168,7 +170,7 @@ func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *th
 	v := spec.GetVms()[0]
 	code, err := runVM(ctx, spec, v, links[0], live, th, out, log)
 	if err != nil {
-		return fail(out, fmt.Errorf("VM %s: %w", v.GetName(), err))
+		return fail(out, err)
 	}
 	log.Info("VM exited", "vm", v.GetName(), "exit_code", code)
 	return send(out, &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
@@ -238,10 +240,22 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 // fd 3 and link, its VM's end of its frame socket, as its fd 4, reports
 // VMStarted, and waits for it to exit. It returns the VM child's exit code,
 // 128+n when signal n ended it.
+//
+// Its error names the cause first, as Start's error shows it (PROTO-10):
+// the scratch disk, whose path names its VM's directory, or the VM.
 func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
 	if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
-		return 0, fmt.Errorf("scratch disk %s: %w", v.GetScratchDisk(), err)
+		return 0, fmt.Errorf("scratch disk: %s: %w", v.GetScratchDisk(), err)
 	}
+	code, err := startVM(ctx, spec, v, link, live, th, out, log)
+	if err != nil {
+		return 0, fmt.Errorf("VM %s: %w", v.GetName(), err)
+	}
+	return code, nil
+}
+
+// startVM is runVM once the VM's scratch disk is made.
+func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
 	childSpec, err := specFile(&vmv1.Spec{
 		LibDir:      spec.GetLibDir(),
 		Cpus:        v.GetCpus(),
@@ -366,8 +380,9 @@ func specFile(spec *vmv1.Spec) (*os.File, error) {
 	return f, nil
 }
 
-// tail returns the end of the file at path, at most tailBytes; a file that
-// can't be read has an empty tail.
+// tail returns the end of the file at path, at most tailBytes, less a
+// character the cut splits or any other invalid UTF-8, which a proto string
+// can't carry; a file that can't be read has an empty tail.
 func tail(path string) string {
 	f, err := os.Open(path) //nolint:gosec // G304: a log file the plugin named in the spec
 	if err != nil {
@@ -380,7 +395,7 @@ func tail(path string) string {
 		}
 	}
 	b, _ := io.ReadAll(io.LimitReader(f, tailBytes))
-	return string(b)
+	return strings.ToValidUTF8(string(b), "")
 }
 
 // send writes one event to the control channel.
@@ -392,6 +407,13 @@ func send(out io.Writer, ev *jobv1.Event) error {
 // fail reports err as Failed, and returns it.
 func fail(out io.Writer, err error) error {
 	return errors.Join(err, send(out, &jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: err.Error()}}}))
+}
+
+// failBug is fail for a failure only a bug in the plugin can cause, a job
+// spec it can't read or that doesn't describe a job: its Failed event says
+// so, and Start reports it as Internal.
+func failBug(out io.Writer, err error) error {
+	return errors.Join(err, send(out, &jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: err.Error(), Bug: true}}}))
 }
 
 // errThreadGone is do's error once its thread has exited.

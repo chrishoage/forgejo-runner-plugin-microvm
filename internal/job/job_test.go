@@ -124,7 +124,8 @@ func afterNetworkUp(t *testing.T, events []*jobv1.Event) []*jobv1.Event {
 func TestRunReportsTheVMsExit(t *testing.T) {
 	t.Parallel()
 	spec := testJobSpec(t, fakeJobBinary(t, "echo booting; exit 3"))
-	console := strings.Repeat("x", 500) + "kernel panic"
+	// Longer than the tail, and cut in the middle of a character.
+	console := strings.Repeat("é", 2600) + "kernel panic!"
 	if err := os.WriteFile(spec.GetVms()[0].GetConsole(), []byte(console), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -146,8 +147,10 @@ func TestRunReportsTheVMsExit(t *testing.T) {
 	if x.GetLogTail() != "booting\n" {
 		t.Errorf("log tail = %q", x.GetLogTail())
 	}
-	if want := console[len(console)-300:]; x.GetConsoleTail() != want {
-		t.Errorf("console tail = %q, want the last 300 bytes", x.GetConsoleTail())
+	// The last 4 KiB, less the cut character's stray byte: a proto
+	// string must be valid UTF-8.
+	if want := console[len(console)-4095:]; x.GetConsoleTail() != want {
+		t.Errorf("console tail = %q, want the last 4 KiB without the cut character", x.GetConsoleTail())
 	}
 }
 
@@ -229,12 +232,13 @@ func TestRunFailsOnTheScratchDisk(t *testing.T) {
 			t.Parallel()
 			disk := tt.spec.GetVms()[0].GetScratchDisk()
 			events, err := runJob(t, tt.spec)
-			if err == nil || !strings.Contains(err.Error(), "scratch disk "+disk) || !strings.Contains(err.Error(), tt.want) {
+			if err == nil || !strings.Contains(err.Error(), "scratch disk: "+disk) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one naming the scratch disk and %q", err, tt.want)
 			}
 			events = afterNetworkUp(t, events)
-			if len(events) != 1 || !strings.Contains(events[0].GetFailed().GetReason(), "scratch disk") {
-				t.Fatalf("events = %v, want one Failed naming the scratch disk", events)
+			// The cause comes first, as Start's error shows it.
+			if len(events) != 1 || !strings.HasPrefix(events[0].GetFailed().GetReason(), "scratch disk: "+disk+": ") {
+				t.Fatalf("events = %v, want one Failed beginning with the scratch disk", events)
 			}
 			_, err = os.Stat(disk)
 			if tt.leftAlone && err != nil {
@@ -258,11 +262,13 @@ func TestRunFails(t *testing.T) {
 		spec      *jobv1.Spec
 		want      string
 		networkUp bool
+		// Only the plugin's bug can cause it: Start reports Internal.
+		bug bool
 	}{
-		"no VM child":   {missing, "start the VM child", true},
-		"two VMs":       {twoVMs, "2 VMs", false},
-		"no VM log":     {noLog, "VM log", true},
-		"no VMs at all": {&jobv1.Spec{}, "0 VMs", false},
+		"no VM child":   {missing, "start the VM child", true, false},
+		"two VMs":       {twoVMs, "2 VMs", false, true},
+		"no VM log":     {noLog, "VM log", true, false},
+		"no VMs at all": {&jobv1.Spec{}, "0 VMs", false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -275,6 +281,9 @@ func TestRunFails(t *testing.T) {
 			}
 			if len(events) != 1 || !strings.Contains(events[0].GetFailed().GetReason(), tt.want) {
 				t.Fatalf("events = %v, want one Failed naming %q", events, tt.want)
+			}
+			if got := events[0].GetFailed().GetBug(); got != tt.bug {
+				t.Errorf("Failed's bug = %v, want %v", got, tt.bug)
 			}
 		})
 	}
@@ -337,8 +346,8 @@ func TestRunRefusesAGarbledSpec(t *testing.T) {
 		t.Fatal("a garbled spec ran")
 	}
 	ev := &jobv1.Event{}
-	if err := protodelim.UnmarshalFrom(bufio.NewReader(&out), ev); err != nil || ev.GetFailed() == nil {
-		t.Fatalf("event = %v, %v; want Failed", ev, err)
+	if err := protodelim.UnmarshalFrom(bufio.NewReader(&out), ev); err != nil || !ev.GetFailed().GetBug() {
+		t.Fatalf("event = %v, %v; want Failed, as the plugin's bug", ev, err)
 	}
 }
 
