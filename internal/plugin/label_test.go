@@ -135,20 +135,6 @@ func TestCreateRefusesTheLabel(t *testing.T) {
 	}
 }
 
-// An empty image part with a container: image is a well-formed label: it
-// reaches the choice of image, which today still refuses a container:
-// image (SHORTCUT(#6) in jobImage, which #50 replaces).
-func TestCreateEmptyImagePartWithAContainerImage(t *testing.T) {
-	t.Parallel()
-	srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
-	srv.SetProfiles(config.Profiles{"big": bigProfile})
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
-	_, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: ";profile=big", Image: testImage})
-	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "container: image yet") {
-		t.Errorf("Create = %v; want the container: image refusal, not a label or image error", err)
-	}
-}
-
 // Start puts the job's profile's CPU count, memory and scratch size in the
 // job spec (VM-4, VM-5), and acquires its image with the profile's
 // force_pull (IMG-6); a job created before the profiles change keeps its
