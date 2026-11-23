@@ -196,16 +196,21 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 	if err != nil {
 		return err
 	}
+	ready, err := parseReadyTimeout(testReadyTimeout)
+	if err != nil {
+		return err
+	}
 	srv, err := NewServer(log, Config{
-		Dirs:      dirs,
-		LibDir:    libDir,
-		JobBinary: jobBinary,
-		MkfsExt4:  mkfs,
-		Agent:     agent,
-		Profiles:  cfg.Profiles,
-		Cache:     cache,
-		Launcher:  launcher,
-		Arch:      arch,
+		Dirs:         dirs,
+		LibDir:       libDir,
+		JobBinary:    jobBinary,
+		MkfsExt4:     mkfs,
+		Agent:        agent,
+		Profiles:     cfg.Profiles,
+		Cache:        cache,
+		Launcher:     launcher,
+		Arch:         arch,
+		ReadyTimeout: ready,
 	})
 	if err != nil {
 		return err
@@ -233,6 +238,28 @@ func serveWithReloads(ctx context.Context, log *slog.Logger, lis net.Listener, s
 	err := Serve(ctx, lis, srv)
 	// Every job's VM ends with the plugin.
 	return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
+}
+
+// testReadyTimeout is the ready timeout, as a duration string, that a test's
+// own build of the plugin sets with -ldflags -X, so that the test of a VM
+// whose agent never answers needn't wait the real 30 s. It is empty in every
+// shipped binary, which has no config key or flag for it.
+var testReadyTimeout string
+
+// parseReadyTimeout returns testReadyTimeout's duration, or zero, which
+// NewServer takes as the default, when it is empty.
+func parseReadyTimeout(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("the test-only ready timeout: %w", err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("the test-only ready timeout %q is not positive", s)
+	}
+	return d, nil
 }
 
 // lookMkfs finds the host's mkfs.ext4 on PATH. The job process formats each

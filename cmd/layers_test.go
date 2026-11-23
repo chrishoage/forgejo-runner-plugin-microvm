@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -188,11 +189,23 @@ echo "layers ok: $((6 * 7))"
 // (GST-2).
 func TestImageWithoutMountPointsBoots(t *testing.T) {
 	base, host := baseImage(t)
+	img := imageWithout(t, base, "proc", "sys", "dev")
+	expectOutput(t, writeWorkflow(t, step("bare", `
+test -r /proc/self/status
+test -d /sys/kernel
+test -c /dev/null
+echo "mount points ok: $((6 * 7))"
+`)), pushImage(t, host, "no-mount-points", img), "mount points ok: 42")
+}
+
+// imageWithout returns base's files as one layer, less each path in drop
+// and everything below it, with base's config.
+func imageWithout(t *testing.T, base v1.Image, drop ...string) v1.Image {
+	t.Helper()
 	cfg, err := base.ConfigFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The base's files, less proc, sys and dev, as one layer.
 	rc := mutate.Extract(base)
 	defer func() { _ = rc.Close() }()
 	var buf bytes.Buffer
@@ -206,8 +219,8 @@ func TestImageWithoutMountPointsBoots(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		top, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), "/"), "/")
-		if top == "proc" || top == "sys" || top == "dev" {
+		name := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), "/"), "/")
+		if slices.ContainsFunc(drop, func(d string) bool { return name == d || strings.HasPrefix(name, d+"/") }) {
 			continue
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
@@ -220,24 +233,24 @@ func TestImageWithoutMountPointsBoots(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	b := buf.Bytes()
-	l, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	img, err := mutate.AppendLayers(empty.Image, l)
+	img, err := mutate.AppendLayers(empty.Image, bytesLayer(t, buf.Bytes()))
 	if err == nil {
 		img, err = mutate.Config(img, cfg.Config)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectOutput(t, writeWorkflow(t, step("bare", `
-test -r /proc/self/status
-test -d /sys/kernel
-test -c /dev/null
-echo "mount points ok: $((6 * 7))"
-`)), pushImage(t, host, "no-mount-points", img), "mount points ok: 42")
+	return img
+}
+
+// bytesLayer returns the tar b as a layer.
+func bytesLayer(t *testing.T, b []byte) v1.Layer {
+	t.Helper()
+	l, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
 }
 
 // A step can't write a layer through the layer share, also after
