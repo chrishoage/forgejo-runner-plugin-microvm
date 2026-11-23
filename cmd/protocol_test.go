@@ -7,6 +7,7 @@ package cmd_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,8 +110,9 @@ func buildPlugin(t *testing.T) string {
 	return bin
 }
 
-// startPlugin runs the plugin by path, with RUNNER_MICROVM_DIR set to a
-// fresh directory, and returns its listen socket once it exists. On
+// startPlugin runs the plugin's serve by path, with RUNNER_MICROVM_CONFIG
+// naming a config file that puts its directories in a fresh directory, and
+// returns its listen socket once it exists. On
 // cleanup it stops the plugin with SIGTERM, which removes every job; a
 // plugin still running after that, or at the timeout, is killed with each
 // job process's group (killWithJobs).
@@ -121,10 +123,18 @@ func startPlugin(t *testing.T, bin string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sock := filepath.Join(base, "runtime", "runner-microvm.sock")
+	cfg := filepath.Join(base, "config.yaml")
+	content := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"))
+	if err := os.WriteFile(cfg, []byte(content), 0o600); err != nil {
+		_ = os.RemoveAll(base)
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	var log syncBuffer
-	cmd := exec.CommandContext(ctx, bin)
-	cmd.Env = append(os.Environ(), "RUNNER_MICROVM_DIR="+base)
+	cmd := exec.CommandContext(ctx, bin, "serve")
+	cmd.Env = append(os.Environ(), "RUNNER_MICROVM_CONFIG="+cfg)
 	cmd.Stdout, cmd.Stderr = &log, &log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { killWithJobs(cmd.Process.Pid); return nil }
@@ -151,7 +161,6 @@ func startPlugin(t *testing.T, bin string) string {
 			t.Error(err)
 		}
 	})
-	sock := filepath.Join(base, "runtime", "runner-microvm.sock")
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {

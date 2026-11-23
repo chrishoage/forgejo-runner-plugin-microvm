@@ -10,24 +10,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
 )
 
-// envDirs returns the directories the plugin's startup derives from
-// RUNNER_MICROVM_DIR=base.
-func envDirs(t *testing.T, base string) Dirs {
-	t.Helper()
-	dirs, err := DirsFromEnv(func(k string) string {
-		if k == BaseDirEnv {
-			return base
-		}
-		return ""
-	})
-	if err != nil {
-		t.Fatal(err)
+// testDirs returns directories under base: <base>/state, <base>/cache and
+// <base>/runtime, with the listen socket in the runtime directory.
+func testDirs(base string) Dirs {
+	runtime := filepath.Join(base, "runtime")
+	return Dirs{
+		State:   filepath.Join(base, "state"),
+		Cache:   filepath.Join(base, "cache"),
+		Runtime: runtime,
+		Listen:  filepath.Join(runtime, "runner-microvm.sock"),
 	}
-	return dirs
+}
+
+// configOf returns a config whose directories are dirs.
+func configOf(dirs Dirs) *config.Config {
+	return &config.Config{
+		Listen: dirs.Listen, StateDir: dirs.State, CacheDir: dirs.Cache, RuntimeDir: dirs.Runtime,
+		Profiles: map[string]config.Profile{},
+	}
 }
 
 // mustLock takes dirs' locks, which the test holds until it ends.
@@ -91,12 +96,12 @@ func TestSecondPluginFailsNamingTheSharedDirectory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tmp := t.TempDir()
-			first := envDirs(t, filepath.Join(tmp, "first"))
+			first := testDirs(filepath.Join(tmp, "first"))
 			if tc.name == "listen" {
 				// A listen-socket directory of its own, to share.
 				first.Listen = filepath.Join(tmp, "first", "listen", "runner-microvm.sock")
 			}
-			second := envDirs(t, filepath.Join(tmp, "second"))
+			second := testDirs(filepath.Join(tmp, "second"))
 			second.Listen = filepath.Join(tmp, "second", "listen", "runner-microvm.sock")
 			shared := tc.share(first, &second)
 			mustLock(t, first)
@@ -135,19 +140,18 @@ func TestSecondPluginFailsNamingTheSharedDirectory(t *testing.T) {
 // directories: a second startup on directories in use fails naming the state
 // directory, and writes nothing to them.
 //
-// It is not parallel: it sets RUNNER_MICROVM_DIR.
+// It is not parallel: it sets RUNNER_MICROVM_LIBDIR.
 func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "plugin")
-	dirs := envDirs(t, base)
+	dirs := testDirs(base)
 	mustLock(t, dirs)
 	before := map[string][]string{}
 	for _, d := range []string{dirs.State, dirs.Cache, dirs.Runtime} {
 		before[d] = listDir(t, d)
 	}
-	t.Setenv(BaseDirEnv, base)
 	t.Setenv(LibDirEnv, "")
 
-	err := run(t.Context(), discardLog())
+	err := run(t.Context(), discardLog(), configOf(dirs))
 	if err == nil {
 		t.Fatal("the second startup ran")
 	}
@@ -164,14 +168,13 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 // The plugin refuses to start without mkfs.ext4, naming it, before it
 // writes anything (VM-5).
 //
-// It is not parallel: it sets PATH and RUNNER_MICROVM_DIR.
+// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
 func TestStartupNeedsMkfsExt4(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "plugin")
-	t.Setenv(BaseDirEnv, base)
 	t.Setenv(LibDirEnv, "")
 	t.Setenv("PATH", t.TempDir())
 
-	err := run(t.Context(), discardLog())
+	err := run(t.Context(), discardLog(), configOf(testDirs(base)))
 	if err == nil || !strings.Contains(err.Error(), "mkfs.ext4") {
 		t.Fatalf("err = %v, want one naming mkfs.ext4", err)
 	}
@@ -202,7 +205,7 @@ func (d Dirs) withoutShared(shared string) Dirs {
 // lets the next plugin start, and never deletes a lock file.
 func TestLockDirsLayout(t *testing.T) {
 	t.Parallel()
-	dirs := envDirs(t, filepath.Join(t.TempDir(), "plugin"))
+	dirs := testDirs(filepath.Join(t.TempDir(), "plugin"))
 	l, err := lockDirs(dirs)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +225,7 @@ func TestLockDirsLayout(t *testing.T) {
 
 	// With a listen-socket directory of its own, it is locked too.
 	tmp := t.TempDir()
-	other := envDirs(t, filepath.Join(tmp, "other"))
+	other := testDirs(filepath.Join(tmp, "other"))
 	other.Listen = filepath.Join(tmp, "listen", "runner-microvm.sock")
 	l2 := mustLock(t, other)
 	if n := len(l2.files); n != 4 {
@@ -230,6 +233,56 @@ func TestLockDirsLayout(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "listen", lockFile)); err != nil {
 		t.Errorf("listen-socket directory lock file: %v", err)
+	}
+}
+
+// A listen-socket directory that a symlink makes the runtime directory, as
+// config.Load sees it, takes no lock of its own either: locking the runtime
+// directory's lock file again would fail against the plugin's own lock.
+func TestLockDirsListenSymlinkedToRuntime(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		// link places a symlink under base and returns dirs that reach the
+		// runtime directory through it.
+		link func(t *testing.T, base string) Dirs
+	}{
+		{"listen through a link", func(t *testing.T, base string) Dirs {
+			dirs := testDirs(base)
+			if err := os.Symlink(dirs.Runtime, filepath.Join(base, "link")); err != nil {
+				t.Fatal(err)
+			}
+			dirs.Listen = filepath.Join(base, "link", "runner-microvm.sock")
+			return dirs
+		}},
+		{"runtime through a link", func(t *testing.T, base string) Dirs {
+			dirs := testDirs(base)
+			if err := os.Mkdir(dirs.Runtime, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(dirs.Runtime, filepath.Join(base, "link")); err != nil {
+				t.Fatal(err)
+			}
+			dirs.Runtime = filepath.Join(base, "link")
+			return dirs
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			dirs := tc.link(t, base)
+			l := mustLock(t, dirs)
+			if n := len(l.files); n != 3 {
+				t.Errorf("took %d locks, want 3: the listen socket is in the runtime directory", n)
+			}
+			// The runtime directory is still locked against another plugin.
+			other := testDirs(filepath.Join(t.TempDir(), "other"))
+			other.Runtime = filepath.Join(base, "runtime")
+			if l2, err := lockDirs(other); err == nil {
+				_ = l2.Close()
+				t.Error("another plugin locked the runtime directory")
+			}
+		})
 	}
 }
 
@@ -242,7 +295,7 @@ func TestLockDirsLayout(t *testing.T) {
 // once and holds them for its whole life, so there the window is harmless.
 func TestJobProcessInheritsNoLock(t *testing.T) {
 	tmp := t.TempDir()
-	dirs := envDirs(t, filepath.Join(tmp, "plugin"))
+	dirs := testDirs(filepath.Join(tmp, "plugin"))
 	dirs.Listen = filepath.Join(tmp, "listen", "runner-microvm.sock")
 	l, err := lockDirs(dirs)
 	if err != nil {

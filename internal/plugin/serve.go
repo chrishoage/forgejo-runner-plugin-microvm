@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/imagecache"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
@@ -30,32 +33,94 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/payload"
 )
 
-// Main runs the plugin until SIGINT or SIGTERM, and returns its exit code.
-func Main(args []string) int {
-	log := logging.Setup(Name)
-	if len(args) > 0 {
-		log.Error("runner-microvm takes no arguments yet", "args", args)
+// usage is what runner-microvm prints for no subcommand, an unknown one, or
+// an argument.
+const usage = `usage: runner-microvm <command>
+
+Commands:
+  serve   run the plugin until SIGINT or SIGTERM
+  check   validate the config file, print every error, and exit
+
+The config file is ` + config.DefaultPath + `, or the file ` + config.PathEnv + ` names.
+`
+
+// Main runs the subcommand in args, reading the environment through getenv,
+// and returns its exit code: serve runs the plugin until SIGINT or SIGTERM;
+// check validates the config file and exits 0, or 1 after printing every
+// error. Anything else prints the usage and exits 2.
+func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	if len(args) != 1 {
+		_, _ = io.WriteString(stderr, usage)
 		return 2
 	}
+	switch args[0] {
+	case "serve":
+		return serveCmd(getenv)
+	case "check":
+		return checkCmd(stdout, stderr, getenv)
+	default:
+		_, _ = io.WriteString(stderr, usage)
+		return 2
+	}
+}
+
+// checkCmd is check: it validates the config file, and reports to stdout that it is valid,
+// or every error to stderr.
+func checkCmd(stdout, stderr io.Writer, getenv func(string) string) int {
+	cfg, err := config.Load(getenv)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if cfg.File == "" {
+		_, _ = fmt.Fprintf(stdout, "no config file at %s: every setting takes its built-in value\n", config.DefaultPath)
+	} else {
+		_, _ = fmt.Fprintf(stdout, "config %s: valid\n", cfg.File)
+	}
+	return 0
+}
+
+// serveCmd is serve: it runs the plugin until SIGINT or SIGTERM.
+func serveCmd(getenv func(string) string) int {
+	log := logging.Setup(Name)
+	cfg, err := config.Load(getenv)
+	if err != nil {
+		log.Error("stopped: invalid config", "err", err)
+		return 1
+	}
+	logConfig(log, cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, log); err != nil {
+	if err := run(ctx, log, cfg); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
 	return 0
 }
 
-func run(ctx context.Context, log *slog.Logger) error {
+// logConfig logs the config file read, or that there was none, and every
+// plugin-level setting in effect.
+func logConfig(log *slog.Logger, cfg *config.Config) {
+	if cfg.File == "" {
+		log.Info("no config file: every setting takes its built-in value", "path", config.DefaultPath)
+	} else {
+		log.Info("read the config file", "path", cfg.File)
+	}
+	maxMemory := strconv.FormatUint(cfg.MaxMemoryMiB, 10)
+	if cfg.MaxMemoryMiB == 0 {
+		maxMemory = "0 (no limit)"
+	}
+	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
+		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory)
+}
+
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config) error {
 	// A missing host tool stops startup before anything is written.
 	mkfs, err := lookMkfs()
 	if err != nil {
 		return err
 	}
-	dirs, err := DirsFromEnv(os.Getenv)
-	if err != nil {
-		return err
-	}
+	dirs := dirsOf(cfg)
 	// The locks come before anything else writes to the directories, and
 	// are held until the plugin exits.
 	locks, err := lockDirs(dirs)

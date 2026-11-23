@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"golang.org/x/sys/unix"
 )
@@ -26,12 +27,14 @@ type dirLocks struct {
 // where they are missing, and takes an exclusive, non-blocking flock on a lock
 // file in each, in that order, before anything else is written to them. The
 // first one another process holds stops it with an error naming that
-// directory, and the locks it took are released. The listen-socket directory
-// takes no lock of its own when it is the runtime directory: two flocks on one
-// file through two opens in one process block each other.
+// directory, and the locks it took are released. A directory that is one
+// already locked, as the listen-socket directory may be the runtime directory,
+// takes no lock of its own: two flocks on one file through two opens in one
+// process block each other. Sameness is the directories' file identity, so a
+// symlink can't make one directory look like two, as it can't to config.Load.
 //
-// Checking that the directories are distinct is #8's, with the config keys
-// that make them choosable; under RUNNER_MICROVM_DIR they always are.
+// config.Load has already checked that the directories are distinct and
+// none is inside another, except the listen-socket directory.
 func lockDirs(dirs Dirs) (*dirLocks, error) {
 	type dir struct {
 		path string
@@ -39,28 +42,40 @@ func lockDirs(dirs Dirs) (*dirLocks, error) {
 	}
 	// The cache holds image configs, whose environment may carry values,
 	// so it is the plugin user's alone, like the state directory.
-	order := []dir{{dirs.State, 0o700}, {dirs.Cache, 0o700}, {dirs.Runtime, 0o755}}
-	if listen := filepath.Dir(dirs.Listen); filepath.Clean(listen) != filepath.Clean(dirs.Runtime) {
-		order = append(order, dir{listen, 0o755})
-	}
+	order := []dir{{dirs.State, 0o700}, {dirs.Cache, 0o700}, {dirs.Runtime, 0o755}, {filepath.Dir(dirs.Listen), 0o755}}
 	l := &dirLocks{}
+	var locked []os.FileInfo
 	for _, d := range order {
-		f, err := lockDir(d.path, d.mode)
+		fi, err := makeDir(d.path, d.mode)
+		if err != nil {
+			return nil, errors.Join(err, l.Close())
+		}
+		if slices.ContainsFunc(locked, func(o os.FileInfo) bool { return os.SameFile(o, fi) }) {
+			continue
+		}
+		f, err := lockDir(d.path)
 		if err != nil {
 			return nil, errors.Join(err, l.Close())
 		}
 		l.files = append(l.files, f)
+		locked = append(locked, fi)
 	}
 	return l, nil
 }
 
-// lockDir creates dir if it is missing and locks its lock file. The lock
-// file is opened close-on-exec, so no job process inherits it and keeps the
-// directory locked after the plugin dies.
-func lockDir(dir string, mode os.FileMode) (*os.File, error) {
+// makeDir creates dir if it is missing and returns its file info, through
+// any symlink.
+func makeDir(dir string, mode os.FileMode) (os.FileInfo, error) {
 	if err := os.MkdirAll(dir, mode); err != nil {
 		return nil, err
 	}
+	return os.Stat(dir)
+}
+
+// lockDir locks the lock file of dir, which exists. The lock file is opened
+// close-on-exec, so no job process inherits it and keeps the directory locked
+// after the plugin dies.
+func lockDir(dir string) (*os.File, error) {
 	path := filepath.Join(dir, lockFile)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|unix.O_CLOEXEC, 0o600) //nolint:gosec // G304: the lock file in the plugin's own directory
 	if err != nil {

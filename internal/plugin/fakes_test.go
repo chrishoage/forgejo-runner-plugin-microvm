@@ -31,10 +31,7 @@ import (
 func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Server {
 	t.Helper()
 	base := filepath.Join(t.TempDir(), strings.Repeat("d", 60), strings.Repeat("e", 60))
-	dirs, err := DirsFromEnv(func(string) string { return base })
-	if err != nil {
-		t.Fatal(err)
-	}
+	dirs := testDirs(base)
 	if err := os.MkdirAll(dirs.Runtime, 0o755); err != nil {
 		t.Fatal(err)
 	}

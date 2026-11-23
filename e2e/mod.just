@@ -32,9 +32,10 @@ online_timeout := "120"
 run_timeout := "300"
 
 # The plugin, built by `up` and run on the host with its directories under
-# .e2e/plugin, its pid and log beside them.
+# .e2e/plugin, set by its config file, with its pid and log beside them.
 plugin := justfile_directory() / "bin/runner-microvm"
 plugin_dir := state / "plugin"
+plugin_config := state / "plugin-config.yaml"
 plugin_pid := state / "plugin.pid"
 plugin_log := state / "plugin.log"
 
@@ -54,9 +55,20 @@ up: down
     # background, so an agent needs no second terminal. Its pid and log
     # are in .e2e/; `down` stops it.
     just --justfile '{{ justfile_directory() }}/justfile' build
-    RUNNER_MICROVM_DIR='{{ plugin_dir }}' setsid '{{ plugin }}' >'{{ plugin_log }}' 2>&1 </dev/null &
-    echo $! >'{{ plugin_pid }}'
+    # Its config file puts its directories under .e2e/plugin, with the
+    # listen socket in the runtime directory, which the runner's container
+    # mounts.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
+    {
+        echo "listen: unix://$sock"
+        echo "state_dir: {{ plugin_dir }}/state"
+        echo "cache_dir: {{ plugin_dir }}/cache"
+        echo "runtime_dir: {{ plugin_dir }}/runtime"
+    } >'{{ plugin_config }}'
+    export RUNNER_MICROVM_CONFIG='{{ plugin_config }}'
+    '{{ plugin }}' check
+    setsid '{{ plugin }}' serve >'{{ plugin_log }}' 2>&1 </dev/null &
+    echo $! >'{{ plugin_pid }}'
     deadline=$((SECONDS + 30))
     until [ -S "$sock" ]; do
         if ! kill -0 "$(cat '{{ plugin_pid }}')" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
