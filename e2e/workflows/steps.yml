@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Steps get the environment, user and working directory a workflow author
+# expects (GST-4 to GST-7). Each step checks its own expectation and exits
+# non-zero otherwise, so the workflow's success is the check. `just e2e run
+# steps` runs it in the harness, and the protocol test runs this same file
+# (docs/development.md, The local harness).
+name: steps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  steps:
+    runs-on: microvm
+    env:
+      JOB_VAR: job
+      OVERRIDDEN: job
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - name: env at job and step level
+        env:
+          STEP_VAR: step
+          OVERRIDDEN: step
+        run: |
+          set -eu
+          echo "JOB_VAR=$JOB_VAR STEP_VAR=$STEP_VAR OVERRIDDEN=$OVERRIDDEN"
+          test "$JOB_VAR" = job
+          test "$STEP_VAR" = step
+          test "$OVERRIDDEN" = step
+      - name: a step's env stays in its step
+        run: |
+          set -eu
+          test -z "${STEP_VAR+set}"
+          test "$OVERRIDDEN" = job
+      - name: a working-directory that exists
+        working-directory: /tmp
+        run: |
+          set -eu
+          pwd
+          test "$(pwd)" = /tmp
+      - name: a working-directory that doesn't exist yet
+        working-directory: not/yet/here
+        run: |
+          set -eu
+          pwd
+          case "$(pwd)" in
+          */not/yet/here) ;;
+          *) exit 1 ;;
+          esac
+          touch written-here
+      - id: produce
+        name: a step output
+        run: echo "greeting=hello from an earlier step" >>"$GITHUB_OUTPUT"
+      - name: the step output, read by a later step
+        env:
+          GREETING: ${{ steps.produce.outputs.greeting }}
+        run: |
+          set -eu
+          echo "greeting: $GREETING"
+          test "$GREETING" = "hello from an earlier step"
+      - name: a variable written to GITHUB_ENV
+        run: echo "FROM_GITHUB_ENV=set by an earlier step" >>"$GITHUB_ENV"
+      - name: the GITHUB_ENV variable, read by a later step
+        run: |
+          set -eu
+          echo "FROM_GITHUB_ENV: $FROM_GITHUB_ENV"
+          test "$FROM_GITHUB_ENV" = "set by an earlier step"
+      - name: the image's default user, root in e2e/image
+        run: |
+          set -eu
+          id
+          test "$(id -u)" = 0
+          test "$(id -un)" = root
