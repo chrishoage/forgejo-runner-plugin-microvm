@@ -656,3 +656,115 @@ func TestAttachRefusesAnUnknownMAC(t *testing.T) {
 		t.Error("the gateway's MAC attached")
 	}
 }
+
+// The marker check cmd/unreachable_test.go runs between two jobs' guests
+// tells a shared switch from separate ones: B broadcasts an ARP request
+// carrying bMarker as its sender address and waits for the gateway's
+// reply, then A does the same with aMarker. On one Network, A reads B's
+// request before the reply to its own; on two, it never does (NET-1).
+//
+// Attach returns before the switch has the port, and the switch floods a
+// broadcast only to the ports it has, so A first asks the gateway once:
+// its reply shows A's port is on the switch before B broadcasts, as a
+// booted guest's is.
+func TestARPMarkerShowsASharedSwitch(t *testing.T) {
+	t.Parallel()
+	aMarker, bMarker := netip.MustParseAddr("198.18.0.250"), netip.MustParseAddr("198.18.0.251")
+	for name, shared := range map[string]bool{"one network": true, "two networks": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var a, b net.Conn
+			bMAC := net.HardwareAddr{0x02, 0x00, 0xc6, 0x12, 0x00, 0x03}
+			if shared {
+				cfg := testConfig()
+				cfg.VMs = append(cfg.VMs, VM{netip.MustParseAddr("198.18.0.3"), bMAC})
+				n := startNetwork(t, cfg)
+				a, b = attachPeer(t, n, vmMAC), attachPeer(t, n, bMAC)
+			} else {
+				// As the plugin runs two jobs: the same addresses and MACs.
+				bMAC = vmMAC
+				a, b = attachPeer(t, startNetwork(t, testConfig()), vmMAC), attachPeer(t, startNetwork(t, testConfig()), vmMAC)
+			}
+			askGateway(t, a, vmMAC, aMarker)
+			askGateway(t, b, bMAC, bMarker)
+			seen := askGateway(t, a, vmMAC, aMarker)
+			if got := slices.Contains(seen, bMarker); got != shared {
+				t.Errorf("A saw B's marker: %v, want %v (A's ARP: %v)", got, shared, seen)
+			}
+		})
+	}
+}
+
+// startNetwork starts a job network with cfg and closes it on cleanup.
+func startNetwork(t *testing.T, cfg Config) *Network {
+	t.Helper()
+	n, err := New(cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := n.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return n
+}
+
+// attachPeer attaches the VM whose MAC is mac to n and returns its end of
+// the frame socket, closed on cleanup, which runs before n's.
+func attachPeer(t *testing.T, n *Network, mac net.HardwareAddr) net.Conn {
+	t.Helper()
+	vmEnd, err := n.Attach(mac)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.FileConn(vmEnd)
+	if err := errors.Join(err, vmEnd.Close()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// askGateway writes, from mac to every port of the switch, an ARP request
+// for the gateway carrying marker as its sender address, reads end's frames
+// until the gateway's reply to marker within 10 seconds, and returns the
+// sender and target addresses of every ARP packet it read before.
+func askGateway(t *testing.T, end net.Conn, mac net.HardwareAddr, marker netip.Addr) []netip.Addr {
+	t.Helper()
+	req := make([]byte, header.EthernetMinimumSize+header.ARPSize)
+	header.Ethernet(req).Encode(&header.EthernetFields{SrcAddr: tcpip.LinkAddress(mac), DstAddr: header.EthernetBroadcastAddress, Type: header.ARPProtocolNumber})
+	a := header.ARP(req[header.EthernetMinimumSize:])
+	a.SetIPv4OverEthernet()
+	a.SetOp(header.ARPRequest)
+	copy(a.HardwareAddressSender(), mac)
+	copy(a.ProtocolAddressSender(), marker.AsSlice())
+	copy(a.ProtocolAddressTarget(), gateway.AsSlice())
+	if _, err := end.Write(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := end.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var seen []netip.Addr
+	buf := make([]byte, 65536)
+	for {
+		n, err := end.Read(buf)
+		if err != nil {
+			t.Fatalf("no ARP reply to %s: %v (read before: %v)", marker, err, seen)
+		}
+		f := buf[:n]
+		if len(f) < header.EthernetMinimumSize+header.ARPSize || header.Ethernet(f).Type() != header.ARPProtocolNumber {
+			continue
+		}
+		p := header.ARP(f[header.EthernetMinimumSize:])
+		if !p.IsValid() {
+			continue
+		}
+		spa, tpa := netip.AddrFrom4([4]byte(p.ProtocolAddressSender())), netip.AddrFrom4([4]byte(p.ProtocolAddressTarget()))
+		if p.Op() == header.ARPReply && spa == gateway && tpa == marker {
+			return seen
+		}
+		seen = append(seen, spa, tpa)
+	}
+}
