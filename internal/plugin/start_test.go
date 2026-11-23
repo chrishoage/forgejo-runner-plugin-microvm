@@ -112,10 +112,15 @@ func TestStartBootsTheVM(t *testing.T) {
 	// list names it at its address; there is no search domain to carry.
 	wantBoot := &agentv1.BootConfig{
 		LayerDir: "/dev/.runner-microvm/layers", LayerTag: "layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
-		Network:   &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
-		Hostname:  "forgejo-actions-task-7-job-build",
-		Hosts:     []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
-		Image:     &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
+		Network:  &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
+		Hostname: "forgejo-actions-task-7-job-build",
+		Hosts:    []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
+		// The image's defaults for Exec, and the default PATH Create
+		// returns to the runner.
+		Image: &agentv1.Image{
+			Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}, User: "builder:staff", WorkingDir: "/src",
+			DefaultPath: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		},
 		VsockPort: 1024,
 		GuestDirs: []*agentv1.GuestDir{
 			{Path: "/var/run/act", Mode: 0o777}, {Path: "/opt/hostedtoolcache", Mode: 0o777}, {Path: "/tmp", Mode: 0o1777},

@@ -29,6 +29,10 @@ type Image struct {
 	// Env is the image config's environment, as KEY=VALUE in the image's
 	// order.
 	Env []string
+	// User is the image config's USER, empty when it sets none.
+	User string
+	// WorkingDir is the image config's WORKDIR, empty when it sets none.
+	WorkingDir string
 	// LinkDir is the VM's layer link directory, <cache>/jobs/<id>/<n>/:
 	// hard links to exactly the layers of the VM's image.
 	LinkDir string

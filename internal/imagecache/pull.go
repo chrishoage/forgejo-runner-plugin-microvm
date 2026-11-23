@@ -269,7 +269,10 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	// it until then.
 	c.useConfig(req.Job, r.digest)
 	c.log.Info("acquired", "job", req.Job, "vm", req.VM, "image", req.Ref, "digest", r.digest.String(), "layers", len(names))
-	return Image{Digest: r.digest.String(), Env: r.config.Config.Env, LinkDir: linkDir, Layers: names}, nil
+	return Image{
+		Digest: r.digest.String(), Env: r.config.Config.Env, User: r.config.Config.User, WorkingDir: r.config.Config.WorkingDir,
+		LinkDir: linkDir, Layers: names,
+	}, nil
 }
 
 // pullAndLink pulls the layers the cache lacks and links them. A layer

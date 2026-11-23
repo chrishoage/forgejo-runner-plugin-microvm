@@ -58,10 +58,12 @@ func pushTo(t *testing.T, host string, img v1.Image) string {
 	return ref
 }
 
-// Acquire returns the image's digest and environment.
+// Acquire returns the image's digest, environment, user and working
+// directory.
 func TestAcquireReturnsTheImage(t *testing.T) {
 	t.Parallel()
-	img, err := mutate.Config(image(t, headerLayer(t, file("f"))), v1.Config{Env: []string{"PATH=/usr/bin:/bin", "A=b"}})
+	img, err := mutate.Config(image(t, headerLayer(t, file("f"))),
+		v1.Config{Env: []string{"PATH=/usr/bin:/bin", "A=b"}, User: "builder:staff", WorkingDir: "/src"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +80,9 @@ func TestAcquireReturnsTheImage(t *testing.T) {
 	}
 	if strings.Join(got.Env, " ") != "PATH=/usr/bin:/bin A=b" {
 		t.Errorf("env = %q", got.Env)
+	}
+	if got.User != "builder:staff" || got.WorkingDir != "/src" {
+		t.Errorf("user %q, working directory %q, want builder:staff and /src", got.User, got.WorkingDir)
 	}
 }
 
