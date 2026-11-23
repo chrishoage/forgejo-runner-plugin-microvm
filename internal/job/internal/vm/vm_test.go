@@ -5,6 +5,7 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"syscall"
@@ -33,6 +34,9 @@ func fakeKrun(calls *[]string, fail string) krun {
 		addDisk: func(c uint32, id, p string, ro bool) int32 {
 			return rec("add_disk", c, id, p, ro)
 		},
+		addNetUnixgram: func(c uint32, p *byte, fd int32, mac *byte, features, flags uint32) int32 {
+			return rec("add_net_unixgram", c, p == nil, fd, net.HardwareAddr(unsafe.Slice(mac, 6)), features, flags)
+		},
 		disableImplicitVsock: func(c uint32) int32 { return rec("disable_implicit_vsock", c) },
 		addVsock:             func(c, tsi uint32) int32 { return rec("add_vsock", c, tsi) },
 		addVsockPort2: func(c, port uint32, p string, listen bool) int32 {
@@ -50,6 +54,7 @@ func testSpec() *vmv1.Spec {
 	return &vmv1.Spec{
 		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", LayerDir: "/cache/jobs/j/0", Console: "/state/jobs/j/0/console",
 		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024, ScratchDisk: "/state/jobs/j/0/scratch.ext4",
+		GuestMac: "02:00:c6:12:00:02",
 	}
 }
 
@@ -66,6 +71,9 @@ func TestBootConfiguresTheVM(t *testing.T) {
 		"add_virtiofs3 7 /dev/root /state/jobs/j/0/root 0 true",
 		"add_virtiofs3 7 layers /cache/jobs/j/0 0 true",
 		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
+		// No path, fd 4, the VM's MAC, no features and flags 0: no DHCP
+		// client and no vfkit handshake.
+		"add_net_unixgram 7 true 4 02:00:c6:12:00:02 0 0",
 		"disable_implicit_vsock 7",
 		"add_vsock 7 0",
 		"add_vsock_port2 7 1024 agent.sock true",
@@ -88,6 +96,18 @@ func TestBootStopsAtAFailedCall(t *testing.T) {
 	}
 	if slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "start_enter") }) {
 		t.Error("the VM was started after a failed call")
+	}
+}
+
+func TestBootRefusesABadMAC(t *testing.T) {
+	t.Parallel()
+	for _, mac := range []string{"", "nope", "02:00:c6:12:00:02:00:00"} {
+		var calls []string
+		spec := testSpec()
+		spec.GuestMac = mac
+		if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
+			t.Errorf("MAC %q: err %v, calls %v", mac, err, calls)
+		}
 	}
 }
 

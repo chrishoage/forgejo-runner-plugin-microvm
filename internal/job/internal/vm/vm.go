@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,18 @@ const scratchBlockID = "scratch"
 
 // libkrun's log level: warnings and errors, on the VM child's stderr.
 const krunLogWarn = 2
+
+// netFD is the VM child's inherited descriptor for its VM's end of the job
+// network's frame socket.
+const netFD = 4
+
+// The VM's network device: no virtio-net features, and flags 0, so neither
+// vfkit's handshake nor libkrun init's DHCP client: the agent addresses the
+// guest from its boot config.
+const (
+	netFeatures = 0
+	netFlags    = 0
+)
 
 // Main reads the VM child spec from in and boots the VM. It returns only on
 // failure: libkrun ends the process with the guest's exit code when the VM
@@ -82,6 +95,10 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		return fmt.Errorf("%d CPUs: libkrun takes 1 to 255", cpus)
 	}
 	vcpus := uint8(cpus)
+	mac, err := net.ParseMAC(spec.GetGuestMac())
+	if err != nil || len(mac) != 6 {
+		return fmt.Errorf("guest MAC %q: not an Ethernet address", spec.GetGuestMac())
+	}
 	if err := check("krun_set_log_level", lib.setLogLevel(krunLogWarn)); err != nil {
 		return err
 	}
@@ -104,9 +121,14 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		// The scratch disk is the first block device, /dev/vda,
 		// read-write (VM-5).
 		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
-		// SHORTCUT(#7): provisional pick: no implicit vsock and no
-		// transparent socket impersonation, and no network device, so the
-		// guest has no network at all.
+		// The VM's network device, on its end of the frame socket the job
+		// network serves, one Ethernet frame per datagram, with no path:
+		// the socket is already connected.
+		{"krun_add_net_unixgram", func() int32 { return lib.addNetUnixgram(ctx, nil, netFD, &mac[0], netFeatures, netFlags) }},
+		// No implicit vsock and no transparent socket impersonation: with
+		// TSI on, guest sockets become host sockets, loopback included,
+		// bypassing the job network (NET-4, NET-6). The only vsock port is
+		// the agent's.
 		{"krun_disable_implicit_vsock", func() int32 { return lib.disableImplicitVsock(ctx) }},
 		{"krun_add_vsock", func() int32 { return lib.addVsock(ctx, 0) }},
 		// listen: the host side connects, to the agent listening in the
