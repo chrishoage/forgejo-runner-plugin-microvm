@@ -65,7 +65,8 @@ type Spec struct {
 	// passes no workflow mounts or volumes.
 	Mounts []*Mount `protobuf:"bytes,10,rep,name=mounts,proto3" json:"mounts,omitempty"`
 	Disks  []*Disk  `protobuf:"bytes,11,rep,name=disks,proto3" json:"disks,omitempty"`
-	// The VM's MAC on the job network, whose socket is fd 4.
+	// The VM's MAC on the job network, whose frame socket is fd 4: a
+	// SOCK_DGRAM socket, one Ethernet frame per datagram.
 	GuestMac string `protobuf:"bytes,12,opt,name=guest_mac,json=guestMac,proto3" json:"guest_mac,omitempty"`
 	// The agent's boot config, passed on to the agent unopened.
 	Boot          *v1.BootConfig `protobuf:"bytes,13,opt,name=boot,proto3" json:"boot,omitempty"`

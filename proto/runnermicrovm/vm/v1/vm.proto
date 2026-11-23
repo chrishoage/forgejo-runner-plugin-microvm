@@ -45,7 +45,8 @@ message Spec {
   // passes no workflow mounts or volumes.
   repeated Mount mounts = 10;
   repeated Disk disks = 11;
-  // The VM's MAC on the job network, whose socket is fd 4.
+  // The VM's MAC on the job network, whose frame socket is fd 4: a
+  // SOCK_DGRAM socket, one Ethernet frame per datagram.
   string guest_mac = 12;
   // The agent's boot config, passed on to the agent unopened.
   runnermicrovm.agent.v1.BootConfig boot = 13;

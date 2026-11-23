@@ -815,11 +815,13 @@ func (x *Disk) GetReadWrite() bool {
 	return false
 }
 
-// Network is the guest's static configuration on the job network. There is
-// no DHCP.
+// Network is the guest's static configuration on the job network, which the
+// agent sets with no DHCP client: lo up, then the address, MTU and up on
+// eth0, then the default route via the gateway.
 type Network struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The guest interface's address, in CIDR notation.
+	// The guest interface's address, in CIDR notation: an ordinary subnet,
+	// not a /32.
 	Address string `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
 	// The gateway's address, which also serves DNS (NET-5).
 	Gateway string `protobuf:"bytes,2,opt,name=gateway,proto3" json:"gateway,omitempty"`

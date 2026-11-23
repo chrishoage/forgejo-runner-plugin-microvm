@@ -29,6 +29,7 @@ type krun struct {
 	setVMConfig          func(ctx uint32, cpus uint8, memMiB uint32) int32
 	addVirtiofs3         func(ctx uint32, tag, path string, shmSize uint64, readOnly bool) int32
 	addDisk              func(ctx uint32, blockID, path string, readOnly bool) int32
+	addNetUnixgram       func(ctx uint32, path *byte, fd int32, mac *byte, features, flags uint32) int32
 	disableImplicitVsock func(ctx uint32) int32
 	addVsock             func(ctx uint32, tsiFeatures uint32) int32
 	addVsockPort2        func(ctx uint32, port uint32, path string, listen bool) int32
@@ -60,6 +61,7 @@ func load(dir string) (krun, error) {
 		"krun_set_vm_config":          &k.setVMConfig,
 		"krun_add_virtiofs3":          &k.addVirtiofs3,
 		"krun_add_disk":               &k.addDisk,
+		"krun_add_net_unixgram":       &k.addNetUnixgram,
 		"krun_disable_implicit_vsock": &k.disableImplicitVsock,
 		"krun_add_vsock":              &k.addVsock,
 		"krun_add_vsock_port2":        &k.addVsockPort2,

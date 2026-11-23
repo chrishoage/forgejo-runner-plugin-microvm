@@ -53,8 +53,9 @@ func testJobSpec(t *testing.T, jobBinary string) *jobv1.Spec {
 		Job:       "job-1",
 		JobBinary: jobBinary,
 		MkfsExt4:  fakeMkfs(t, "exit 0"),
+		Network:   &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500},
 		Vms: []*jobv1.VM{{
-			Name: "echo", Cpus: 2, MemoryMib: 1024,
+			Name: "echo", Cpus: 2, MemoryMib: 1024, GuestAddress: "198.18.0.2", GuestMac: "02:00:c6:12:00:02",
 			VmLog: filepath.Join(dir, "vm.log"), Console: filepath.Join(dir, "console"),
 			AgentSocket: filepath.Join(dir, "agent.sock"), AgentPort: 1024, RootDir: filepath.Join(dir, "root"),
 			ScratchDisk: filepath.Join(dir, "scratch.ext4"), ScratchSizeBytes: 1 << 30,
@@ -84,6 +85,16 @@ func run(t *testing.T, spec *jobv1.Spec) ([]*jobv1.Event, error) {
 	return events, err
 }
 
+// afterNetworkUp returns events after the first, which must be NetworkUp:
+// the job network is up before any VM starts.
+func afterNetworkUp(t *testing.T, events []*jobv1.Event) []*jobv1.Event {
+	t.Helper()
+	if len(events) == 0 || events[0].GetNetworkUp() == nil {
+		t.Fatalf("events = %v, want NetworkUp first", events)
+	}
+	return events[1:]
+}
+
 func TestRunReportsTheVMsExit(t *testing.T) {
 	t.Parallel()
 	spec := testJobSpec(t, fakeJobBinary(t, "echo booting; exit 3"))
@@ -95,6 +106,7 @@ func TestRunReportsTheVMsExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	events = afterNetworkUp(t, events)
 	if len(events) != 2 {
 		t.Fatalf("events = %v, want VMStarted and VMExited", events)
 	}
@@ -119,6 +131,7 @@ func TestRunReportsASignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	events = afterNetworkUp(t, events)
 	if len(events) != 2 || events[1].GetVmExited().GetExitCode() != 128+9 {
 		t.Fatalf("events = %v, want VMExited with 137", events)
 	}
@@ -193,6 +206,7 @@ func TestRunFailsOnTheScratchDisk(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "scratch disk "+disk) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one naming the scratch disk and %q", err, tt.want)
 			}
+			events = afterNetworkUp(t, events)
 			if len(events) != 1 || !strings.Contains(events[0].GetFailed().GetReason(), "scratch disk") {
 				t.Fatalf("events = %v, want one Failed naming the scratch disk", events)
 			}
@@ -215,13 +229,14 @@ func TestRunFails(t *testing.T) {
 	noLog := testJobSpec(t, fakeJobBinary(t, "exit 0"))
 	noLog.Vms[0].VmLog = filepath.Join(t.TempDir(), "no", "such", "dir", "vm.log")
 	for name, tt := range map[string]struct {
-		spec *jobv1.Spec
-		want string
+		spec      *jobv1.Spec
+		want      string
+		networkUp bool
 	}{
-		"no VM child":   {missing, "start the VM child"},
-		"two VMs":       {twoVMs, "2 VMs"},
-		"no VM log":     {noLog, "VM log"},
-		"no VMs at all": {&jobv1.Spec{}, "0 VMs"},
+		"no VM child":   {missing, "start the VM child", true},
+		"two VMs":       {twoVMs, "2 VMs", false},
+		"no VM log":     {noLog, "VM log", true},
+		"no VMs at all": {&jobv1.Spec{}, "0 VMs", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -229,10 +244,54 @@ func TestRunFails(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one naming %q", err, tt.want)
 			}
+			if tt.networkUp {
+				events = afterNetworkUp(t, events)
+			}
 			if len(events) != 1 || !strings.Contains(events[0].GetFailed().GetReason(), tt.want) {
 				t.Fatalf("events = %v, want one Failed naming %q", events, tt.want)
 			}
 		})
+	}
+}
+
+// The VM child gets its VM's end of the frame socket as fd 4, and nothing
+// as fd 3, the liveness pipe's.
+func TestRunPassesTheFrameSocket(t *testing.T) {
+	t.Parallel()
+	events, err := run(t, testJobSpec(t, fakeJobBinary(t, "[ -S /proc/self/fd/4 ] && [ ! -e /proc/self/fd/3 ] || exit 7")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events = afterNetworkUp(t, events)
+	if len(events) != 2 || events[1].GetVmExited().GetExitCode() != 0 {
+		t.Fatalf("events = %v, want VMExited with 0", events)
+	}
+}
+
+// A job network that can't start fails the job with a reason that begins
+// `network: `, before any VM child starts.
+func TestRunFailsOnTheNetwork(t *testing.T) {
+	t.Parallel()
+	started := filepath.Join(t.TempDir(), "started")
+	for name, change := range map[string]func(*jobv1.Spec){
+		"no network":               func(s *jobv1.Spec) { s.Network = nil },
+		"a gateway off the subnet": func(s *jobv1.Spec) { s.Network.GatewayAddress = "10.0.0.1" },
+		"a bad VM MAC":             func(s *jobv1.Spec) { s.Vms[0].GuestMac = "nope" },
+		"the gateway's address":    func(s *jobv1.Spec) { s.Vms[0].GuestAddress = "198.18.0.1" },
+	} {
+		spec := testJobSpec(t, fakeJobBinary(t, "touch "+started))
+		change(spec)
+		events, err := run(t, spec)
+		if err == nil {
+			t.Errorf("%s: no error", name)
+			continue
+		}
+		if len(events) != 1 || !strings.HasPrefix(events[0].GetFailed().GetReason(), "network: ") {
+			t.Errorf("%s: events = %v, want one Failed beginning with network: ", name, events)
+		}
+	}
+	if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a VM child started without its network")
 	}
 }
 
@@ -277,6 +336,7 @@ func TestRunDoesNotWaitOnTheSpecsReader(t *testing.T) {
 	}()
 	select {
 	case events := <-done:
+		events = afterNetworkUp(t, events)
 		if len(events) != 2 || events[1].GetVmExited().GetExitCode() != 3 {
 			t.Errorf("events = %v, want VMExited with 3", events)
 		}

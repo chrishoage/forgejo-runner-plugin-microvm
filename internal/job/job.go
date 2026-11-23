@@ -17,6 +17,8 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -28,12 +30,9 @@ import (
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/jobnet"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/vm"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
-
-	// SHORTCUT(#7): no job network yet; the blank import keeps
-	// gvisor-tap-vsock in the job binary for the dependency test.
-	_ "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/jobnet"
 )
 
 // Version is what `runner-microvm-job version` prints. The plugin runs it
@@ -68,13 +67,14 @@ const tailBytes = 300
 // maxSpec bounds the job spec read from the control channel.
 const maxSpec = 1 << 20
 
-// Run is the job process: it reads the job spec from in, runs its VM in a
-// VM child, and writes status events to out until the VM child exits.
-// Cancelling ctx kills the VM child.
+// Run is the job process: it reads the job spec from in, starts the job
+// network and attaches every VM to it, reports NetworkUp, runs its VM in a
+// VM child, and writes status events to out until the VM child exits. A VM
+// never boots before its switch serves its socket. Cancelling ctx kills the
+// VM child.
 //
 // SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the job process and
 // its VM child outlive a plugin that dies.
-// SHORTCUT(#7): no job network, so no NetworkUp.
 func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) error {
 	spec := &jobv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
@@ -84,8 +84,23 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) err
 		return fail(out, fmt.Errorf("the job spec has %d VMs; a job has exactly one, the job's container", n))
 	}
 	log = log.With("job", spec.GetJob())
+	network, links, err := startNetwork(spec, log)
+	if err != nil {
+		return fail(out, fmt.Errorf("network: %w", err))
+	}
+	defer func() {
+		for _, l := range links {
+			_ = l.Close()
+		}
+		if err := network.Close(); err != nil {
+			log.Warn("job network", "err", err)
+		}
+	}()
+	if err := send(out, &jobv1.Event{Event: &jobv1.Event_NetworkUp{NetworkUp: &jobv1.NetworkUp{}}}); err != nil {
+		return err
+	}
 	v := spec.GetVms()[0]
-	code, err := runVM(ctx, spec, v, out, log)
+	code, err := runVM(ctx, spec, v, links[0], out, log)
 	if err != nil {
 		return fail(out, fmt.Errorf("VM %s: %w", v.GetName(), err))
 	}
@@ -98,9 +113,65 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) err
 	}}})
 }
 
-// runVM starts VM 0's VM child, reports VMStarted, and waits for it to
-// exit. It returns the VM child's exit code, 128+n when signal n ended it.
-func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, log *slog.Logger) (int32, error) {
+// startNetwork starts the spec's job network and attaches each of its VMs,
+// returning each VM's end of its frame socket, in the spec's order.
+func startNetwork(spec *jobv1.Spec, log *slog.Logger) (*jobnet.Network, []*os.File, error) {
+	cfg, err := networkConfig(spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	n, err := jobnet.New(cfg, log)
+	if err != nil {
+		return nil, nil, err
+	}
+	links := make([]*os.File, 0, len(spec.GetVms()))
+	for _, v := range spec.GetVms() {
+		l, err := n.Attach()
+		if err != nil {
+			for _, l := range links {
+				_ = l.Close()
+			}
+			return nil, nil, errors.Join(fmt.Errorf("VM %s: %w", v.GetName(), err), n.Close())
+		}
+		links = append(links, l)
+	}
+	return n, links, nil
+}
+
+// networkConfig is the job network the spec describes.
+func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
+	n := spec.GetNetwork()
+	subnet, err := netip.ParsePrefix(n.GetSubnet())
+	if err != nil {
+		return jobnet.Config{}, fmt.Errorf("subnet: %w", err)
+	}
+	gateway, err := netip.ParseAddr(n.GetGatewayAddress())
+	if err != nil {
+		return jobnet.Config{}, fmt.Errorf("gateway: %w", err)
+	}
+	gatewayMAC, err := net.ParseMAC(n.GetGatewayMac())
+	if err != nil {
+		return jobnet.Config{}, fmt.Errorf("gateway: %w", err)
+	}
+	cfg := jobnet.Config{Subnet: subnet, Gateway: gateway, GatewayMAC: gatewayMAC, MTU: int(n.GetMtu())}
+	for _, v := range spec.GetVms() {
+		addr, err := netip.ParseAddr(v.GetGuestAddress())
+		if err != nil {
+			return jobnet.Config{}, fmt.Errorf("VM %s: %w", v.GetName(), err)
+		}
+		mac, err := net.ParseMAC(v.GetGuestMac())
+		if err != nil {
+			return jobnet.Config{}, fmt.Errorf("VM %s: %w", v.GetName(), err)
+		}
+		cfg.VMs = append(cfg.VMs, jobnet.VM{Address: addr, MAC: mac})
+	}
+	return cfg, nil
+}
+
+// runVM starts VM 0's VM child, with link, its VM's end of its frame
+// socket, as its fd 4, reports VMStarted, and waits for it to exit. It
+// returns the VM child's exit code, 128+n when signal n ended it.
+func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link *os.File, out io.Writer, log *slog.Logger) (int32, error) {
 	if err := createScratchDisk(ctx, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
 		return 0, fmt.Errorf("scratch disk %s: %w", v.GetScratchDisk(), err)
 	}
@@ -114,6 +185,7 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, lo
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),
+		GuestMac:    v.GetGuestMac(),
 		Boot:        v.GetBoot(),
 	})
 	if err != nil {
@@ -133,9 +205,15 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, out io.Writer, lo
 	cmd := exec.CommandContext(ctx, spec.GetJobBinary(), "vm") //nolint:gosec // G204: the plugin names its own job binary
 	cmd.Stdin = childSpec
 	cmd.Stdout, cmd.Stderr = vmLog, vmLog
+	// fd 3 is the liveness pipe's, which the VM child doesn't have yet
+	// (Run, above), and fd 4 its VM's end of the frame socket.
+	cmd.ExtraFiles = []*os.File{nil, link}
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start the VM child: %w", err)
 	}
+	// Only the VM child holds the VM's end now, so once it exits the
+	// switch's writes to it fail instead of filling its buffer.
+	_ = link.Close()
 	log.Info("VM started", "vm", v.GetName(), "pid", cmd.Process.Pid)
 	err = send(out, &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{
 		Vm: 0, Pid: int32(cmd.Process.Pid), //nolint:gosec // G115: a pid fits in an int32

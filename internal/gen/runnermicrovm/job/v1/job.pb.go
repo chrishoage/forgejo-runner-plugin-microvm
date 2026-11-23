@@ -182,8 +182,9 @@ type VM struct {
 	// passes no workflow mounts or volumes.
 	Mounts []*Mount `protobuf:"bytes,12,rep,name=mounts,proto3" json:"mounts,omitempty"`
 	Disks  []*Disk  `protobuf:"bytes,13,rep,name=disks,proto3" json:"disks,omitempty"`
-	// The VM's address and MAC on the job network. The address is static:
-	// there is no DHCP.
+	// The VM's address and MAC on the job network. The agent sets the
+	// address statically, from the boot config; the job network's DHCP
+	// server, which no VM uses, reserves it for the MAC.
 	GuestAddress string `protobuf:"bytes,14,opt,name=guest_address,json=guestAddress,proto3" json:"guest_address,omitempty"`
 	GuestMac     string `protobuf:"bytes,15,opt,name=guest_mac,json=guestMac,proto3" json:"guest_mac,omitempty"`
 	// The agent's boot config, passed on to the VM child unopened.
@@ -461,21 +462,24 @@ func (x *Disk) GetReadWrite() bool {
 	return false
 }
 
-// Network is the job network's configuration (NET-*). Its DHCP and HTTP API
-// stay off (NET-6), and no address maps to the host's loopback (NET-4).
-// Port forwarding is off today: the only ports the plugin protocol passes
-// are a service's ports, and a job that declares services fails at Create.
+// Network is the job network's configuration (NET-*): gvisor-tap-vsock's
+// switch, gateway, DNS server and forwarders, configured with no NAT, no
+// gateway virtual IPs, no port forwards and no DNS zones, so no address maps
+// to the host's loopback (NET-4) and no host port is forwarded (NET-3). The
+// gateway serves DNS, and a DHCP server no VM uses whose leases are fixed to
+// each VM's address and MAC (NET-6).
 type Network struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The job network's subnet, in CIDR notation.
 	Subnet string `protobuf:"bytes,1,opt,name=subnet,proto3" json:"subnet,omitempty"`
-	// The gateway's address and MAC. The gateway serves DNS only (NET-5).
+	// The gateway's address and MAC: every VM's default route and its only
+	// name server (NET-5).
 	GatewayAddress string `protobuf:"bytes,2,opt,name=gateway_address,json=gatewayAddress,proto3" json:"gateway_address,omitempty"`
 	GatewayMac     string `protobuf:"bytes,3,opt,name=gateway_mac,json=gatewayMac,proto3" json:"gateway_mac,omitempty"`
 	Mtu            uint32 `protobuf:"varint,4,opt,name=mtu,proto3" json:"mtu,omitempty"`
-	// Names the gateway's DNS answers with job network addresses, such as each
-	// VM's own name. Other names are forwarded to the host's resolver. Each
-	// VM's own address is in its VM entry.
+	// Not used: the gateway's DNS serves no names of its own, and forwards
+	// every name to the host's resolver. Each VM's own address is in its VM
+	// entry.
 	Hosts         []*Host `protobuf:"bytes,5,rep,name=hosts,proto3" json:"hosts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -714,7 +718,8 @@ func (*Event_VmExited) isEvent_Event() {}
 
 func (*Event_Failed) isEvent_Event() {}
 
-// NetworkUp: the job network is serving every VM's socket.
+// NetworkUp: the job network is serving every VM's socket. It comes before
+// any VM starts.
 type NetworkUp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -889,7 +894,9 @@ func (x *VMExited) GetLogTail() string {
 type Failed struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Why, naming the cause: the network, a scratch disk, a disk, or a VM
-	// child, and the VM it belongs to by name (PROTO-10).
+	// child, and the VM it belongs to by name (PROTO-10). A job network that
+	// fails to start gives `network: <error>`, which Start reports as
+	// FailedPrecondition.
 	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
