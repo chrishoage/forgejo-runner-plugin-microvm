@@ -33,6 +33,17 @@ _Avoid_: flavour, template, size
 The plugin's cap on the memory of every running VM, across all jobs (`max_memory_mib`). A job is admitted only when all its VMs fit.
 _Avoid_: VM slot
 
+**Config file**:
+The one YAML file in which the operator sets the plugin's settings and its profiles.
+_Avoid_: settings file, plugin config (the runner's own config file is "the runner config")
+
+**Built-in value**:
+The value a setting takes when the config file leaves it out, or when there is no config file.
+_Avoid_: default (which is the name of a profile)
+
+**Reload**:
+Reading the config file again while the plugin runs, so later jobs get its new profiles.
+
 ## Per-job processes
 
 **Job process**:
@@ -73,6 +84,9 @@ The plugin's own protocol between the plugin and the agent.
 
 **Scratch disk**:
 A fresh disk for each VM that holds every change the job makes to that VM's root filesystem.
+
+**Scratch path**:
+A guest directory that a profile puts straight on the scratch disk instead of the overlay. It starts empty at every boot and hides what the image has there.
 
 ## Images and storage
 
