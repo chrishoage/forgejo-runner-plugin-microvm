@@ -507,11 +507,13 @@ func tail(path string) string {
 }
 
 // envMap turns an image's KEY=VALUE environment into StartComplete's map.
+// An entry without `=` names no variable and is dropped, as Exec drops it.
 func envMap(env []string) map[string]string {
 	m := make(map[string]string, len(env))
 	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		m[k] = v
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
+		}
 	}
 	return m
 }

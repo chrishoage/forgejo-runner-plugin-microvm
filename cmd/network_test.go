@@ -181,7 +181,15 @@ func (v *vm) exec(t *testing.T, argv ...string) (int32, string) {
 // returns its exit code and output, stdout then stderr. Unlike exec, it
 // may run in a goroutine of its own.
 func (v *vm) run(ctx context.Context, argv ...string) (int32, string, error) {
-	stream, err := v.c.Exec(ctx, &pluginv1alpha.ExecRequest{EnvironmentId: v.id, Command: argv, Workdir: "/"})
+	return v.runRequest(ctx, &pluginv1alpha.ExecRequest{Command: argv, Workdir: "/"})
+}
+
+// runRequest runs req in the guest with Exec, as run does, setting its
+// environment id to v's.
+func (v *vm) runRequest(ctx context.Context, req *pluginv1alpha.ExecRequest) (int32, string, error) {
+	req.EnvironmentId = v.id
+	argv := req.GetCommand()
+	stream, err := v.c.Exec(ctx, req)
 	if err != nil {
 		return 0, "", fmt.Errorf("Exec %v: %w", argv, err)
 	}

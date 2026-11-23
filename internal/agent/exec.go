@@ -3,14 +3,16 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,10 +21,6 @@ import (
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 )
-
-// defaultPath is the PATH a command gets when its environment sets none
-// (GST-4).
-const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // outputGrace is how long Exec waits for the end of the output once the
 // command exited and what it wrote is sent, so a background child holding
@@ -33,12 +31,10 @@ const outputGrace = 200 * time.Millisecond
 const relayReadSize = 32 << 10
 
 // Exec runs one command and streams its output, then its exit code, or why
-// it could not start. Cancelling the call kills the command's process group
-// at once (GST-8).
-//
-// SHORTCUT(#6): the agent does only what the echo workflow needs: no image
-// environment underneath the request's, no users, and a missing working
-// directory is created owned by root.
+// it could not start. It runs as the request's user, else the image's, else
+// root (GST-5), in the request's working directory, else the image's, else
+// / (GST-6), with the image's environment under the request's (GST-4).
+// Cancelling the call kills the command's process group at once (GST-8).
 func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_ExecServer) error {
 	startError := func(format string, args ...any) error {
 		return stream.Send(&agentv1.ExecResponse{Event: &agentv1.ExecResponse_StartError{StartError: fmt.Sprintf(format, args...)}})
@@ -47,20 +43,23 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 	if len(argv) == 0 {
 		return startError("no command")
 	}
-	if u := req.GetUser(); u != "" && u != "root" && u != "0" && u != "0:0" {
-		return startError("user %q: the agent runs commands as root only, for now", u)
+	image := s.image
+	id, err := resolveUser(s.root, cmp.Or(req.GetUser(), image.GetUser()))
+	if err != nil {
+		return startError("%v", err)
 	}
-	env := environ(req.GetEnv())
+	cred, err := credential(id)
+	if err != nil {
+		return err
+	}
+	env := environ(image.GetEnv(), req.GetEnv(), image.GetDefaultPath(), id.home)
 	path, err := lookPath(argv[0], env)
 	if err != nil {
 		return startError("%v", err)
 	}
-	dir := req.GetWorkingDir()
-	if dir == "" {
-		dir = "/"
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: a working directory every user may enter
-		return startError("working directory: %v", err)
+	dir := cmp.Or(req.GetWorkingDir(), image.GetWorkingDir(), "/")
+	if err := makeWorkDir(dir, id); err != nil {
+		return startError("%v", err)
 	}
 
 	// Cancelled with the call, or when the output can't be sent.
@@ -70,7 +69,7 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 	cmd.Args[0] = argv[0]
 	cmd.Env = env
 	cmd.Dir = dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: cred}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// The output pipes are the agent's own, not exec's, so Wait doesn't
 	// close them: the output is read to its end below.
@@ -248,17 +247,29 @@ func (o *output) buffered() (int, error) {
 	return int(n), errors.Join(err, ioctlErr)
 }
 
-// environ returns env as KEY=VALUE, sorted, with the default PATH when env
-// sets none.
-func environ(env map[string]string) []string {
-	out := make([]string, 0, len(env)+1)
-	for k, v := range env {
+// environ returns a command's environment as KEY=VALUE, sorted: the
+// image's, with the request's on top (GST-4), PATH set to defaultPath when
+// neither sets it, and HOME to home, the user's, when neither sets it
+// (GST-5). An image entry without `=` names no variable and is dropped.
+func environ(image []string, req map[string]string, defaultPath, home string) []string {
+	vars := make(map[string]string, len(image)+len(req)+2)
+	for _, kv := range image {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			vars[k] = v
+		}
+	}
+	maps.Copy(vars, req)
+	if _, ok := vars["PATH"]; !ok && defaultPath != "" {
+		vars["PATH"] = defaultPath
+	}
+	if _, ok := vars["HOME"]; !ok {
+		vars["HOME"] = home
+	}
+	out := make([]string, 0, len(vars))
+	for k, v := range vars {
 		out = append(out, k+"="+v)
 	}
-	if _, ok := env["PATH"]; !ok {
-		out = append(out, "PATH="+defaultPath)
-	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -268,7 +279,7 @@ func lookPath(name string, env []string) (string, error) {
 	if strings.Contains(name, "/") {
 		return name, nil
 	}
-	pathVar := defaultPath
+	var pathVar string
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
 			pathVar = v

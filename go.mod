@@ -12,6 +12,7 @@ require (
 	github.com/erofs/go-erofs v0.3.3-0.20261119203624-a77c5a9afdb2
 	github.com/google/go-containerregistry v0.22.1
 	github.com/klauspost/compress v1.20.2
+	github.com/moby/sys/user v0.4.1
 	github.com/sirupsen/logrus v1.10.2
 	github.com/vishvananda/netlink v1.3.1
 	go.yaml.in/yaml/v3 v3.0.5
@@ -70,7 +71,6 @@ require (
 	github.com/moby/moby/client v0.6.1 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
-	github.com/moby/sys/user v0.4.1 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"google.golang.org/grpc/codes"
@@ -169,6 +170,38 @@ func TestGuestKeepsTheImagesDirectories(t *testing.T) {
 	code, out := v.exec(t, "stat", "-c", "%n %a", "/tmp", "/opt/hostedtoolcache")
 	if want := "/tmp 700\n/opt/hostedtoolcache 750\n"; code != 0 || out != want {
 		t.Errorf("stat exited %d:\n%s\nwant:\n%s", code, out, want)
+	}
+}
+
+// In a booted VM, where the agent is root, Exec runs a command as the
+// request's user, by name with its supplementary groups, as a numeric uid
+// with no passwd entry and gid 0, and as user:group with that group alone,
+// with the user's HOME; a missing working directory and its missing parent
+// are made owned by that user and group, mode 0755 (GST-5, GST-6).
+func TestExecAsUsersInTheGuest(t *testing.T) {
+	base, host := baseImage(t)
+	img, err := mutate.AppendLayers(base,
+		tarLayer(t, "root:x:0:0:root:/root:/bin/sh\nbuilder:x:1000:1000:Builder:/home/builder:/bin/sh\n", regular("etc/passwd")),
+		tarLayer(t, "root:x:0:root\nwheel:x:10:root,builder\nstaff:x:50:builder\nbuilder:x:1000:\n", regular("etc/group")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := bootImage(t, startPlugin(t, buildPlugin(t)), "users", pushImage(t, host, "users", img))
+	const script = `echo "$(id -u) $(id -g) $(id -G | tr ' ' '\n' | sort -n | tr '\n' ' ')$HOME $(pwd) $(stat -c %u:%g:%a . .. | tr '\n' ' ')"`
+	for _, tt := range []struct{ user, dir, want string }{
+		{"builder", "/made/name/work", "1000 1000 10 50 1000 /home/builder /made/name/work 1000:1000:755 1000:1000:755 "},
+		{"4242", "/made/numeric/work", "4242 0 0 / /made/numeric/work 4242:0:755 4242:0:755 "},
+		{"builder:staff", "/made/group/work", "1000 50 50 /home/builder /made/group/work 1000:50:755 1000:50:755 "},
+	} {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		code, out, err := v.runRequest(ctx, &pluginv1alpha.ExecRequest{Command: []string{"sh", "-c", script}, User: &tt.user, Workdir: tt.dir})
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := tt.want + "\n"; code != 0 || out != want {
+			t.Errorf("as %s: exited %d:\n%q\nwant:\n%q", tt.user, code, out, want)
+		}
 	}
 }
 

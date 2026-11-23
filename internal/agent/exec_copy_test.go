@@ -62,8 +62,9 @@ func runExec(ctx context.Context, t *testing.T, c agentv1.AgentServiceClient, re
 	}
 }
 
+// sh is an Exec of script, as testUser, with the test's own PATH.
 func sh(script string) *agentv1.ExecRequest {
-	return &agentv1.ExecRequest{Argv: []string{"sh", "-c", script}, Env: map[string]string{"PATH": os.Getenv("PATH")}}
+	return &agentv1.ExecRequest{Argv: []string{"sh", "-c", script}, Env: map[string]string{"PATH": os.Getenv("PATH")}, User: testUser}
 }
 
 func TestExec(t *testing.T) {
@@ -93,14 +94,41 @@ func TestExecSignal(t *testing.T) {
 	}
 }
 
+// The command is found in its own environment's PATH, not the agent's.
+func TestExecLooksUpTheRequestsPath(t *testing.T) {
+	t.Parallel()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "hello"), []byte("#!/bin/sh\necho hi from $0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runExec(testContext(t), t, startAgent(t), &agentv1.ExecRequest{
+		Argv: []string{"hello"}, Env: map[string]string{"PATH": bin + ":" + os.Getenv("PATH")}, User: testUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.stdout != "hi from "+filepath.Join(bin, "hello")+"\n" {
+		t.Errorf("stdout = %q", r.stdout)
+	}
+}
+
+// A command that can't start is a start error, not an exit code (GST-7).
 func TestExecStartErrors(t *testing.T) {
 	t.Parallel()
 	c := startAgent(t)
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := map[string]string{"PATH": os.Getenv("PATH")}
 	for name, req := range map[string]*agentv1.ExecRequest{
-		"no command":   {},
-		"not on PATH":  {Argv: []string{"no-such-command-anywhere"}, Env: map[string]string{"PATH": t.TempDir()}},
-		"missing path": {Argv: []string{"/no/such/binary"}},
-		"user":         {Argv: []string{"true"}, User: "nobody"},
+		"no command":                 {},
+		"not on PATH":                {Argv: []string{"no-such-command-anywhere"}, Env: map[string]string{"PATH": t.TempDir()}, User: testUser},
+		"missing path":               {Argv: []string{"/no/such/binary"}, User: testUser},
+		"unknown user":               {Argv: []string{"true"}, Env: path, User: "no-such-user"},
+		"unknown group":              {Argv: []string{"true"}, Env: path, User: testUser + ":no-such-group"},
+		"working directory":          {Argv: []string{"true"}, Env: path, User: testUser, WorkingDir: filepath.Join(file, "dir")},
+		"relative working directory": {Argv: []string{"true"}, Env: path, User: testUser, WorkingDir: "work"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, err := runExec(testContext(t), t, c, req)
@@ -114,45 +142,150 @@ func TestExecStartErrors(t *testing.T) {
 	}
 }
 
-// The command is found in its own environment's PATH, not the agent's.
-func TestExecLooksUpTheRequestsPath(t *testing.T) {
+// The environment is the image's with the request's on top, PATH the
+// default one when neither sets it, and HOME the user's when neither sets
+// it; the command is found in that environment's PATH (GST-4, GST-5).
+func TestExecEnvironment(t *testing.T) {
 	t.Parallel()
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "hello"), []byte("#!/bin/sh\necho hi from $0\n"), 0o755); err != nil {
-		t.Fatal(err)
+	// Each directory's show says which it is.
+	imageBin, requestBin, defaultBin := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, bin := range []string{imageBin, requestBin, defaultBin} {
+		script := "#!/bin/sh\necho \"from=" + bin + " A=$A B=$B PATH=$PATH HOME=$HOME\"\n"
+		if err := os.WriteFile(filepath.Join(bin, "show"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	r, err := runExec(testContext(t), t, startAgent(t), &agentv1.ExecRequest{
-		Argv: []string{"hello"}, Env: map[string]string{"PATH": bin + ":" + os.Getenv("PATH")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.stdout != "hi from "+filepath.Join(bin, "hello")+"\n" {
-		t.Errorf("stdout = %q", r.stdout)
+	const home = "/home/" + testUser
+	for _, tt := range []struct {
+		name  string
+		image []string
+		req   map[string]string
+		want  string
+	}{
+		{
+			"image PATH",
+			[]string{"A=image", "B=image", "PATH=" + imageBin},
+			map[string]string{"B": "request"},
+			"from=" + imageBin + " A=image B=request PATH=" + imageBin + " HOME=" + home,
+		},
+		{
+			"request PATH",
+			[]string{"A=image", "PATH=" + imageBin},
+			map[string]string{"PATH": requestBin, "HOME": "/elsewhere"},
+			"from=" + requestBin + " A=image B= PATH=" + requestBin + " HOME=/elsewhere",
+		},
+		{
+			"default PATH",
+			[]string{"A=a=b", "B", "HOME=/image-home"},
+			nil,
+			"from=" + defaultBin + " A=a=b B= PATH=" + defaultBin + " HOME=/image-home",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := testServer(t)
+			s.image = &agentv1.Image{Env: tt.image, DefaultPath: defaultBin}
+			r, err := runExec(testContext(t), t, startServer(t, s), &agentv1.ExecRequest{Argv: []string{"show"}, Env: tt.req, User: testUser})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.stdout != tt.want+"\n" || r.code != 0 {
+				t.Errorf("Exec = %+v, want stdout %q", r, tt.want)
+			}
+		})
 	}
 }
 
-// A background child holding the output open doesn't keep Exec running
-// (GST-9).
-func TestExecReturnsDespiteABackgroundChild(t *testing.T) {
+// An Exec that names no user or working directory runs as the image's user
+// in the image's working directory, created if missing (GST-5, GST-6).
+func TestExecImageDefaults(t *testing.T) {
 	t.Parallel()
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	begin := time.Now()
-	r, err := runExec(testContext(t), t, startAgent(t), sh(`sleep 30 & echo $! >`+pidFile+`; echo done`))
+	s := testServer(t)
+	dir := filepath.Join(t.TempDir(), "image", "workdir")
+	s.image = &agentv1.Image{User: testUser, WorkingDir: dir, DefaultPath: os.Getenv("PATH")}
+	r, err := runExec(testContext(t), t, startServer(t, s), &agentv1.ExecRequest{Argv: []string{"sh", "-c", `pwd; echo "$HOME"`}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(begin); d > 10*time.Second {
-		t.Errorf("Exec took %v", d)
+	if r.stdout != dir+"\n/home/"+testUser+"\n" || r.code != 0 {
+		t.Errorf("Exec = %+v, want the image's working directory and user's home", r)
 	}
-	if !strings.HasPrefix(r.stdout, "done") || r.code != 0 {
-		t.Errorf("Exec = %+v", r)
+}
+
+// With no working directory in the request or the image, Exec runs in /
+// (GST-6).
+func TestExecDefaultWorkingDir(t *testing.T) {
+	t.Parallel()
+	r, err := runExec(testContext(t), t, startAgent(t), sh("pwd"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if b, err := os.ReadFile(pidFile); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+	if r.stdout != "/\n" || r.code != 0 {
+		t.Errorf("Exec = %+v, want /", r)
+	}
+}
+
+// Exec ends once outputGrace, 200 ms, has passed after the command exits,
+// and not much later, while a background child holds its output open, and
+// every byte the command wrote before it exited arrives (GST-9).
+func TestExecEndsWithinTheGraceOfTheExit(t *testing.T) {
+	t.Parallel()
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	// More than one read takes, less than the pipe holds, so most of it is
+	// still in the pipe when the command exits.
+	const size = 60000
+	s := testServer(t)
+	var exited time.Time
+	s.execExited = func() { exited = time.Now() }
+	stream := &recordingExecStream{ctx: testContext(t)}
+	req := sh(`sleep 30 & echo $! >` + pidFile + `; head -c ` + strconv.Itoa(size) + ` /dev/zero | tr '\0' x; exit 5`)
+	if err := s.Exec(req, stream); err != nil {
+		t.Fatal(err)
+	}
+	// The grace is 200 ms (GST-9). Exec waits it out, since the background
+	// child holds the output open, and then ends: within a bound that leaves
+	// a loaded host, the race detector and parallel tests 800 ms to send the
+	// output and end the stream, yet that a grace of a second or more
+	// exceeds.
+	if outputGrace != 200*time.Millisecond {
+		t.Errorf("outputGrace = %v, want 200ms", outputGrace)
+	}
+	const bound = time.Second
+	if d := time.Since(exited); d < outputGrace || d > bound {
+		t.Errorf("Exec ended %v after the command exited, want %v to %v", d, outputGrace, bound)
+	}
+	var stdout int
+	var code int32 = -1
+	for _, resp := range stream.out {
+		stdout += len(resp.GetStdout())
+		if ev, ok := resp.GetEvent().(*agentv1.ExecResponse_ExitCode); ok {
+			code = ev.ExitCode
 		}
 	}
+	if stdout != size || code != 5 {
+		t.Errorf("sent %d bytes of stdout and exit code %d, want %d and 5", stdout, code, size)
+	}
+}
+
+// recordingExecStream is an Exec stream that keeps what is sent.
+type recordingExecStream struct {
+	grpc.ServerStream
+	ctx context.Context
+	out []*agentv1.ExecResponse
+}
+
+func (s *recordingExecStream) Context() context.Context { return s.ctx }
+
+func (s *recordingExecStream) Send(resp *agentv1.ExecResponse) error {
+	s.out = append(s.out, resp)
+	return nil
 }
 
 // slowExecStream is an Exec stream whose first stdout Send blocks until Exec
@@ -250,14 +383,13 @@ until [ -e "$STARTED" ]; do sleep 0.01; done
 head -c ` + strconv.Itoa(half) + ` /dev/zero
 exit 4`)
 	req.Env["STARTED"] = started
-	srv := &server{
-		execExited:   func() { close(exited) },
-		execReadSize: half / 2,
-		execStdout: func(r *os.File) {
-			if got, err := pipeSize(r, size); err != nil || got != size {
-				t.Errorf("pipe size = %d, %v, want %d", got, err, size)
-			}
-		},
+	srv := testServer(t)
+	srv.execExited = func() { close(exited) }
+	srv.execReadSize = half / 2
+	srv.execStdout = func(r *os.File) {
+		if got, err := pipeSize(r, size); err != nil || got != size {
+			t.Errorf("pipe size = %d, %v, want %d", got, err, size)
+		}
 	}
 	if err := srv.Exec(req, stream); err != nil {
 		t.Fatal(err)
