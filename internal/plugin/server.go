@@ -70,6 +70,8 @@ type Server struct {
 	// profiles are the profiles Create picks from; SetProfiles replaces
 	// them.
 	profiles config.Profiles
+	// closed is set by Close: SetProfiles then does nothing.
+	closed bool
 }
 
 // job is one job in the table, from Create to Remove.
@@ -121,11 +123,16 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 
 // SetProfiles replaces the profiles later Creates pick from. A job already
 // created keeps its own copy of its profile (CFG-7). ps must not change
-// afterwards.
-func (s *Server) SetProfiles(ps config.Profiles) {
+// afterwards. Once s is closed it does nothing, and reports false: a reload
+// still reading as the plugin stops finishes after Close.
+func (s *Server) SetProfiles(ps config.Profiles) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
 	s.profiles = ps
+	return true
 }
 
 // Close tears down every job still in the table, and releases the server.
@@ -134,6 +141,7 @@ func (s *Server) Close(ctx context.Context) error {
 	s.mu.Lock()
 	jobs := s.jobs
 	s.jobs = map[string]*job{}
+	s.closed = true
 	s.mu.Unlock()
 	var errs []error
 	for _, j := range jobs {

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -39,7 +38,7 @@ import (
 const usage = `usage: runner-microvm <command>
 
 Commands:
-  serve   run the plugin until SIGINT or SIGTERM
+  serve   run the plugin until SIGINT or SIGTERM; SIGHUP reloads the profiles
   check   validate the config file, print every error, and exit
 
 The config file is ` + config.DefaultPath + `, or the file ` + config.PathEnv + ` names.
@@ -81,9 +80,16 @@ func checkCmd(stdout, stderr io.Writer, getenv func(string) string) int {
 	return 0
 }
 
-// serveCmd is serve: it runs the plugin until SIGINT or SIGTERM.
+// serveCmd is serve: it runs the plugin until SIGINT or SIGTERM, and
+// reloads the config file on each SIGHUP.
 func serveCmd(getenv func(string) string) int {
 	log := logging.Setup(Name)
+	// First, so a SIGHUP during startup can't end the plugin, which is
+	// SIGHUP's default action. One queued signal is enough: a reload reads
+	// the file as it is then.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	cfg, err := config.Load(getenv)
 	if err != nil {
 		log.Error("stopped: invalid config", "err", err)
@@ -92,7 +98,7 @@ func serveCmd(getenv func(string) string) int {
 	logConfig(log, cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, log, cfg); err != nil {
+	if err := run(ctx, log, cfg, hup); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
@@ -114,18 +120,12 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory)
-	names := slices.Sorted(maps.Keys(cfg.Profiles))
-	if _, ok := cfg.Profiles[config.DefaultProfile]; !ok {
-		names = append([]string{config.DefaultProfile}, names...)
-	}
-	for _, name := range names {
-		p, _ := cfg.Profiles.Lookup(name)
-		_, defined := cfg.Profiles[name]
-		log.Info("profile", "name", name, "defined", defined, "cpus", p.CPUs, "memory_mib", p.MemoryMiB, "scratch_gib", p.ScratchGiB)
-	}
+	logProfiles(log, cfg.Profiles)
 }
 
-func run(ctx context.Context, log *slog.Logger, cfg *config.Config) error {
+// run runs the plugin with cfg until ctx ends, reloading the config file on
+// each signal from hup.
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal) error {
 	// A missing host tool stops startup before anything is written.
 	mkfs, err := lookMkfs()
 	if err != nil {
@@ -187,7 +187,20 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config) error {
 	defer closeLis()
 	log.Info("serving", "listen", dirs.Listen, "state", dirs.State, "cache", dirs.Cache, "runtime", dirs.Runtime,
 		"job_binary", jobBinary, "agent", agent, "lib_dir", libDir, "mkfs_ext4", mkfs)
-	err = Serve(ctx, lis, srv)
+	return serveWithReloads(ctx, log, lis, srv, hup, cfg, (*config.Config).Reload)
+}
+
+// serveWithReloads serves srv on lis until ctx ends, reloading the config
+// file with read on each signal from hup, then closes srv. It doesn't wait
+// for a reload still reading the file: one blocked on a stalled network
+// mount would keep the plugin, and its directory locks, alive until SIGKILL.
+// That reload finishes on its own and finds srv closed, so it changes
+// nothing; it touches nothing else the caller frees.
+func serveWithReloads(ctx context.Context, log *slog.Logger, lis net.Listener, srv *Server, hup <-chan os.Signal, cfg *config.Config, read readConfig) error {
+	reloadCtx, stopReloads := context.WithCancel(ctx)
+	defer stopReloads()
+	go reloadOnSignal(reloadCtx, log, hup, srv, cfg, read)
+	err := Serve(ctx, lis, srv)
 	// Every job's VM ends with the plugin.
 	return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
 }
