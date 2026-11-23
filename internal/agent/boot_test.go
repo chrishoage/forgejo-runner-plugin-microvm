@@ -57,7 +57,17 @@ func (m *fakeMounter) bindScratch(root, dir string, t scratchTarget) error {
 	return m.do(fmt.Sprintf("scratch %s at %s %d:%d:%o from %s in %s", t.guestPath, t.resolved, t.uid, t.gid, t.mode, dir, root))
 }
 
+func (m *fakeMounter) makeDir(root, guestPath string, mode uint32) error {
+	return m.do(fmt.Sprintf("dir %s %o in %s", guestPath, mode, root))
+}
+
 func (m *fakeMounter) moveRoot(root string) error { return m.do("move root " + root) }
+
+// testGuestDirs are the act path, tool cache and temp directory the plugin
+// sends.
+func testGuestDirs() []*agentv1.GuestDir {
+	return []*agentv1.GuestDir{{Path: "/var/run/act", Mode: 0o777}, {Path: "/opt/hostedtoolcache", Mode: 0o777}, {Path: "/tmp", Mode: 0o1777}}
+}
 
 func testBootConfig() *agentv1.BootConfig {
 	return &agentv1.BootConfig{
@@ -115,16 +125,20 @@ func TestBootBuildsTheRoot(t *testing.T) {
 	}
 }
 
-// The scratch paths are made after the API mounts and before the root
-// moves, each from the directory on the scratch disk named by its position
-// in the list (GST-13). Every path is resolved before any is bound, so each
-// keeps the image's owner and mode even below another scratch path; then
-// they are bound parents first by where they land, and otherwise in the
-// list's order.
+// The act path, tool cache and temp directory are made after the API
+// mounts, so a scratch path on one of them finds it with its mode. The
+// scratch paths are made next, each from the directory on the scratch disk
+// named by its position in the list (GST-13). Every path is resolved
+// before any is bound, so each keeps the image's owner and mode even below
+// another scratch path; then they are bound parents first by where they
+// land, and otherwise in the list's order. Then the act path, tool cache
+// and temp directory are made again, before the root moves, so a scratch
+// path at or above one, here /tmp, doesn't hide it.
 func TestBootMakesTheScratchPaths(t *testing.T) {
 	t.Parallel()
 	cfg := testBootConfig()
 	cfg.ScratchPaths = []string{"/var/lib/docker/volumes", "/tmp", "/var/lib/docker", "/a/b/c", "/srv"}
+	cfg.GuestDirs = testGuestDirs()
 	m := &fakeMounter{image: map[string]scratchTarget{
 		"/var/lib/docker":         {resolved: "/var/lib/docker", mode: 0o711},
 		"/var/lib/docker/volumes": {resolved: "/var/lib/docker/volumes", uid: 12, gid: 34, mode: 0o700},
@@ -135,6 +149,9 @@ func TestBootMakesTheScratchPaths(t *testing.T) {
 	const s = "/dev/.runner-microvm"
 	want := []string{
 		fmt.Sprintf("mount tmpfs %s/root/dev/shm tmpfs %#x ", s, syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC),
+		"dir /var/run/act 777 in " + s + "/root",
+		"dir /opt/hostedtoolcache 777 in " + s + "/root",
+		"dir /tmp 1777 in " + s + "/root",
 		"mkdir " + s + "/scratch/paths",
 		"resolve /var/lib/docker/volumes in " + s + "/root",
 		"resolve /tmp in " + s + "/root",
@@ -146,6 +163,9 @@ func TestBootMakesTheScratchPaths(t *testing.T) {
 		"scratch /var/lib/docker/volumes at /var/lib/docker/volumes 12:34:700 from " + s + "/scratch/paths/0 in " + s + "/root",
 		"scratch /a/b/c at /a/b/c 0:0:755 from " + s + "/scratch/paths/3 in " + s + "/root",
 		"scratch /srv at /srv 0:0:755 from " + s + "/scratch/paths/4 in " + s + "/root",
+		"dir /var/run/act 777 in " + s + "/root",
+		"dir /opt/hostedtoolcache 777 in " + s + "/root",
+		"dir /tmp 1777 in " + s + "/root",
 		"move root " + s + "/root",
 	}
 	if got := m.calls[len(m.calls)-len(want):]; !slices.Equal(got, want) {
@@ -220,10 +240,11 @@ func TestBootRefusesAScratchPathLandingBadly(t *testing.T) {
 // moved.
 func TestBootStopsAtAFailedStep(t *testing.T) {
 	t.Parallel()
-	for _, fail := range []string{"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "resolve /opt", "scratch /srv"} {
+	for _, fail := range []string{"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "dir /opt/hostedtoolcache", "resolve /opt", "scratch /srv"} {
 		m := &fakeMounter{fail: fail}
 		cfg := testBootConfig()
 		cfg.ScratchPaths = []string{"/srv", "/opt"}
+		cfg.GuestDirs = testGuestDirs()
 		err := boot(m, cfg)
 		if err == nil || !errors.Is(err, syscall.EINVAL) {
 			t.Errorf("%s fails: err = %v, want EINVAL", fail, err)
@@ -248,6 +269,10 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		"unclean scratch":    func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"/srv/../../x"} },
 		"root scratch":       func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"/"} },
 		"empty scratch":      func(c *agentv1.BootConfig) { c.ScratchPaths = []string{""} },
+		"relative dir":       func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "tmp", Mode: 0o1777}} },
+		"unclean dir":        func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/tmp/", Mode: 0o1777}} },
+		"root dir":           func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/", Mode: 0o755}} },
+		"dir mode":           func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/tmp", Mode: 0o10777}} },
 	} {
 		cfg := testBootConfig()
 		edit(cfg)

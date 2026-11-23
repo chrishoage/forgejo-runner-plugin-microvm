@@ -47,6 +47,19 @@ const guestLayerDir = "/dev/.runner-microvm/layers"
 // The scratch disk is the VM's first block device.
 const scratchDevice = "/dev/vda"
 
+// guestDirs are the directories steps expect, Create's act path, tool cache
+// and temp directory (PROTO-7), with the mode the agent gives each one the
+// image lacks: any user a step runs as must be able to write them, and the
+// temp directory keeps the sticky bit.
+var guestDirs = []struct {
+	path string
+	mode uint32
+}{
+	{actPath, 0o777},
+	{toolCachePath, 0o777},
+	{tempPath, 0o1777},
+}
+
 // agentPort is the vsock port every VM's agent listens on. Only the plugin
 // sets it: the job spec carries it for libkrun's port mapping, and the boot
 // config for the agent, which reads it before it listens.
@@ -153,6 +166,9 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		Image:         &agentv1.Image{Env: img.Env},
 		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
 		VsockPort:     agentPort,
+	}
+	for _, d := range guestDirs {
+		boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
 	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {

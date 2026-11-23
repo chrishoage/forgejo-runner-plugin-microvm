@@ -113,6 +113,9 @@ func TestStartBootsTheVM(t *testing.T) {
 		Hosts:     []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
 		Image:     &agentv1.Image{Env: []string{"PATH=/usr/bin:/bin", "A=b=c"}},
 		VsockPort: 1024,
+		GuestDirs: []*agentv1.GuestDir{
+			{Path: "/var/run/act", Mode: 0o777}, {Path: "/opt/hostedtoolcache", Mode: 0o777}, {Path: "/tmp", Mode: 0o1777},
+		},
 	}
 	if !proto.Equal(boot, wantBoot) {
 		t.Errorf("boot config = %v, want %v", boot, wantBoot)

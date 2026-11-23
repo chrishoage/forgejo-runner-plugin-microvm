@@ -138,6 +138,22 @@ message BootConfig {
   // the plugin sets it: the same value is libkrun's port mapping for the
   // VM's agent socket.
   uint32 vsock_port = 11;
+  // The directories steps expect, which Create returned to the runner: the
+  // act path, the tool cache and the temp directory (PROTO-7). The agent
+  // creates each one the image lacks, after its own mounts, both before the
+  // scratch paths and again after them, root-owned, with its mode, and any
+  // missing parent mode 0755; one the image has is left as it is.
+  repeated GuestDir guest_dirs = 12;
+}
+
+// GuestDir is a directory the agent creates in the job's root when the image
+// lacks it.
+message GuestDir {
+  // An absolute, clean guest path below /.
+  string path = 1;
+  // Its permission bits, set explicitly so the umask can't drop one, such as
+  // the temp directory's sticky bit: 0 to 07777.
+  uint32 mode = 2;
 }
 
 // Host is one name on the job network and its address.
