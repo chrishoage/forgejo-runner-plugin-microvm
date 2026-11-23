@@ -57,6 +57,13 @@ type vm struct {
 // e2e/image pins, and removes it on cleanup.
 func bootVM(t *testing.T, p *plugin, name string) *vm {
 	t.Helper()
+	return bootImage(t, p, name, readImage(t))
+}
+
+// bootImage creates and starts a job named name on p's plugin with the
+// label argument image, and removes it on cleanup.
+func bootImage(t *testing.T, p *plugin, name, image string) *vm {
+	t.Helper()
 	conn, err := grpclib.NewClient("unix://"+p.sock, grpclib.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +72,7 @@ func bootVM(t *testing.T, p *plugin, name string) *vm {
 	c := pluginv1alpha.NewBackendPluginClient(conn)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	resp, err := c.Create(ctx, &pluginv1alpha.CreateRequest{Name: name, LabelArg: readImage(t)})
+	resp, err := c.Create(ctx, &pluginv1alpha.CreateRequest{Name: name, LabelArg: image})
 	if err != nil {
 		t.Fatal(err)
 	}
