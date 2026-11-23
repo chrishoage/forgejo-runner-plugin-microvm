@@ -211,6 +211,58 @@ func TestCreateUsesTheContainerImage(t *testing.T) {
 	}
 }
 
+// The request fields the plugin ignores are named once in its log: the
+// first Create that carries any of them warns, naming which it carries,
+// and no later Create warns again.
+func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		first *pluginv1alpha.CreateRequest
+		want  string
+	}{
+		{"backend_options", &pluginv1alpha.CreateRequest{BackendOptions: map[string]string{"flavour": "big"}}, "backend_options"},
+		{"cap_add", &pluginv1alpha.CreateRequest{CapAdd: []string{"NET_ADMIN"}}, "cap_add"},
+		{"cap_drop", &pluginv1alpha.CreateRequest{CapDrop: []string{"CHOWN"}}, "cap_drop"},
+		{"all three", &pluginv1alpha.CreateRequest{
+			BackendOptions: map[string]string{"flavour": "big"}, CapAdd: []string{"NET_ADMIN"}, CapDrop: []string{"CHOWN"},
+		}, "backend_options,cap_add,cap_drop"},
+		// A refused Create still carries them: they do nothing either way.
+		{"refused", &pluginv1alpha.CreateRequest{CapAdd: []string{"NET_ADMIN"}, Services: []*pluginv1alpha.ServiceContainer{{Name: "db"}}}, "cap_add"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
+			buf := &logBuffer{}
+			srv.log = slog.New(slog.NewTextHandler(buf, nil))
+			c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+			if _, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage}); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(buf.String(), "level=WARN") {
+				t.Fatalf("a Create carrying no ignored field warned:\n%s", buf)
+			}
+			tc.first.LabelArg = testImage
+			_, _ = c.Create(testContext(t), tc.first)
+			second := &pluginv1alpha.CreateRequest{
+				LabelArg: testImage, BackendOptions: map[string]string{"k": "v"}, CapAdd: []string{"SYS_ADMIN"}, CapDrop: []string{"ALL"},
+			}
+			if _, err := c.Create(testContext(t), second); err != nil {
+				t.Fatal(err)
+			}
+			var warnings []string
+			for line := range strings.Lines(buf.String()) {
+				if strings.Contains(line, "level=WARN") {
+					warnings = append(warnings, line)
+				}
+			}
+			if len(warnings) != 1 || !strings.Contains(warnings[0], "fields="+tc.want+"\n") {
+				t.Errorf("warnings %q; want one naming fields=%s", warnings, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreateGivesEachJobItsOwnID(t *testing.T) {
 	t.Parallel()
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{})))

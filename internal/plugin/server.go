@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -96,6 +98,10 @@ type Server struct {
 	profiles config.Profiles
 	// closed is set by Close: SetProfiles then does nothing.
 	closed bool
+
+	// warnedIgnored is set by the first Create that carries a request field
+	// the plugin ignores, which logs the one warning naming them.
+	warnedIgnored atomic.Bool
 }
 
 // job is one job in the table, from Create to Remove.
@@ -190,6 +196,7 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 // returns the job's environment id, paths and platform. It boots nothing
 // (PROTO-3). The job keeps a copy of its profile for its whole life.
 func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
+	s.warnIgnored(req)
 	if len(req.GetServices()) > 0 {
 		// The request is well formed; the plugin can't run services until
 		// the protocol carries per-service VM options (PROTO-6).
@@ -228,6 +235,29 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 		Os:                  platformOS,
 		Arch:                s.cfg.Arch,
 	}, nil
+}
+
+// warnIgnored logs one warning, at the first Create that carries any of
+// them, naming the request fields req carries that the plugin ignores:
+// backend_options (the runner's per-label options, which the config file
+// covers), cap_add and cap_drop (set only by forgejo-runner exec; steps run
+// as root with every capability, in a VM of their own).
+func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest) {
+	var fields []string
+	if len(req.GetBackendOptions()) > 0 {
+		fields = append(fields, "backend_options")
+	}
+	if len(req.GetCapAdd()) > 0 {
+		fields = append(fields, "cap_add")
+	}
+	if len(req.GetCapDrop()) > 0 {
+		fields = append(fields, "cap_drop")
+	}
+	if len(fields) == 0 || !s.warnedIgnored.CompareAndSwap(false, true) {
+		return
+	}
+	s.log.Warn("runner-microvm ignores these Create request fields; this warning is logged once",
+		"name", req.GetName(), "fields", strings.Join(fields, ","))
 }
 
 // lookupProfile returns a copy of the profile name names, or fails with
