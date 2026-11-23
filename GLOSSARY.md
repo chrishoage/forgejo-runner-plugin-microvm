@@ -22,6 +22,10 @@ _Avoid_: environment, task, run
 **Environment id**:
 The runner protocol's name for a job's identifier. Use it only when talking about the protocol; everywhere else say job.
 
+**Backstop**:
+The plugin's own removal of a job the runner has not removed by the job's environment timeout plus 30 s.
+_Avoid_: reaper (reaping is of processes), expiry
+
 **Label**:
 A runner label routed to the plugin, naming an image and optionally a profile. Today it is the only way a job chooses its VM, because the plugin protocol passes no per-job VM options.
 

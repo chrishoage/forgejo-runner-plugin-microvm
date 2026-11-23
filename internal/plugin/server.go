@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -79,6 +80,9 @@ type Config struct {
 	// LostAgentGrace is how long a call whose agent failed, and is gone,
 	// waits for the job process to report the VM exited (agentError).
 	LostAgentGrace time.Duration
+	// BackstopDelay is how long after its environment timeout the plugin
+	// removes a job the runner has not (PROTO-14).
+	BackstopDelay time.Duration
 	// Arch is the runner's name for the host's architecture (runnerArch),
 	// which Create returns.
 	Arch string
@@ -102,6 +106,10 @@ type Server struct {
 	// closed is set by Close: SetProfiles then does nothing.
 	closed bool
 
+	// backstops counts the backstop's removals in progress, which Close
+	// waits for.
+	backstops sync.WaitGroup
+
 	// warnedIgnored is set by the first Create that carries a request field
 	// the plugin ignores, which logs the one warning naming them.
 	warnedIgnored atomic.Bool
@@ -119,6 +127,10 @@ type job struct {
 	// never changes it (CFG-7).
 	profileName string
 	profile     config.Profile
+	// backstop removes the job at its environment timeout plus the
+	// backstop delay, if the runner has not (PROTO-14); nil when the
+	// runner sent no timeout. It is set before the job enters the table.
+	backstop *time.Timer
 
 	// ctx is cancelled when Remove starts, so a call still unwinding on the
 	// job ends at once (PROTO-13).
@@ -176,6 +188,9 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	if cfg.LostAgentGrace == 0 {
 		cfg.LostAgentGrace = lostAgentGrace
 	}
+	if cfg.BackstopDelay == 0 {
+		cfg.BackstopDelay = backstopDelay
+	}
 	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles}, nil
 }
 
@@ -205,6 +220,9 @@ func (s *Server) Close(ctx context.Context) error {
 	for _, j := range jobs {
 		errs = append(errs, s.remove(ctx, j))
 	}
+	// A backstop that took its job out of the table before Close did is
+	// still removing it.
+	s.backstops.Wait()
 	s.closeOnce.Do(func() { errs = append(errs, s.runtime.Close()) })
 	return errors.Join(errs...)
 }
@@ -217,7 +235,7 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 // Create picks the job's image and profile from the label argument and
 // returns the job's environment id, paths and platform. It boots nothing
 // (PROTO-3). The job keeps a copy of its profile for its whole life.
-func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
+func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
 	s.warnIgnored(req)
 	if len(req.GetServices()) > 0 {
 		// The request is well formed; the plugin can't run services until
@@ -240,11 +258,15 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 	if image == "" {
 		return nil, status.Error(codes.InvalidArgument, "no image: neither the label nor the job's container: names one")
 	}
-	j, err := s.add(image, dnsName(req.GetName()), l.profile, prof)
+	// A missing or zero timeout sets no backstop.
+	timeout := req.GetEnvironmentTimeout().AsDuration()
+	// The backstop outlives Create, and its removal is never cancelled.
+	j, err := s.add(context.WithoutCancel(ctx), image, dnsName(req.GetName()), l.profile, prof, timeout)
 	if err != nil {
 		return nil, err
 	}
 	s.log.Info("created", "job", j.id, "name", req.GetName(), "hostname", j.hostname, "image", image, "profile", j.profileName,
+		"environment_timeout", timeout,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
 		"scratch_paths", j.profile.ScratchPaths, "force_pull", j.profile.ForcePull)
 	return &pluginv1alpha.CreateResponse{
@@ -298,8 +320,9 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 }
 
 // add puts a new job in the table, under a fresh environment id, with its
-// image, its hostname and its copy of the profile name names.
-func (s *Server) add(image, hostname, name string, prof config.Profile) (*job, error) {
+// image, its hostname and its copy of the profile name names, and, for a
+// timeout above 0, its backstop, which removes it with ctx.
+func (s *Server) add(ctx context.Context, image, hostname, name string, prof config.Profile, timeout time.Duration) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
@@ -310,11 +333,25 @@ func (s *Server) add(image, hostname, name string, prof config.Profile) (*job, e
 		if _, taken := s.jobs[id]; taken {
 			continue
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: ctx, cancel: cancel, mu: newJobLock()}
+		jobCtx, cancel := context.WithCancel(context.Background())
+		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: jobCtx, cancel: cancel, mu: newJobLock()}
+		if timeout > 0 {
+			// It runs only once add has released s.mu.
+			j.backstop = time.AfterFunc(saturatingAdd(timeout, s.cfg.BackstopDelay), func() { s.removeForgotten(ctx, j, timeout) })
+		}
 		s.jobs[id] = j
 		return j, nil
 	}
+}
+
+// saturatingAdd returns a+b, both at least 0, or the largest Duration where
+// the sum overflows: a huge environment timeout must not wrap to a
+// negative one, whose backstop fires at once.
+func saturatingAdd(a, b time.Duration) time.Duration {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // newID returns an environment id: a short prefix and 8 random hex digits.
@@ -452,9 +489,37 @@ func (s *Server) Remove(ctx context.Context, req *pluginv1alpha.RemoveRequest) (
 	return &pluginv1alpha.RemoveResponse{}, nil
 }
 
-// remove tears down j, which is out of the table: it ends the job process,
-// which ends the VM, and deletes the job's files.
+// backstopDelay is how long after a job's environment timeout the plugin
+// removes it if the runner has not: long enough to leave the runner its own
+// Remove first (PROTO-14).
+const backstopDelay = 30 * time.Second
+
+// removeForgotten is the backstop: it removes j with ctx, which the runner
+// has not removed by its environment timeout plus the backstop delay,
+// exactly as Remove does, and logs that the backstop fired (PROTO-14). A
+// Remove after it gets NotFound, as for any unknown id.
+func (s *Server) removeForgotten(ctx context.Context, j *job, timeout time.Duration) {
+	s.mu.Lock()
+	if s.jobs[j.id] != j {
+		// Remove, or Close, has it.
+		s.mu.Unlock()
+		return
+	}
+	delete(s.jobs, j.id)
+	s.backstops.Add(1)
+	s.mu.Unlock()
+	defer s.backstops.Done()
+	s.log.Warn("the runner has not removed the job within its environment timeout: removing it",
+		"job", j.id, "environment_timeout", timeout, "backstop_delay", s.cfg.BackstopDelay)
+	_ = s.remove(ctx, j)
+}
+
+// remove tears down j, which is out of the table: it stops its backstop,
+// ends the job process, which ends the VM, and deletes the job's files.
 func (s *Server) remove(ctx context.Context, j *job) error {
+	if j.backstop != nil {
+		j.backstop.Stop()
+	}
 	j.cancel()
 	j.mu.Lock()
 	defer j.mu.Unlock()
