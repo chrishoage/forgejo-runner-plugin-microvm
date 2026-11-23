@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -63,14 +64,39 @@ func testJobSpec(t *testing.T, jobBinary string) *jobv1.Spec {
 	}
 }
 
+// livenessPipe returns a pipe standing in for the plugin's liveness pipe;
+// both ends are closed on cleanup.
+func livenessPipe(t *testing.T) (r, w *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+	})
+	return r, w
+}
+
 // run runs the job process on spec and returns its error and events.
-func run(t *testing.T, spec *jobv1.Spec) ([]*jobv1.Event, error) {
+func runJob(t *testing.T, spec *jobv1.Spec) ([]*jobv1.Event, error) {
+	t.Helper()
+	live, _ := livenessPipe(t)
+	th := startThread()
+	defer th.stop()
+	return runOn(t, spec, live, th)
+}
+
+// runOn runs the job process on spec, with live as its liveness pipe,
+// forking on th, and returns its error and events.
+func runOn(t *testing.T, spec *jobv1.Spec, live *os.File, th *thread) ([]*jobv1.Event, error) {
 	t.Helper()
 	var in, out bytes.Buffer
 	if _, err := protodelim.MarshalTo(&in, spec); err != nil {
 		t.Fatal(err)
 	}
-	err := Run(t.Context(), &in, &out, slog.New(slog.DiscardHandler))
+	err := run(t.Context(), &in, &out, live, th, slog.New(slog.DiscardHandler))
 	var events []*jobv1.Event
 	r := bufio.NewReader(&out)
 	for {
@@ -102,7 +128,7 @@ func TestRunReportsTheVMsExit(t *testing.T) {
 	if err := os.WriteFile(spec.GetVms()[0].GetConsole(), []byte(console), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	events, err := run(t, spec)
+	events, err := runJob(t, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +153,7 @@ func TestRunReportsTheVMsExit(t *testing.T) {
 
 func TestRunReportsASignal(t *testing.T) {
 	t.Parallel()
-	events, err := run(t, testJobSpec(t, fakeJobBinary(t, "kill -9 $$")))
+	events, err := runJob(t, testJobSpec(t, fakeJobBinary(t, "kill -9 $$")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +175,7 @@ func TestRunCreatesTheScratchDisk(t *testing.T) {
 	spec.MkfsExt4 = mkfs
 	v := spec.GetVms()[0]
 	v.ScratchSizeBytes = 10 << 30
-	if _, err := run(t, spec); err != nil {
+	if _, err := runJob(t, spec); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(v.GetScratchDisk())
@@ -202,7 +228,7 @@ func TestRunFailsOnTheScratchDisk(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			disk := tt.spec.GetVms()[0].GetScratchDisk()
-			events, err := run(t, tt.spec)
+			events, err := runJob(t, tt.spec)
 			if err == nil || !strings.Contains(err.Error(), "scratch disk "+disk) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one naming the scratch disk and %q", err, tt.want)
 			}
@@ -240,7 +266,7 @@ func TestRunFails(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			events, err := run(t, tt.spec)
+			events, err := runJob(t, tt.spec)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one naming %q", err, tt.want)
 			}
@@ -254,11 +280,19 @@ func TestRunFails(t *testing.T) {
 	}
 }
 
-// The VM child gets its VM's end of the frame socket as fd 4, and nothing
-// as fd 3, the liveness pipe's.
-func TestRunPassesTheFrameSocket(t *testing.T) {
+// The VM child gets the liveness pipe as fd 3 and its VM's end of the frame
+// socket as fd 4.
+func TestRunPassesTheLivenessPipeAndTheFrameSocket(t *testing.T) {
 	t.Parallel()
-	events, err := run(t, testJobSpec(t, fakeJobBinary(t, "[ -S /proc/self/fd/4 ] && [ ! -e /proc/self/fd/3 ] || exit 7")))
+	live, _ := livenessPipe(t)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(live.Fd()), &st); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`[ -S /proc/self/fd/4 ] && [ "$(readlink /proc/self/fd/3)" = "pipe:[%d]" ] || exit 7`, st.Ino)
+	th := startThread()
+	defer th.stop()
+	events, err := runOn(t, testJobSpec(t, fakeJobBinary(t, script)), live, th)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +315,7 @@ func TestRunFailsOnTheNetwork(t *testing.T) {
 	} {
 		spec := testJobSpec(t, fakeJobBinary(t, "touch "+started))
 		change(spec)
-		events, err := run(t, spec)
+		events, err := runJob(t, spec)
 		if err == nil {
 			t.Errorf("%s: no error", name)
 			continue
@@ -298,7 +332,8 @@ func TestRunFailsOnTheNetwork(t *testing.T) {
 func TestRunRefusesAGarbledSpec(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if err := Run(t.Context(), strings.NewReader("\xff\xff\xff\xff\xff"), &out, slog.New(slog.DiscardHandler)); err == nil {
+	live, _ := livenessPipe(t)
+	if err := Run(t.Context(), strings.NewReader("\xff\xff\xff\xff\xff"), &out, live, slog.New(slog.DiscardHandler)); err == nil {
 		t.Fatal("a garbled spec ran")
 	}
 	ev := &jobv1.Event{}
@@ -331,7 +366,7 @@ func TestRunDoesNotWaitOnTheSpecsReader(t *testing.T) {
 	spec.LibDir = strings.Repeat("l", 256<<10)
 	done := make(chan []*jobv1.Event, 1)
 	go func() {
-		events, _ := run(t, spec)
+		events, _ := runJob(t, spec)
 		done <- events
 	}()
 	select {

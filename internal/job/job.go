@@ -11,6 +11,7 @@ package job
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,7 +22,9 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,7 +50,14 @@ func Main(args []string) int {
 		fmt.Println(Version)
 		return 0
 	case len(args) == 1 && args[0] == "vm":
-		return vm.Main(os.Stdin, logging.Setup("runner-microvm-vm"))
+		log := logging.Setup("runner-microvm-vm")
+		live, err := liveness()
+		if err != nil {
+			log.Error("VM child", "err", err)
+			return 1
+		}
+		go dieWithPlugin(live, log, killSelf)
+		return vm.Main(os.Stdin, log)
 	case len(args) == 0:
 		log := logging.Setup("runner-microvm-job")
 		live, err := liveness()
@@ -56,7 +66,7 @@ func Main(args []string) int {
 			return 1
 		}
 		go dieWithPlugin(live, log, killGroup)
-		if err := Run(context.Background(), os.Stdin, os.Stdout, log); err != nil {
+		if err := Run(context.Background(), os.Stdin, os.Stdout, live, log); err != nil {
 			log.Error("job process", "err", err)
 			return 1
 		}
@@ -78,7 +88,9 @@ const maxSpec = 1 << 20
 const livenessFD = 3
 
 // liveness returns the liveness pipe this process inherited as fd 3, made
-// close-on-exec, so only a child it is handed to explicitly holds it.
+// close-on-exec, so only a child it is handed to explicitly holds it. Being
+// open is not enough: when fd 3 is free at exec, Go's runtime keeps a file
+// of its own there (its cgroup's CPU limit), so fd 3 must be a pipe.
 func liveness() (*os.File, error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(livenessFD, &st); err != nil {
@@ -107,15 +119,29 @@ func killGroup() {
 	if pid := os.Getpid(); unix.Getpgrp() == pid {
 		_ = unix.Kill(-pid, unix.SIGKILL)
 	}
-	_ = unix.Kill(os.Getpid(), unix.SIGKILL)
+	killSelf()
 }
+
+// killSelf kills the VM child, however stuck its libkrun threads are.
+func killSelf() { _ = unix.Kill(os.Getpid(), unix.SIGKILL) }
 
 // Run is the job process: it reads the job spec from in, starts the job
 // network and attaches every VM to it, reports NetworkUp, runs its VM in a
 // VM child, and writes status events to out until the VM child exits. A VM
 // never boots before its switch serves its socket. Cancelling ctx kills the
-// VM child.
-func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) error {
+// VM child. live is the liveness pipe, which each VM child gets as its fd 3.
+//
+// Every child, each VM child and mkfs, is forked with Pdeathsig SIGKILL
+// from a locked OS thread of Run's own, which lives until Run returns, by
+// when every child has been waited for.
+func Run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, log *slog.Logger) error {
+	th := startThread()
+	defer th.stop()
+	return run(ctx, in, out, live, th, log)
+}
+
+// run is Run, forking on th.
+func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *thread, log *slog.Logger) error {
 	spec := &jobv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
 		return fail(out, fmt.Errorf("read the job spec: %w", err))
@@ -140,7 +166,7 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, log *slog.Logger) err
 		return err
 	}
 	v := spec.GetVms()[0]
-	code, err := runVM(ctx, spec, v, links[0], out, log)
+	code, err := runVM(ctx, spec, v, links[0], live, th, out, log)
 	if err != nil {
 		return fail(out, fmt.Errorf("VM %s: %w", v.GetName(), err))
 	}
@@ -208,14 +234,12 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 	return cfg, nil
 }
 
-// runVM starts VM 0's VM child, with link, its VM's end of its frame
-// socket, as its fd 4, reports VMStarted, and waits for it to exit. It
-// returns the VM child's exit code, 128+n when signal n ended it.
-//
-// SHORTCUT(#6): no liveness pipe and no Pdeathsig, so the VM child outlives
-// a job process killed outright.
-func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link *os.File, out io.Writer, log *slog.Logger) (int32, error) {
-	if err := createScratchDisk(ctx, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
+// runVM starts VM 0's VM child on th, with the liveness pipe live as its
+// fd 3 and link, its VM's end of its frame socket, as its fd 4, reports
+// VMStarted, and waits for it to exit. It returns the VM child's exit code,
+// 128+n when signal n ended it.
+func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
+	if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
 		return 0, fmt.Errorf("scratch disk %s: %w", v.GetScratchDisk(), err)
 	}
 	childSpec, err := specFile(&vmv1.Spec{
@@ -248,10 +272,11 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link *os.File, ou
 	cmd := exec.CommandContext(ctx, spec.GetJobBinary(), "vm") //nolint:gosec // G204: the plugin names its own job binary
 	cmd.Stdin = childSpec
 	cmd.Stdout, cmd.Stderr = vmLog, vmLog
-	// fd 3 is the liveness pipe's, which the VM child doesn't have yet
-	// (Run, above), and fd 4 its VM's end of the frame socket.
-	cmd.ExtraFiles = []*os.File{nil, link}
-	if err := cmd.Start(); err != nil {
+	// fd 3 is the liveness pipe, and fd 4 its VM's end of the frame
+	// socket.
+	cmd.ExtraFiles = []*os.File{live, link}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if err := th.do(ctx, cmd.Start); err != nil {
 		return 0, fmt.Errorf("start the VM child: %w", err)
 	}
 	// Only the VM child holds the VM's end now, so once it exits the
@@ -288,7 +313,7 @@ var mkfsArgs = []string{"-q", "-F", "-E", "lazy_itable_init=1,lazy_journal_init=
 // and formats it as ext4 with mkfs. The file must not exist: a scratch disk
 // is never reused, so nothing written in one job is visible in the next
 // (VM-5). A disk that can't be made is deleted.
-func createScratchDisk(ctx context.Context, mkfs, path string, size uint64) (err error) {
+func createScratchDisk(ctx context.Context, th *thread, mkfs, path string, size uint64) (err error) {
 	if size == 0 || size > math.MaxInt64 {
 		return fmt.Errorf("scratch size %d bytes", size)
 	}
@@ -305,11 +330,19 @@ func createScratchDisk(ctx context.Context, mkfs, path string, size uint64) (err
 	if err = errors.Join(err, f.Close()); err != nil {
 		return err
 	}
-	// mkfs is in the job process's group, so killing the job kills it.
+	// mkfs is in the job process's group, so killing the job kills it, and
+	// it dies with the job process too.
 	cmd := exec.CommandContext(ctx, mkfs, append(mkfsArgs, path)...) //nolint:gosec // G204: the mkfs.ext4 the plugin found at startup
 	cmd.WaitDelay = time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w: %s", mkfs, err, strings.TrimSpace(string(out)))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err = th.do(ctx, cmd.Start)
+	if err == nil {
+		err = cmd.Wait()
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", mkfs, err, strings.TrimSpace(out.String()))
 	}
 	return nil
 }
@@ -358,4 +391,75 @@ func send(out io.Writer, ev *jobv1.Event) error {
 // fail reports err as Failed, and returns it.
 func fail(out io.Writer, err error) error {
 	return errors.Join(err, send(out, &jobv1.Event{Event: &jobv1.Event_Failed{Failed: &jobv1.Failed{Reason: err.Error()}}}))
+}
+
+// errThreadGone is do's error once its thread has exited.
+var errThreadGone = errors.New("the job process's forking thread is gone")
+
+// thread is a goroutine locked to an OS thread of its own, which forks every
+// child of the job process. Pdeathsig fires when the thread that forked a
+// child exits, not when its process does, and a goroutine that isn't locked
+// may fork on a thread the runtime ends at any time.
+type thread struct {
+	calls chan func()
+	// tid is the thread's id, never the main thread's.
+	tid   int
+	ready chan struct{}
+	quit  chan struct{}
+	done  chan struct{}
+	once  sync.Once
+}
+
+func startThread() *thread {
+	t := &thread{calls: make(chan func()), ready: make(chan struct{}), quit: make(chan struct{}), done: make(chan struct{})}
+	go t.serve()
+	<-t.ready
+	return t
+}
+
+func (t *thread) serve() {
+	runtime.LockOSThread()
+	if unix.Gettid() == unix.Getpid() {
+		// The main thread never exits while the process runs: the runtime
+		// parks it instead. Hand the work to another thread, which the
+		// new goroutine must be while this one holds the main thread.
+		go t.serve()
+		<-t.ready
+		runtime.UnlockOSThread()
+		return
+	}
+	defer close(t.done)
+	t.tid = unix.Gettid()
+	close(t.ready)
+	// Never unlocked: when serve returns, the runtime ends the thread
+	// rather than hand it to another goroutine, so a child's Pdeathsig
+	// fires only when its thread is truly gone.
+	for {
+		select {
+		case f := <-t.calls:
+			f()
+		case <-t.quit:
+			return
+		}
+	}
+}
+
+// do runs f on the thread and returns its error, or ctx's error if the
+// thread is busy until ctx ends.
+func (t *thread) do(ctx context.Context, f func() error) error {
+	errc := make(chan error, 1)
+	select {
+	case t.calls <- func() { errc <- f() }:
+		return <-errc
+	case <-t.done:
+		return errThreadGone
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// stop ends the thread, which fires the Pdeathsig of every child it forked.
+func (t *thread) stop() {
+	t.once.Do(func() { close(t.quit) })
+	<-t.done
 }
