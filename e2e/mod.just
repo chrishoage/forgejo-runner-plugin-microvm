@@ -191,9 +191,10 @@ run workflow="echo":
     repo='{{ api }}/repos/{{ admin }}/{{ workflow }}'
 
     # A fresh repository on every run, so no run inherits the last one's.
+    # Private, so a job reading it proves the job's token works.
     curl -sS --max-time 30 -o /dev/null -u '{{ admin }}':"$password" -X DELETE "$repo"
     call -X POST '{{ api }}/user/repos' \
-        -d '{"name": "{{ workflow }}", "auto_init": true, "default_branch": "main"}' >/dev/null
+        -d '{"name": "{{ workflow }}", "auto_init": true, "default_branch": "main", "private": true}' >/dev/null
     jq -n --arg content "$(base64 -w0 "$file")" \
         '{content: $content, branch: "main", message: "ci: add the {{ workflow }} workflow"}' |
         call -X POST "$repo/contents/.forgejo/workflows/{{ workflow }}.yml" -d @- >/dev/null

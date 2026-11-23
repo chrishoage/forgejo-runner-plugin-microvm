@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Network epic's exit check: a job fetches from the internet, an HTTPS
+# GET of a stable public URL, so the guest resolves a public name through
+# the gateway's DNS and completes TLS to the outside world
+# (docs/development.md, The local harness).
+name: fetch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: microvm-node
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          set -eu
+          getent ahostsv4 example.com | head -n 1
+          curl -fsS --max-time 30 -o /dev/null -w 'fetched https://example.com/: HTTP %{http_code}\n' https://example.com/

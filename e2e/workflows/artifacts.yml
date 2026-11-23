@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Network epic's exit check: a job uploads an artifact that a later job
+# downloads. The actions are Forgejo's patched v4, which Forgejo's
+# documentation names for its own artifact protocol (docs/development.md,
+# The local harness).
+name: artifacts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: microvm-node
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          mkdir -p out
+          echo "artifact from run ${{ github.run_id }}" >out/greeting.txt
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: greeting
+          path: out/greeting.txt
+
+  download:
+    needs: [upload]
+    runs-on: microvm-node
+    steps:
+      - uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: greeting
+      - run: |
+          set -eu
+          cat greeting.txt
+          test "$(cat greeting.txt)" = "artifact from run ${{ github.run_id }}"
