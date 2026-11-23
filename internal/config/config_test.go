@@ -11,9 +11,12 @@ import (
 	"testing"
 )
 
-// wantBuiltin is the config every setting's built-in value makes.
-func wantBuiltin(file string) *Config {
+// wantBuiltin is the config every setting's built-in value makes, read from
+// path, which names file when it isn't empty.
+func wantBuiltin(path, file string) *Config {
 	return &Config{
+		path:       path,
+		named:      file != "",
 		File:       file,
 		Listen:     "/run/runner-microvm/runner-microvm.sock",
 		StateDir:   "/var/lib/runner-microvm",
@@ -37,7 +40,7 @@ func writeConfig(t *testing.T, content string) string {
 // error.
 func mustLoad(t *testing.T, content string) *Config {
 	t.Helper()
-	cfg, err := load(writeConfig(t, content), true)
+	cfg, err := load(writeConfig(t, content), true, nil)
 	if err != nil {
 		t.Fatalf("load:\n%s\nerror: %v", content, err)
 	}
@@ -49,7 +52,7 @@ func mustLoad(t *testing.T, content string) *Config {
 func loadErr(t *testing.T, content string) (string, string) {
 	t.Helper()
 	path := writeConfig(t, content)
-	cfg, err := load(path, true)
+	cfg, err := load(path, true, nil)
 	if err == nil {
 		t.Fatalf("load:\n%s\ngave %+v, want an error", content, cfg)
 	}
@@ -70,21 +73,21 @@ func wantErr(t *testing.T, path, msg, want string) {
 func TestNoFileOrEmptyFileGivesBuiltinValues(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "config.yaml")
-	cfg, err := load(missing, false)
+	cfg, err := load(missing, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := wantBuiltin(""); !reflect.DeepEqual(cfg, want) {
+	if want := wantBuiltin(missing, ""); !reflect.DeepEqual(cfg, want) {
 		t.Errorf("no file: %+v, want %+v", cfg, want)
 	}
 	for _, content := range []string{"", "\n", "# nothing set\n", "~\n", "---\n"} {
 		path := writeConfig(t, content)
-		cfg, err := load(path, true)
+		cfg, err := load(path, true, nil)
 		if err != nil {
 			t.Errorf("%q: %v", content, err)
 			continue
 		}
-		if want := wantBuiltin(path); !reflect.DeepEqual(cfg, want) {
+		if want := wantBuiltin(path, path); !reflect.DeepEqual(cfg, want) {
 			t.Errorf("%q: %+v, want %+v", content, cfg, want)
 		}
 	}
@@ -106,7 +109,7 @@ func TestMissingNamedOrUnreadableFileFails(t *testing.T) {
 		{"named and unreadable", unreadable, true},
 		{"unreadable at the default path", unreadable, false},
 	} {
-		cfg, err := load(tc.path, tc.named)
+		cfg, err := load(tc.path, tc.named, nil)
 		if err == nil {
 			t.Errorf("%s: %+v, want an error", tc.name, cfg)
 			continue
@@ -152,6 +155,8 @@ runtime_dir: %[1]s/runtime
 max_memory_mib: 16384
 `, base))
 	want := &Config{
+		path:         cfg.File,
+		named:        true,
 		File:         cfg.File,
 		Listen:       base + "/listen/rm.sock",
 		StateDir:     base + "/state",
@@ -507,14 +512,14 @@ func TestDistinctDirectoriesAreAccepted(t *testing.T) {
 		{"run/rm.sock", "state", "state2", "run/jobs"},
 	} {
 		base := filepath.Join(t.TempDir(), "rm")
-		if _, err := load(writeConfig(t, dirsConfig(base, tc[0], tc[1], tc[2], tc[3])), true); err != nil {
+		if _, err := load(writeConfig(t, dirsConfig(base, tc[0], tc[1], tc[2], tc[3])), true, nil); err != nil {
 			t.Errorf("%v: %v", tc, err)
 		}
 	}
 	// Nothing on disk is written.
-	if cfg, err := load(filepath.Join(t.TempDir(), "none"), false); err != nil {
+	if cfg, err := load(filepath.Join(t.TempDir(), "none"), false, nil); err != nil {
 		t.Errorf("built-in values: %v", err)
-	} else if _, err := os.Stat(cfg.StateDir); err == nil && cfg.StateDir != wantBuiltin("").StateDir {
+	} else if _, err := os.Stat(cfg.StateDir); err == nil && cfg.StateDir != builtinStateDir {
 		t.Errorf("load created %s", cfg.StateDir)
 	}
 }
@@ -692,7 +697,7 @@ func TestDanglingSymlinkAtTheDefaultPathFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{file, filepath.Join(dir, "config.yaml")} {
-		cfg, err := load(path, false)
+		cfg, err := load(path, false, nil)
 		if err == nil {
 			t.Errorf("%s: %+v, want an error", path, cfg)
 			continue
@@ -708,7 +713,7 @@ func TestDanglingSymlinkAtTheDefaultPathFails(t *testing.T) {
 	if err := os.Symlink("real", filepath.Join(base, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := load(filepath.Join(base, "link", "config.yaml"), false); err != nil {
+	if _, err := load(filepath.Join(base, "link", "config.yaml"), false, nil); err != nil {
 		t.Errorf("no file behind a symlinked directory: %v", err)
 	}
 }
