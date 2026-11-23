@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -183,7 +184,8 @@ func (s *Server) Create(_ context.Context, req *pluginv1alpha.CreateRequest) (*p
 		return nil, err
 	}
 	s.log.Info("created", "job", j.id, "name", req.GetName(), "image", image, "profile", j.profileName,
-		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB)
+		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
+		"scratch_paths", j.profile.ScratchPaths)
 	return &pluginv1alpha.CreateResponse{
 		EnvironmentId: j.id,
 		RootPath:      rootPath,
@@ -219,6 +221,8 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 	if !ok {
 		return config.Profile{}, labelError(arg, "unknown profile %q", name)
 	}
+	// The job's own copy shares nothing with the profiles a reload swaps.
+	prof.ScratchPaths = slices.Clone(prof.ScratchPaths)
 	return prof, nil
 }
 

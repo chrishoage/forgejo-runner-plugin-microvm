@@ -373,7 +373,7 @@ profiles:
   min: {cpus: 1, memory_mib: 1, scratch_gib: 1}
 `)
 	b := BuiltinProfile()
-	if b != (Profile{CPUs: 2, MemoryMiB: 1024, ScratchGiB: 10}) {
+	if !reflect.DeepEqual(b, Profile{CPUs: 2, MemoryMiB: 1024, ScratchGiB: 10}) {
 		t.Errorf("BuiltinProfile = %+v, want 2 CPUs, 1024 MiB, 10 GiB", b)
 	}
 	want := Profiles{
@@ -397,14 +397,14 @@ profiles:
 func TestLookup(t *testing.T) {
 	t.Parallel()
 	ps := Profiles{"big": {CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4}}
-	if p, ok := ps.Lookup("big"); !ok || p != ps["big"] {
+	if p, ok := ps.Lookup("big"); !ok || !reflect.DeepEqual(p, ps["big"]) {
 		t.Errorf("Lookup(big) = %+v, %v", p, ok)
 	}
-	if p, ok := ps.Lookup("default"); !ok || p != BuiltinProfile() {
+	if p, ok := ps.Lookup("default"); !ok || !reflect.DeepEqual(p, BuiltinProfile()) {
 		t.Errorf("Lookup(default) with none defined = %+v, %v; want the built-in values", p, ok)
 	}
 	ps["default"] = Profile{CPUs: 1, MemoryMiB: 1, ScratchGiB: 1}
-	if p, ok := ps.Lookup("default"); !ok || p != ps["default"] {
+	if p, ok := ps.Lookup("default"); !ok || !reflect.DeepEqual(p, ps["default"]) {
 		t.Errorf("Lookup(default) = %+v, %v; want the defined one", p, ok)
 	}
 	for _, name := range []string{"small", "Big", ""} {
@@ -412,6 +412,78 @@ func TestLookup(t *testing.T) {
 			t.Errorf("Lookup(%q) = %+v, want none", name, p)
 		}
 	}
+}
+
+// scratch_paths is a list of guest paths, each cleaned; nested paths load,
+// and a profile that leaves it out, or sets it to [], has none (GST-13).
+func TestScratchPaths(t *testing.T) {
+	t.Parallel()
+	cfg := mustLoad(t, `
+profiles:
+  docker:
+    scratch_paths: [/var/lib/docker, /var/lib/docker/tmp, /a/./b/, /tmp//x, //srv]
+  block:
+    scratch_paths:
+      - /var/cache
+      - /devices
+      - /process
+  none: {}
+  empty:
+    scratch_paths: []
+`)
+	want := map[string][]string{
+		"docker": {"/var/lib/docker", "/var/lib/docker/tmp", "/a/b", "/tmp/x", "/srv"},
+		"block":  {"/var/cache", "/devices", "/process"},
+		"none":   nil,
+		"empty":  nil,
+	}
+	for name, paths := range want {
+		if got := cfg.Profiles[name].ScratchPaths; !reflect.DeepEqual(got, paths) {
+			t.Errorf("profile %s: ScratchPaths = %q, want %q", name, got, paths)
+		}
+	}
+	if got := BuiltinProfile().ScratchPaths; len(got) != 0 {
+		t.Errorf("the built-in scratch_paths = %q, want []", got)
+	}
+}
+
+// Each invalid scratch path fails at load, naming its line, the key and the
+// profile: STO-5's target rules.
+func TestInvalidScratchPathsFail(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value string
+		line  int
+		want  string
+	}{
+		{"[var/lib/docker]", 4, `scratch_paths: "var/lib/docker" is not an absolute path`},
+		{"['']", 4, `scratch_paths: "" is not an absolute path`},
+		{"[/]", 4, `scratch_paths: "/" is the root`},
+		{"[/a/..]", 4, `scratch_paths: "/a/.." is the root`},
+		{"[/proc]", 4, `scratch_paths: "/proc" is under /proc`},
+		{"[/proc/sys]", 4, `scratch_paths: "/proc/sys" is under /proc`},
+		{"[/sys/fs/cgroup]", 4, `scratch_paths: "/sys/fs/cgroup" is under /sys`},
+		{"[/dev]", 4, `scratch_paths: "/dev" is under /dev`},
+		{"[/dev/shm]", 4, `scratch_paths: "/dev/shm" is under /dev`},
+		{"[/x/../dev/shm]", 4, `scratch_paths: "/x/../dev/shm" is under /dev`},
+		{`["/a\0b"]`, 4, `scratch_paths: "/a\x00b" holds a NUL byte`},
+		{"\n      - /a\n      - /b\n      - /a/", 7, `scratch_paths: "/a/" is already listed on line 5`},
+		{"[/a, /b/../a]", 4, `scratch_paths: "/b/../a" is already listed on line 4`},
+		{"[1]", 4, `scratch_paths: each path must be a string, not "1"`},
+		{"[[/a]]", 4, `scratch_paths: each path must be a string`},
+		{"[~]", 4, `scratch_paths: each path must be a string`},
+		{"/var/lib/docker", 4, `scratch_paths: must be a list of paths`},
+		{"{a: b}", 4, `scratch_paths: must be a list of paths`},
+		{"", 4, `scratch_paths: has no value`},
+	} {
+		path, msg := loadErr(t, "profiles:\n  ok: {}\n  big:\n    scratch_paths: "+tc.value+"\n")
+		wantErr(t, path, msg, fmt.Sprintf(`line %d: profile "big": %s`, tc.line, tc.want))
+	}
+	// Every invalid path in the list is reported, and the profile is not
+	// kept.
+	path, msg := loadErr(t, "profiles:\n  big:\n    scratch_paths:\n      - /proc\n      - rel\n")
+	wantErr(t, path, msg, `line 4: profile "big": scratch_paths: "/proc" is under /proc`)
+	wantErr(t, path, msg, `line 5: profile "big": scratch_paths: "rel" is not an absolute path`)
 }
 
 // A profile key's invalid value fails naming its line, the profile and the

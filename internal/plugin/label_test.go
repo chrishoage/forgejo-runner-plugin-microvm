@@ -3,6 +3,8 @@
 package plugin
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,7 +19,7 @@ import (
 // The profiles the tests below define: big sets every key, and cpusOnly
 // only cpus.
 var (
-	bigProfile      = config.Profile{CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4}
+	bigProfile      = config.Profile{CPUs: 3, MemoryMiB: 1536, ScratchGiB: 4, ScratchPaths: []string{"/var/lib/docker", "/tmp"}}
 	cpusOnlyProfile = config.Profile{CPUs: 8, MemoryMiB: 1024, ScratchGiB: 10}
 	definedDefault  = config.Profile{CPUs: 1, MemoryMiB: 512, ScratchGiB: 2}
 )
@@ -80,7 +82,7 @@ func TestCreatePicksTheLabelsProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			j := jobOf(t, srv, resp.GetEnvironmentId())
-			if j.image != tc.image || j.profileName != tc.profile || j.profile != tc.want {
+			if j.image != tc.image || j.profileName != tc.profile || !reflect.DeepEqual(j.profile, tc.want) {
 				t.Errorf("job has image %q, profile %q %+v; want %q, %q %+v",
 					j.image, j.profileName, j.profile, tc.image, tc.profile, tc.want)
 			}
@@ -166,7 +168,7 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 	big := createWith(testImage + ";profile=big")
 	plain := createWith(testImage)
 	// The config changes: big grows, a default appears.
-	grown := config.Profile{CPUs: 16, MemoryMiB: 8192, ScratchGiB: 100}
+	grown := config.Profile{CPUs: 16, MemoryMiB: 8192, ScratchGiB: 100, ScratchPaths: []string{"/srv"}}
 	srv.SetProfiles(config.Profiles{"big": grown, "default": definedDefault})
 	bigAfter := createWith(testImage + ";profile=big")
 	plainAfter := createWith(testImage)
@@ -184,9 +186,10 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 		}
 		vm := specOf(t, launcher, tc.id).GetVms()[0]
 		if vm.GetCpus() != tc.want.CPUs || vm.GetMemoryMib() != tc.want.MemoryMiB ||
-			vm.GetScratchSizeBytes() != tc.want.ScratchGiB<<30 {
-			t.Errorf("job %s: VM has %d CPUs, %d MiB, %d scratch bytes; want %+v",
-				tc.id, vm.GetCpus(), vm.GetMemoryMib(), vm.GetScratchSizeBytes(), tc.want)
+			vm.GetScratchSizeBytes() != tc.want.ScratchGiB<<30 ||
+			!slices.Equal(vm.GetBoot().GetScratchPaths(), tc.want.ScratchPaths) {
+			t.Errorf("job %s: VM has %d CPUs, %d MiB, %d scratch bytes, scratch paths %q; want %+v",
+				tc.id, vm.GetCpus(), vm.GetMemoryMib(), vm.GetScratchSizeBytes(), vm.GetBoot().GetScratchPaths(), tc.want)
 		}
 	}
 }
