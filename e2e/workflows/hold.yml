@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# big.yml, holding its VM for 60 seconds between two prints of its shape:
+# a reload while it runs must not change the job's shape
+# (docs/development.md, The local harness).
+name: hold
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hold:
+    runs-on: microvm-big
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"
+      - run: sleep 60
+      - run: |
+          echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"

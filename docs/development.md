@@ -98,11 +98,13 @@ nix develop -c just lint              # payload, golangci-lint twice, then buf l
 
 ## The local harness
 
-The harness is a real Forgejo and a real forgejo-runner in one compose stack, with the plugin on the host, for development by the maintainer and agents. One command starts it, and another pushes a workflow and waits for it to go green, with no manual steps. CI never runs it: CI's end-to-end coverage is the protocol test, which needs no Forgejo (#4).
+The harness is a real Forgejo and a real forgejo-runner in one compose stack, with the plugin on the host, for development by the maintainer and agents. One command starts it, and another pushes a workflow and waits for it to go green, with no manual steps. A third reloads the plugin's config file. CI never runs it: CI's end-to-end coverage is the protocol test, which needs no Forgejo (#4).
 
 ```sh
 nix develop -c just e2e up     # fresh state, the plugin, Forgejo and the runner; waits until the runner is online
-nix develop -c just e2e run    # pushes e2e/workflows/echo.yml, dispatches it, prints the job's log
+nix develop -c just e2e run    # pushes e2e/workflows/echo.yml, dispatches it, prints the job's log and the VM's shape
+nix develop -c just e2e run big   # the same for e2e/workflows/big.yml, or any workflow in e2e/workflows/
+nix develop -c just e2e reload # sends the plugin SIGHUP and prints the reload's log lines
 nix develop -c just e2e down   # stops the plugin and every container, and deletes .e2e/
 COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman compose
 ```
@@ -121,15 +123,16 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **Each checkout gets its own compose project, `runner-microvm-e2e-` and the first 8 hex digits of the SHA-256 of the repo root's path; `COMPOSE_PROJECT_NAME` overrides it.** Several checkouts can share one host, and `up` starts with `down`: with one fixed name, a second checkout's `up` would silently destroy the first one's stack. With one project per checkout, `down` touches only its own containers and network, and a second checkout's `up` fails on the port, which only one stack can publish.
 - **`down` empties `.e2e/` from a container, as the container's root, before deleting it.** The containers write as uids the host user may not own (rootless podman maps them to subordinate uids), so a plain `rm` on the host would fail.
 - **The runner's container runs as `user: "0:0"`,** so it can open the plugin's socket, whose mode comes from the plugin's umask (a provisional pick, #11). Under rootless podman, container root is the host user who owns the socket; under rootful Docker it is real root. As root, it also writes its registration in `.e2e/runner` with no world-writable directory.
-- **The plugin runs on the host, not in the stack,** because it needs `/dev/kvm` and libkrun. `up` builds it (`just build`), writes its config file to `.e2e/plugin-config.yaml`, with its state, cache and runtime directories under `.e2e/plugin/` and the listen socket in the runtime directory, validates it with `check`, and starts `serve` in the background with `RUNNER_MICROVM_CONFIG` naming it, its pid in `.e2e/plugin.pid` and its log in `.e2e/plugin.log`: an agent can't easily keep a second terminal open. `down` stops it with SIGTERM, which removes every job and so every VM. A plugin still there after 30 seconds is killed the hard way: first each of its children's process groups, found in `/proc/<pid>/task/*/children` while it still runs, because each job process leads a group of its own, which killing the plugin's group would miss; then the plugin's group.
+- **The plugin runs on the host, not in the stack,** because it needs `/dev/kvm` and libkrun. `up` builds it (`just build`), writes its config file to `.e2e/plugin-config.yaml`, with its state, cache and runtime directories under `.e2e/plugin/`, the listen socket in the runtime directory, and two profiles (The profiles, below), validates it with `check`, and starts `serve` in the background with `RUNNER_MICROVM_CONFIG` naming it, its pid in `.e2e/plugin.pid` and its log in `.e2e/plugin.log`: an agent can't easily keep a second terminal open. `down` stops it with SIGTERM, which removes every job and so every VM. A plugin still there after 30 seconds is killed the hard way: first each of its children's process groups, found in `/proc/<pid>/task/*/children` while it still runs, because each job process leads a group of its own, which killing the plugin's group would miss; then the plugin's group.
 - **The runner's container mounts the plugin's runtime directory, `.e2e/plugin/runtime`, at `/run/runner-microvm`,** and its config points `plugins.runner-microvm.address` at the listen socket there.
 - **Forgejo publishes only `127.0.0.1:3000`, for the API.** Nothing else needs to reach it from outside the stack.
 
 ### Recipes
 
-- **The recipes are a just module, `mod e2e`, loaded from `e2e/mod.just`:** `just e2e up`, `just e2e down` and `just e2e run`. It keeps them out of the root justfile's list and reads as sub-commands. Its recipes run in `e2e/`.
+- **The recipes are a just module, `mod e2e`, loaded from `e2e/mod.just`:** `just e2e up`, `just e2e down`, `just e2e run [workflow]` and `just e2e reload`. It keeps them out of the root justfile's list and reads as sub-commands. Its recipes run in `e2e/`.
 - **`up`** runs `down`, builds and starts the plugin and waits for its socket, writes the runner's config and the secrets, starts Forgejo and waits until it is healthy, creates the admin, registers the runner, starts the runner, and waits until Forgejo's API shows it online (`idle` or `active`), for up to 120 seconds, then prints the compose project's name.
-- **`run`** deletes and re-creates the test repository `e2e/echo` through Forgejo's API, commits the workflow to `.forgejo/workflows/echo.yml`, triggers it with `workflow_dispatch`, polls the run for up to 300 seconds, prints each job's log, and exits 0 only when the run succeeded and a job log has the step's output (`hello from runner-microvm e2e`) as a line of its own. A failing jobs list or log fetch fails it too, so a green `run` always shows the log. The expected text is the `expect` variable in `e2e/mod.just`, kept equal to the workflow's step by hand: a change to one alone fails `run`.
+- **`run [workflow]`** runs `e2e/workflows/<workflow>.yml`, `echo` when none is named. It deletes and re-creates the test repository `e2e/<workflow>` through Forgejo's API, commits the workflow to `.forgejo/workflows/<workflow>.yml`, triggers it with `workflow_dispatch`, polls the run for up to 300 seconds, prints each job's log, and exits 0 only when the run succeeded and a job log has the first step's output (`hello from runner-microvm e2e`) as a line of its own. Then it prints each `shape:` line the jobs logged. A failing jobs list or log fetch fails it too, so a green `run` always shows the log. The expected text is the `expect` variable in `e2e/mod.just`, kept equal to the workflows' first step by hand: a change to one alone fails `run`. The repository is named after the workflow so that two runs of different workflows can be in flight at once, as the exit check below needs; each still starts from a fresh repository.
+- **`reload`** sends the plugin SIGHUP, then waits up to 30 seconds for the plugin's log, from the signal on, to show the reload: it prints the reload's lines (each profile, any setting kept until a restart, and the summary) and exits 0, or prints the error and exits 1 when the reload failed. Editing `.e2e/plugin-config.yaml` first is the developer's step, as it is the operator's: `runner-microvm check` with `RUNNER_MICROVM_CONFIG=.e2e/plugin-config.yaml` tests an edit without reloading.
 - **Both waits are wall-clock deadlines: 120 seconds for `up`, 300 for `run`.** Every curl has a timeout of its own, and a curl inside a wait never outlasts the time left, so neither wait can overrun however slow Forgejo answers.
 - **`down`** stops this checkout's stack and its plugin, removes its network, and deletes `.e2e/`.
 
@@ -139,14 +142,36 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 - **Forgejo's container creates the admin with `forgejo admin user create`.** No manual first-run setup.
 - **The runner is registered offline on both sides with the shared secret:** `forgejo forgejo-cli actions register --secret …` in Forgejo, then `forgejo-runner create-runner-file --secret …` as the runner's container starts. This needs no registration token and no API round trip. forgejo-runner v13 logs `create-runner-file` as deprecated in favour of declaring connections in its config; it still works, and moving off it is a change to `e2e/compose.yaml` alone.
 - **The runner's config, `e2e/runner-config.yaml`, which `up` writes to `.e2e/runner-config.yaml` with `@IMAGE@` replaced by the image in `e2e/image`:**
-  - one label, `microvm:runner-microvm://<the image in e2e/image>`, routed to the plugin. The workflow doesn't name the backend, so it stayed the same when the label moved from the runner's `host` backend to the plugin;
+  - two labels routed to the plugin: `microvm:runner-microvm://<the image in e2e/image>`, which names no profile, so its jobs get `default`, and `microvm-big:runner-microvm://<the image in e2e/image>;profile=big`. The workflows don't name the backend, so `echo.yml` stayed the same when the label moved from the runner's `host` backend to the plugin;
   - `plugins.runner-microvm.address`, the plugin's listen socket as mounted in the runner's container;
   - `capacity: 1`;
   - the act cache server **off**, because the slice's guest has no network until #7, and nothing here needs a cache.
 
-### The workflow
+### The workflows
 
 - **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
+- **`e2e/workflows/big.yml`: the same steps on `runs-on: microvm-big`,** so its VM has the `big` profile's shape.
+- **`e2e/workflows/hold.yml`: `big.yml`'s steps, then `sleep 60` and the shape again,** so a job is running while the config file is edited and reloaded.
+
+### The profiles
+
+- **The plugin's config file in the harness defines `default` (1 CPU, 768 MiB, 2 GiB scratch) and a larger profile, `big` (2 CPUs, 1536 MiB, 4 GiB scratch),** each key on a line of its own, so an edit for a reload is one `sed`. Both are small: the harness shares a developer's machine, and the runner's `capacity: 1` runs one VM at a time. A `default` the file defines, unlike the protocol test's built-in one, shows that a label naming no profile gets the file's `default`.
+- **The epic's exit check (#8) runs in the harness with these steps:**
+
+  ```sh
+  nix develop -c just e2e up
+  nix develop -c just e2e run         # shape: cpus=1, MemTotal near 768 MiB, 4194304 sectors (2 GiB): default
+  nix develop -c just e2e run big     # shape: cpus=2, MemTotal near 1536 MiB, 8388608 sectors (4 GiB): big
+  nix develop -c just e2e run hold > .e2e/hold.log 2>&1 &   # a big job that runs for a minute
+  until [ "$(grep -c msg=started .e2e/plugin.log)" -ge 3 ]; do sleep 1; done   # the third job, hold's, has started
+  sed -i '/^  big:/,$ s/cpus: 2/cpus: 3/' .e2e/plugin-config.yaml
+  nix develop -c just e2e reload      # profile name=big ... cpus=3, then "reloaded the config file"
+  nix develop -c just e2e run big     # waits for the hold job (capacity 1), then shape: cpus=3
+  wait; grep '^run hold: shape' .e2e/hold.log   # both of the held job's shape lines: cpus=2
+  nix develop -c just e2e down
+  ```
+
+  A label naming the larger profile sees its CPU count and memory, one naming no profile gets `default`, and after the edit and SIGHUP the next job gets the new values while the job running across the reload keeps its old ones (CFG-7). The plugin's log shows each job's profile at `created`. With `capacity: 1` the next job starts once the held one ends; it was created after the reload, which is what decides its profile.
 
 ### The test image
 

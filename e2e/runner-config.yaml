@@ -10,9 +10,11 @@ log:
 runner:
   file: /data/.runner
   capacity: 1
-  # The workflow's label, routed to the plugin with the test image.
+  # The workflows' labels, routed to the plugin with the test image:
+  # microvm names no profile, so it gets default; microvm-big names big.
   labels:
     - microvm:runner-microvm://@IMAGE@
+    - microvm-big:runner-microvm://@IMAGE@;profile=big
 
 cache:
   # Off: the slice's guest has no network until #7, and nothing here needs

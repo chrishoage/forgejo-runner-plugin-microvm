@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# The local harness: `just e2e up`, `just e2e run`, `just e2e down`. Recipes
+# The local harness: `just e2e up`, `just e2e run [workflow]`, `just e2e
+# reload`, `just e2e down`. Recipes
 # run in e2e/. Each decision and its reason is in docs/development.md (The
 # local harness).
 
@@ -18,12 +19,12 @@ state := justfile_directory() / ".e2e"
 # Forgejo's API, published on loopback only.
 api := "http://127.0.0.1:3000/api/v1"
 
-# The admin user `up` creates, and the repository `run` creates.
+# The admin user `up` creates. `run` creates a repository named after the
+# workflow it runs.
 admin := "e2e"
-repo := "echo"
 
-# What e2e/workflows/echo.yml's step prints; `run` fails unless a job log
-# shows it.
+# What the first step of each workflow in e2e/workflows/ prints; `run` fails
+# unless a job log shows it.
 expect := "hello from runner-microvm e2e"
 
 # How long `up` waits for the runner to come online, and `run` for the run to
@@ -57,13 +58,24 @@ up: down
     just --justfile '{{ justfile_directory() }}/justfile' build
     # Its config file puts its directories under .e2e/plugin, with the
     # listen socket in the runtime directory, which the runner's container
-    # mounts.
+    # mounts. It defines default and a larger profile, big, which the
+    # microvm-big label names; each key on a line of its own, so an edit
+    # for a reload is one sed.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
     {
         echo "listen: unix://$sock"
         echo "state_dir: {{ plugin_dir }}/state"
         echo "cache_dir: {{ plugin_dir }}/cache"
         echo "runtime_dir: {{ plugin_dir }}/runtime"
+        echo "profiles:"
+        echo "  default:"
+        echo "    cpus: 1"
+        echo "    memory_mib: 768"
+        echo "    scratch_gib: 2"
+        echo "  big:"
+        echo "    cpus: 2"
+        echo "    memory_mib: 1536"
+        echo "    scratch_gib: 4"
     } >'{{ plugin_config }}'
     export RUNNER_MICROVM_CONFIG='{{ plugin_config }}'
     '{{ plugin }}' check
@@ -117,29 +129,34 @@ up: down
     {{ compose }} logs runner >&2
     exit 1
 
-# Push e2e/workflows/echo.yml to a fresh repository, dispatch it, print the job's log; fail unless it succeeds and the log shows the step's output.
-run:
+# Push e2e/workflows/<workflow>.yml to a fresh repository of that name, dispatch it, print the job's log and the VM's shape; fail unless it succeeds and the log shows the first step's output.
+run workflow="echo":
     #!/usr/bin/env bash
     set -euo pipefail
+    file='workflows/{{ workflow }}.yml'
+    [ -f "$file" ] || {
+        echo "no workflow e2e/$file" >&2
+        exit 1
+    }
     password=$(cat '{{ state }}/admin-password' 2>/dev/null) || {
         echo "no harness running: run 'just e2e up' first" >&2
         exit 1
     }
     # Every call has a per-call timeout; a later --max-time overrides it.
     call() { curl -fsS --max-time 30 -u '{{ admin }}':"$password" -H 'Content-Type: application/json' "$@"; }
-    repo='{{ api }}/repos/{{ admin }}/{{ repo }}'
+    repo='{{ api }}/repos/{{ admin }}/{{ workflow }}'
 
     # A fresh repository on every run, so no run inherits the last one's.
     curl -sS --max-time 30 -o /dev/null -u '{{ admin }}':"$password" -X DELETE "$repo"
     call -X POST '{{ api }}/user/repos' \
-        -d '{"name": "{{ repo }}", "auto_init": true, "default_branch": "main"}' >/dev/null
-    jq -n --arg content "$(base64 -w0 workflows/echo.yml)" \
-        '{content: $content, branch: "main", message: "ci: add the echo workflow"}' |
-        call -X POST "$repo/contents/.forgejo/workflows/echo.yml" -d @- >/dev/null
+        -d '{"name": "{{ workflow }}", "auto_init": true, "default_branch": "main"}' >/dev/null
+    jq -n --arg content "$(base64 -w0 "$file")" \
+        '{content: $content, branch: "main", message: "ci: add the {{ workflow }} workflow"}' |
+        call -X POST "$repo/contents/.forgejo/workflows/{{ workflow }}.yml" -d @- >/dev/null
 
-    run_id=$(call -X POST "$repo/actions/workflows/echo.yml/dispatches" \
+    run_id=$(call -X POST "$repo/actions/workflows/{{ workflow }}.yml/dispatches" \
         -d '{"ref": "main", "return_run_info": true}' | jq -er .id)
-    echo "dispatched run $run_id"
+    echo "dispatched run $run_id of {{ workflow }}"
 
     # Poll until the run ends or the deadline passes. Each poll's curl is
     # bounded by the time left, so the poll ends at the deadline.
@@ -153,7 +170,7 @@ run:
         esac
         sleep 1
     done
-    echo "run $run_id: $status"
+    echo "run $run_id of {{ workflow }}: $status"
 
     # A failing call here fails the recipe: an assignment keeps set -e,
     # where a `for … in $(…)` would not.
@@ -172,10 +189,42 @@ run:
     # The step's output is a log line of its own: a timestamp, then the
     # text. The step's command line also contains the text, but quoted, so
     # it never matches the whole line.
-    if ! sed 's/^[^ ]* //' <<<"$logs" | tr -d '\r' | grep -xF '{{ expect }}' >/dev/null; then
+    lines=$(sed 's/^[^ ]* //' <<<"$logs" | tr -d '\r')
+    if ! grep -xF '{{ expect }}' <<<"$lines" >/dev/null; then
         echo "no job log shows the step's output: {{ expect }}" >&2
         exit 1
     fi
+    # The VM's shape, as each shape step printed it: its own line, like the
+    # step's output above.
+    grep -E '^shape: ' <<<"$lines" | sed 's/^/run {{ workflow }}: /' || true
+
+# Send the plugin SIGHUP, so it reloads .e2e/plugin-config.yaml; print the reload's log lines, and fail if it failed.
+reload:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pid=$(cat '{{ plugin_pid }}' 2>/dev/null) || {
+        echo "no harness running: run 'just e2e up' first" >&2
+        exit 1
+    }
+    # Only the log written after the signal: a reload logs its profiles,
+    # then its summary line last, or one error line.
+    from=$(($(wc -l <'{{ plugin_log }}') + 1))
+    kill -HUP "$pid"
+    deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        new=$(tail -n +"$from" '{{ plugin_log }}')
+        if grep -q 'msg="reload failed' <<<"$new"; then
+            grep 'msg="reload failed' <<<"$new" >&2
+            exit 1
+        fi
+        if grep -q 'msg="reloaded the config file"' <<<"$new"; then
+            grep -E 'msg=(profile|"reloaded the config file"|"a changed setting)' <<<"$new"
+            exit 0
+        fi
+        sleep 0.1
+    done
+    echo "the plugin logged no reload within 30s; its log is .e2e/plugin.log" >&2
+    exit 1
 
 # Stop this checkout's stack and plugin, and delete .e2e/.
 down:
