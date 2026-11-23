@@ -74,6 +74,15 @@
       groupName: 'Go modules',
       automerge: true,
     },
+    // gvisor follows gvisor-tap-vsock's requirement, through go mod tidy on
+    // its updates: Renovate's digest updates would move it to the newest
+    // commit of gvisor's default branch, the Bazel tree go get can't build,
+    // and off the commit gvisor-tap-vsock was built against.
+    {
+      matchManagers: ['gomod'],
+      matchPackageNames: ['gvisor.dev/gvisor'],
+      enabled: false,
+    },
     // GitHub Actions: ci(deps), one automerging group for digest and version
     // updates.
     {
