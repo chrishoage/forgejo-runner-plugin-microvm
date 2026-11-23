@@ -142,7 +142,7 @@ The local compose stack, a real Forgejo and a real forgejo-runner, that runs a w
 _Avoid_: test environment, e2e stack
 
 **Protocol test**:
-A test that runs a workflow through forgejo-runner's own job executor (`act/runner`) against the real plugin booting real VMs, with no Forgejo; it runs in KVM CI (`just test-kvm`).
+A test that runs workflows, every one in `e2e/workflows/` that needs no harness, through forgejo-runner's own job executor (`act/runner`) against the real plugin booting real VMs, with no Forgejo; it runs in KVM CI (`just test-kvm`).
 _Avoid_: integration test, e2e test
 
 **Shortcut**:

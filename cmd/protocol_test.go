@@ -7,11 +7,13 @@ package cmd_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,11 +26,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// The workflow both the harness and this test run, and what its step
-// prints.
+// The workflows both the harness and this test run, and what each one's
+// first step prints.
 const (
-	workflow = "../e2e/workflows/echo.yml"
-	stepOut  = "hello from runner-microvm e2e"
+	workflows = "../e2e/workflows"
+	stepOut   = "hello from runner-microvm e2e"
 )
 
 // The profile the plugin under test defines besides the implicit default,
@@ -44,29 +46,98 @@ const (
 var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: %d\n    scratch_gib: %d\n",
 	bigProfile, bigCPUs, bigMemoryMiB, bigScratchGiB)
 
-// TestEchoWorkflow is the protocol test: it runs e2e/workflows/echo.yml
-// through forgejo-runner's own job executor (act/runner), which calls the
-// real plugin through the runner's plugin client, and the plugin boots the
-// image in e2e/image as a real VM. No Forgejo, no runner daemon. Its label
-// names no profile, so its VM has the built-in shape. The job log shows
-// Start's three progress lines, in order (PROTO-9).
-func TestEchoWorkflow(t *testing.T) {
+// TestWorkflows is the protocol test: it runs every workflow in
+// e2e/workflows/, one subtest each, through forgejo-runner's own job
+// executor (act/runner), which calls the real plugin through the runner's
+// plugin client, and the plugin boots the image in e2e/image as real VMs.
+// No Forgejo, no runner daemon. The test maps the harness's microvm and
+// microvm-big labels; a workflow with a job on any other label, such as the
+// Network epic's on microvm-node, needs the harness's Forgejo or the
+// internet, and is skipped, naming the label. Each workflow must succeed
+// and show its first step's output, and workflowChecks adds a workflow's
+// own checks.
+func TestWorkflows(t *testing.T) {
 	image := readImage(t)
-	log, err := runWorkflow(t, workflow, map[string]string{"microvm": image})
+	labels := map[string]string{"microvm": image, "microvm-big": image + ";profile=" + bigProfile}
+	files, err := filepath.Glob(filepath.Join(workflows, "*.yml"))
 	if err != nil {
-		t.Fatalf("the workflow failed: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(log, stepOut) {
-		t.Fatalf("the job log does not show the step's output %q", stepOut)
+	if len(files) == 0 {
+		t.Fatalf("no workflows in %s", workflows)
 	}
-	wantShape(t, log, 2, 1024, 10)
-	// The job log quotes each line, its newline too.
-	const at = `\[runner-microvm \d+\.\d\ds\] `
-	progress := regexp.MustCompile(`(?s)` + at + `image ` + regexp.QuoteMeta(image) + ` ready \(sha256:[0-9a-f]{64}, \d+ layers\) in \d+\.\d\ds.*` +
-		at + `VM \S+ \(2 CPUs, 1024 MiB\) ready in \d+\.\d\ds.*` + at + `started in \d+\.\d\ds`)
-	if !progress.MatchString(log) {
-		t.Errorf("the job log does not show Start's three progress lines, in order:\n%s", log)
+	p := startPlugin(t, buildPlugin(t))
+	for _, file := range files {
+		name := strings.TrimSuffix(filepath.Base(file), ".yml")
+		t.Run(name, func(t *testing.T) {
+			if other := unmappedLabels(t, file, labels); len(other) > 0 {
+				t.Skipf("runs on %s, which only the harness has", strings.Join(other, ", "))
+			}
+			log, err := runWorkflowOn(t, p, file, labels)
+			if err != nil {
+				t.Fatalf("the workflow failed: %v", err)
+			}
+			if !strings.Contains(log, stepOut) {
+				t.Fatalf("the job log does not show the first step's output %q", stepOut)
+			}
+			if check := workflowChecks[name]; check != nil {
+				check(t, log, image)
+			}
+		})
 	}
+}
+
+// workflowInputs are the workflow_dispatch inputs the test dispatches a
+// workflow with, by the workflow's file name; any other input takes the
+// workflow's own default, as the harness's dispatch does. hold's default
+// holds its VM for the minute the harness's reload scenario needs, which
+// this test doesn't.
+var workflowInputs = map[string]map[string]any{
+	"hold": {"seconds": "1"},
+}
+
+// workflowChecks are the checks of a workflow's job log beyond its success
+// and its first step's output, by the workflow's file name.
+var workflowChecks = map[string]func(t *testing.T, log, image string){
+	// Its label names no profile, so its VM has the built-in shape. The job
+	// log shows Start's three progress lines, in order (PROTO-9).
+	"echo": func(t *testing.T, log, image string) {
+		wantShape(t, log, 2, 1024, 10)
+		// The job log quotes each line, its newline too.
+		const at = `\[runner-microvm \d+\.\d\ds\] `
+		progress := regexp.MustCompile(`(?s)` + at + `image ` + regexp.QuoteMeta(image) + ` ready \(sha256:[0-9a-f]{64}, \d+ layers\) in \d+\.\d\ds.*` +
+			at + `VM \S+ \(2 CPUs, 1024 MiB\) ready in \d+\.\d\ds.*` + at + `started in \d+\.\d\ds`)
+		if !progress.MatchString(log) {
+			t.Errorf("the job log does not show Start's three progress lines, in order:\n%s", log)
+		}
+	},
+	"big":  func(t *testing.T, log, _ string) { wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB) },
+	"hold": func(t *testing.T, log, _ string) { wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB) },
+}
+
+// unmappedLabels returns the labels the workflow file's jobs run on that
+// labels lacks, sorted.
+func unmappedLabels(t *testing.T, file string, labels map[string]string) []string {
+	t.Helper()
+	f, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	wf, err := model.ReadWorkflow(f, false)
+	if err != nil {
+		t.Fatalf("%s: %v", file, err)
+	}
+	var other []string
+	for _, job := range wf.Jobs {
+		for _, label := range job.RunsOn() {
+			if _, ok := labels[label]; !ok && !slices.Contains(other, label) {
+				other = append(other, label)
+			}
+		}
+	}
+	slices.Sort(other)
+	return other
 }
 
 // TestProfileWorkflow runs a workflow whose label names the big profile:
@@ -95,9 +166,10 @@ func TestProfileWorkflow(t *testing.T) {
 	wantShape(t, log, reloadedCPUs, bigMemoryMiB, bigScratchGiB)
 }
 
-// shapeStep is the step, in e2e/workflows/echo.yml too, that prints the VM's
-// CPU count, memory and scratch disk size, each computed by the step's
-// shell, so the log's copy of the script never matches shapeLine.
+// shapeStep is the step, in e2e/workflows/echo.yml, big.yml and hold.yml
+// too, that prints the VM's CPU count, memory and scratch disk size, each
+// computed by the step's shell, so the log's copy of the script never
+// matches shapeLine.
 const shapeStep = `echo "shape: cpus=$(nproc) memtotal_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) vda_sectors=$(cat /sys/block/vda/size)"`
 
 var shapeLine = regexp.MustCompile(`shape: cpus=(\d+) memtotal_kib=(\d+) vda_sectors=(\d+)`)
@@ -169,9 +241,19 @@ func planExecutor(t *testing.T, p *plugin, workflow string, images map[string]st
 	for label, image := range images {
 		platforms[label] = "runner-microvm://" + image
 	}
+	// The runner reads a dispatch's inputs from the event's JSON.
+	event := "{}"
+	if inputs := workflowInputs[strings.TrimSuffix(filepath.Base(workflow), ".yml")]; inputs != nil {
+		b, err := json.Marshal(map[string]any{"inputs": inputs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		event = string(b)
+	}
 	level := logrus.InfoLevel
 	r, err := runner.New(&runner.Config{
 		JobLoggerLevel:       &level,
+		EventJSON:            event,
 		Workdir:              gitRepo(t),
 		EventName:            "workflow_dispatch",
 		LogOutput:            true,

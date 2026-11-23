@@ -152,9 +152,9 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
 
 ### The workflows
 
-- **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The slice's protocol test reads this same file, so the workflow has one source.
+- **`e2e/workflows/echo.yml`: one job, `runs-on: microvm`, no `container:`, a `run: echo …` step that exits 0, and a step that prints the VM's shape, triggered by `workflow_dispatch`.** It is the simplest real workflow; the protocol test checks the shape line against the built-in profile. A failing step and `actions/checkout` belong to #6. The protocol test reads this same file, as it reads every workflow here on `microvm` or `microvm-big`, so each workflow has one source.
 - **`e2e/workflows/big.yml`: the same steps on `runs-on: microvm-big`,** so its VM has the `big` profile's shape.
-- **`e2e/workflows/hold.yml`: `big.yml`'s steps, then `sleep 60` and the shape again,** so a job is running while the config file is edited and reloaded.
+- **`e2e/workflows/hold.yml`: `big.yml`'s steps, then `sleep ${{ inputs.seconds }}` and the shape again,** so a job is running while the config file is edited and reloaded. `seconds` is a `workflow_dispatch` input of default `60`, which the harness's dispatch, sending no inputs, takes, and which the protocol test overrides with `1` (`workflowInputs` in `cmd/protocol_test.go`), since nothing there reloads a running job's profile.
 - **The Network epic's exit check (#7) is four workflows on `runs-on: microvm-node`, one per item, so a red run names what broke.** Each starts with the same `echo` step as the others, which `run` looks for.
   - **`clone.yml`: `git clone` of the job's own repository in a `run:` step, at `github.server_url` with the job's token (`github.token`) as the password, over HTTP inside the harness.** That is what a real workflow does, and it proves the guest reaches the Forgejo server through the gateway. The repository is private, so the clone fails without the token.
   - **`fetch.yml`: an HTTPS GET of `https://example.com/` with `curl`, after printing what `getent` resolves for it.** A stable public URL, so it proves DNS and TLS to the outside world.
@@ -181,7 +181,7 @@ COMPOSE="podman compose" nix develop -c just e2e up   # the same, through podman
   nix develop -c just e2e up
   nix develop -c just e2e run         # shape: cpus=1, MemTotal near 768 MiB, 4194304 sectors (2 GiB): default
   nix develop -c just e2e run big     # shape: cpus=2, MemTotal near 1536 MiB, 8388608 sectors (4 GiB): big
-  nix develop -c just e2e run hold > .e2e/hold.log 2>&1 &   # a big job that runs for a minute
+  nix develop -c just e2e run hold > .e2e/hold.log 2>&1 &   # a big job that runs for a minute: hold's default
   until [ "$(grep -c msg=started .e2e/plugin.log)" -ge 3 ]; do sleep 1; done   # the third job, hold's, has started
   sed -i '/^  big:/,$ s/cpus: 2/cpus: 3/' .e2e/plugin-config.yaml
   nix develop -c just e2e reload      # profile name=big ... cpus=3, then "reloaded the config file"
