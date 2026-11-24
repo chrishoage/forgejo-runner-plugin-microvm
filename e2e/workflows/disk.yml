@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Mounts and disks epic's exit check: a job writes a marker naming its run
+# to the storage profile's read-write disk, at /mnt/disk, and the next job on
+# the profile, which needs the first, reads it back. The first job's VM is
+# flushed and removed before the second's starts, so the run proves the
+# flush across a real Remove (STO-9; docs/development.md, The local harness).
+name: disk
+
+on:
+  workflow_dispatch:
+
+jobs:
+  write:
+    runs-on: microvm-storage
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          set -eu
+          echo "run ${{ github.run_id }}" >/mnt/disk/marker
+          echo "wrote /mnt/disk/marker: $(cat /mnt/disk/marker)"
+  read:
+    needs: write
+    runs-on: microvm-storage
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          set -eu
+          marker=$(cat /mnt/disk/marker)
+          echo "read from /mnt/disk/marker: $marker"
+          test "$marker" = "run ${{ github.run_id }}"

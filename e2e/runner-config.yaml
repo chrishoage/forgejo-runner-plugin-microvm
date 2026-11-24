@@ -14,11 +14,13 @@ runner:
   # The workflows' labels, routed to the plugin with the test image:
   # microvm names no profile, so it gets default; microvm-big names big.
   # microvm-node has the Node image, with git and node, for the workflows
-  # that clone, fetch or use actions; it gets default too.
+  # that clone, fetch or use actions; it gets default too. microvm-storage
+  # names storage, with the harness's mount and disk fixtures.
   labels:
     - microvm:runner-microvm://@IMAGE@
     - microvm-big:runner-microvm://@IMAGE@;profile=big
     - microvm-node:runner-microvm://@NODE_IMAGE@
+    - microvm-storage:runner-microvm://@IMAGE@;profile=storage
 
 cache:
   # Off: nothing here needs a cache, and the guest can't reach a cache
