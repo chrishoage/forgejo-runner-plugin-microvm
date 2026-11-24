@@ -321,24 +321,83 @@ func readImage(t *testing.T) string {
 }
 
 // buildPlugin builds runner-microvm with its payload, as it ships, plus the
-// given -ldflags, which only a test that needs a seam passes. `just
-// test-kvm` builds the payload first.
+// given -ldflags, which only a test that needs a seam passes, and returns
+// its path. It builds once per set of -ldflags (goBuild). `just test-kvm`
+// builds the payload first.
 func buildPlugin(t *testing.T, ldflags ...string) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "runner-microvm")
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
-	args := []string{"build", "-tags", "payload", "-trimpath", "-buildvcs=false"}
+	args := []string{"-tags", "payload"}
 	if len(ldflags) > 0 {
 		args = append(args, "-ldflags", strings.Join(ldflags, " "))
 	}
-	cmd := exec.CommandContext(ctx, "go", append(args, "-o", bin, module+"/cmd/runner-microvm")...)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	cmd.WaitDelay = 10 * time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build the plugin (run `just payload` first): %v\n%s", err, out)
+	bin, err := goBuild(module+"/cmd/runner-microvm", args...)
+	if err != nil {
+		t.Fatalf("build the plugin (run `just payload` first): %v", err)
 	}
 	return bin
+}
+
+// built holds the binaries goBuild built, each in a directory of its own
+// under dir, which TestMain deletes.
+var built struct {
+	mu   sync.Mutex
+	dir  string
+	bins map[string]func() (string, error)
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if built.dir != "" {
+		_ = os.RemoveAll(built.dir)
+	}
+	os.Exit(code)
+}
+
+// goBuild builds the package pkg, static, with the extra `go build` args,
+// and returns the binary's path. Each package and args is built once per
+// test binary, and every test asking for it gets the same file, so no test
+// may change it; a failed build fails every test asking for it, with its
+// output. It may run in any goroutine.
+func goBuild(pkg string, args ...string) (string, error) {
+	key := strings.Join(append([]string{pkg}, args...), "\x00")
+	built.mu.Lock()
+	if built.bins == nil {
+		built.bins = map[string]func() (string, error){}
+	}
+	build, ok := built.bins[key]
+	if !ok {
+		n := len(built.bins)
+		build = sync.OnceValues(func() (string, error) {
+			built.mu.Lock()
+			if built.dir == "" {
+				dir, err := os.MkdirTemp("", "cmd-built-")
+				if err != nil {
+					built.mu.Unlock()
+					return "", err
+				}
+				built.dir = dir
+			}
+			dir := filepath.Join(built.dir, strconv.Itoa(n))
+			built.mu.Unlock()
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				return "", err
+			}
+			bin := filepath.Join(dir, filepath.Base(pkg))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			argv := append(append([]string{"build", "-trimpath", "-buildvcs=false"}, args...), "-o", bin, pkg)
+			cmd := exec.CommandContext(ctx, "go", argv...)
+			cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+			cmd.WaitDelay = 10 * time.Second
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return "", fmt.Errorf("go %s: %w\n%s", strings.Join(argv, " "), err, out)
+			}
+			return bin, nil
+		})
+		built.bins[key] = build
+	}
+	built.mu.Unlock()
+	return build()
 }
 
 // plugin is a running plugin under test.

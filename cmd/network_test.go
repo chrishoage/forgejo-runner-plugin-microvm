@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,17 +37,12 @@ func buildProbe(t *testing.T) string {
 }
 
 // buildStatic builds the test program cmd/internal/<name>, static, and
-// returns its path.
+// returns its path. It builds it once (goBuild).
 func buildStatic(t *testing.T, name string) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), name)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", bin, module+"/cmd/internal/"+name)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	cmd.WaitDelay = 10 * time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", name, err, out)
+	bin, err := goBuild(module + "/cmd/internal/" + name)
+	if err != nil {
+		t.Fatalf("build %s: %v", name, err)
 	}
 	return bin
 }
