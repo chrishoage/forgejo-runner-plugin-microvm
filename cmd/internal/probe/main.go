@@ -33,8 +33,9 @@
 //	    resolve name's IPv4 addresses as a step's programs do, through
 //	    /etc/hosts and /etc/resolv.conf, and print each
 //	probe dhcp [-n count] [-timeout d]
-//	    broadcast count DHCP DISCOVERs from eth0's MAC, print every reply's
-//	    offered address
+//	    broadcast count DHCP DISCOVERs from eth0's MAC, each once the one
+//	    before it has a reply, and print every reply's offered address,
+//	    until the last one's first reply
 //	probe vsock [-cid cid] <first>-<last>...
 //	    open an AF_VSOCK connection to cid on every port in the ranges; fail
 //	    if any opens
@@ -747,9 +748,10 @@ func resolve(name, server string, overTCP bool) error {
 }
 
 // dhcp broadcasts count DHCP DISCOVERs on eth0, each from eth0's MAC with a
-// transaction id of its own, and prints the address every reply to it
-// offers. It reads replies to each until wait passes with none, and fails
-// if a DISCOVER got none.
+// transaction id of its own, and prints the address every reply to one of
+// them offers. It sends each DISCOVER once the one before it has a reply,
+// stops at the last one's first reply, and fails if a DISCOVER gets none
+// within wait.
 func dhcp(count int, wait time.Duration) error {
 	ifi, err := net.InterfaceByName("eth0")
 	if err != nil {
@@ -770,33 +772,35 @@ func dhcp(count int, wait time.Duration) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	const firstXID = 0x63630000
+	buf := make([]byte, 1500)
 	for i := range count {
-		xid := 0x63630000 + uint32(i)
+		xid := firstXID + uint32(i)
 		if _, err := conn.WriteTo(discover(xid, ifi.HardwareAddr), &net.UDPAddr{IP: net.IPv4bcast, Port: 67}); err != nil {
 			return err
 		}
-		replies := 0
-		for {
-			if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
-				return err
-			}
-			buf := make([]byte, 1500)
+		if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+			return err
+		}
+		for answered := false; !answered; {
 			n, from, err := conn.ReadFrom(buf)
 			if errors.Is(err, os.ErrDeadlineExceeded) {
-				break
+				return fmt.Errorf("DISCOVER %#x: no reply within %s", xid, wait)
 			}
 			if err != nil {
 				return err
 			}
 			r := buf[:n]
-			if len(r) < 240 || r[0] != 2 || binary.BigEndian.Uint32(r[4:8]) != xid {
+			if len(r) < 240 || r[0] != 2 {
 				continue
 			}
-			replies++
-			fmt.Printf("offer xid=%#x from=%s yiaddr=%s\n", xid, from, netip.AddrFrom4([4]byte(r[16:20])))
-		}
-		if replies == 0 {
-			return fmt.Errorf("DISCOVER %#x: no reply within %s", xid, wait)
+			// A reply to this DISCOVER or to one before it.
+			got := binary.BigEndian.Uint32(r[4:8])
+			if got < firstXID || got > xid {
+				continue
+			}
+			fmt.Printf("offer xid=%#x from=%s yiaddr=%s\n", got, from, netip.AddrFrom4([4]byte(r[16:20])))
+			answered = got == xid
 		}
 	}
 	return nil
