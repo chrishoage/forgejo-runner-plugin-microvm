@@ -7,10 +7,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -629,5 +634,265 @@ func mkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// readTar returns the headers and the regular files' bodies of the tar in
+// b, by name.
+func readTar(t *testing.T, b []byte) (map[string]*tar.Header, map[string]string) {
+	t.Helper()
+	hdrs, bodies := map[string]*tar.Header{}, map[string]string{}
+	tr := tar.NewReader(bytes.NewReader(b))
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return hdrs, bodies
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := hdrs[hdr.Name]; ok {
+			t.Errorf("%s is in the tar twice", hdr.Name)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hdrs[hdr.Name], bodies[hdr.Name] = hdr, string(body)
+	}
+}
+
+// A tar round-trips through CopyIn and CopyOut with its entries' modes,
+// owners, modification times, symlinks, hard links and extended attributes
+// kept (GST-10, GST-11). Owners other than the test's own are tested only
+// as root.
+func TestCopyRoundTrip(t *testing.T) {
+	t.Parallel()
+	c := startAgent(t)
+	dest := filepath.Join(t.TempDir(), "dest")
+	writable(t, dest)
+	uid, gid := owners(t)
+	in := metadataTar(t, uid, gid, userXattrs(t, filepath.Dir(dest)))
+	if err := copyIn(t, c, dest, writeTar(t, in...)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := copyOut(t, c, filepath.Join(dest, "tree"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, bodies := readTar(t, b)
+	if len(out) != len(in) {
+		t.Errorf("CopyOut has %d entries, want %d: %v", len(out), len(in), out)
+	}
+	for _, want := range in {
+		got, ok := out[want.Name]
+		if !ok {
+			t.Errorf("%s is missing", want.Name)
+			continue
+		}
+		if want.Typeflag == tar.TypeLink {
+			// Either name of the pair may come first, the other a link to
+			// it, and the first carries the file.
+			target := out[want.Linkname]
+			if target == nil || (got.Typeflag != tar.TypeLink || got.Linkname != want.Linkname) &&
+				(target.Typeflag != tar.TypeLink || target.Linkname != want.Name) {
+				t.Errorf("%s and %s are not one hard link: %v, %v", want.Name, want.Linkname, got, target)
+			}
+			continue
+		}
+		file := got
+		if got.Typeflag == tar.TypeLink {
+			file = out[got.Linkname]
+			if file == nil {
+				t.Errorf("%s: a hard link to %s, which is missing", got.Name, got.Linkname)
+				continue
+			}
+		}
+		if file.Typeflag != want.Typeflag {
+			t.Errorf("%s: type %q, want %q", want.Name, file.Typeflag, want.Typeflag)
+		}
+		if want.Typeflag != tar.TypeSymlink && file.FileInfo().Mode() != want.FileInfo().Mode() {
+			t.Errorf("%s: mode %v, want %v", want.Name, file.FileInfo().Mode(), want.FileInfo().Mode())
+		}
+		if file.Uid != want.Uid || file.Gid != want.Gid {
+			t.Errorf("%s: owner %d:%d, want %d:%d", want.Name, file.Uid, file.Gid, want.Uid, want.Gid)
+		}
+		if !file.ModTime.Equal(want.ModTime) {
+			t.Errorf("%s: mtime %v, want %v", want.Name, file.ModTime, want.ModTime)
+		}
+		if file.Linkname != want.Linkname {
+			t.Errorf("%s: link %q, want %q", want.Name, file.Linkname, want.Linkname)
+		}
+		if want.Typeflag == tar.TypeReg && bodies[file.Name] != want.Name {
+			t.Errorf("%s: body %q, want %q", want.Name, bodies[file.Name], want.Name)
+		}
+		for k, v := range want.PAXRecords {
+			if got := file.PAXRecords[k]; got != v {
+				t.Errorf("%s: %s = %q, want %q", want.Name, k, got, v)
+			}
+		}
+	}
+}
+
+// A CopyOut that the guest's files fail, by a permission or I/O error or a
+// file cut short while it is copied, fails with FailedPrecondition: the
+// job's doing, not the agent's. The stream's own end keeps its code, and
+// any other failure is the agent's bug, Internal.
+func TestCopyOutErrorCodes(t *testing.T) {
+	t.Parallel()
+	// What archive gets from a file that shrank after its header was
+	// written.
+	tw := tar.NewWriter(io.Discard)
+	if err := tw.WriteHeader(&tar.Header{Name: "f", Typeflag: tar.TypeReg, Size: 10}); err != nil {
+		t.Fatal(err)
+	}
+	_, cut := io.CopyN(tw, strings.NewReader("abc"), 10)
+	for name, tt := range map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"a file cut short":   {cut, codes.FailedPrecondition},
+		"permission denied":  {&fs.PathError{Op: "open", Path: "/f", Err: syscall.EACCES}, codes.FailedPrecondition},
+		"an I/O error":       {fmt.Errorf("extended attributes of /f: %w", syscall.EIO), codes.FailedPrecondition},
+		"the stream's end":   {fmt.Errorf("write: %w", status.Error(codes.Canceled, "context canceled")), codes.Canceled},
+		"a tar writer's bug": {tar.ErrWriteTooLong, codes.Internal},
+		"anything else":      {errors.New("unexpected"), codes.Internal},
+	} {
+		if got := status.Code(copyOutError("/f", tt.err)); got != tt.want {
+			t.Errorf("%s (%v): %v, want %v", name, tt.err, got, tt.want)
+		}
+	}
+}
+
+// A guest file CopyOut can't read fails it with FailedPrecondition.
+func TestCopyOutUnreadableFile(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	dir := filepath.Join(t.TempDir(), "dir")
+	mkdir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "locked"), []byte("x"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copyOut(t, startAgent(t), dir); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("CopyOut = %v, want FailedPrecondition", err)
+	}
+}
+
+// CopyOut's chunks are at most 256 KiB, and together the whole tar.
+func TestCopyOutChunks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	body := bytes.Repeat([]byte("0123456789abcdef"), (3*copyChunk+1000)/16)
+	if err := os.WriteFile(filepath.Join(dir, "big"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := startAgent(t).CopyOut(testContext(t), &agentv1.CopyOutRequest{Path: filepath.Join(dir, "big")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b []byte
+	chunks := 0
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(resp.GetChunk()); n > 256<<10 {
+			t.Errorf("a chunk of %d bytes, over 256 KiB", n)
+		}
+		chunks++
+		b = append(b, resp.GetChunk()...)
+	}
+	if chunks < 4 {
+		t.Errorf("%d chunks for %d bytes", chunks, len(b))
+	}
+	_, bodies := readTar(t, b)
+	if bodies["big"] != string(body) {
+		t.Errorf("big came out as %d bytes, want %d", len(bodies["big"]), len(body))
+	}
+}
+
+// A socket, which a tar can't hold, is left out; the rest is copied.
+func TestCopyOutSkipsSockets(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "d")
+	mkdir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := new(net.ListenConfig).Listen(t.Context(), "unix", filepath.Join(dir, "sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lis.Close() }()
+	b, err := copyOut(t, startAgent(t), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdrs, _ := readTar(t, b)
+	if _, ok := hdrs["d/sock"]; ok || hdrs["d/file"] == nil {
+		t.Errorf("CopyOut = %v, want d/ and d/file only", hdrs)
+	}
+}
+
+// logBuffer is a log's output, safe to read while the agent writes it.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// An extended attribute whose name holds "=", which Linux allows and a PAX
+// record can't, is left out with one warn line; the copy and the file's
+// other attributes are kept.
+func TestCopyOutSkipsXattrsATarCannotHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if !userXattrs(t, dir) {
+		t.Skip("no user xattrs here")
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"user.a=b", "user.c=d", "user.ok"} {
+		if err := lsetxattr(file, name, []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logs logBuffer
+	s := testServer(t)
+	s.log = slog.New(slog.NewTextHandler(&logs, nil))
+	b, err := copyOut(t, startServer(t, s), file)
+	if err != nil {
+		t.Fatalf("CopyOut = %v", err)
+	}
+	hdrs, bodies := readTar(t, b)
+	hdr := hdrs["file"]
+	if hdr == nil || bodies["file"] != "x" {
+		t.Fatalf("CopyOut = %v, want file", hdrs)
+	}
+	if hdr.PAXRecords["SCHILY.xattr.user.ok"] != "v" {
+		t.Errorf("user.ok is not kept: %v", hdr.PAXRecords)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "count=2") {
+		t.Errorf("log = %q, want one warn line with count=2", logs.String())
 	}
 }

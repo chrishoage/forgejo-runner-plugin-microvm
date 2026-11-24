@@ -417,10 +417,9 @@ func ownedBy(fi fs.FileInfo, hdr *tar.Header) bool {
 	return ok && int(st.Uid) == hdr.Uid && int(st.Gid) == hdr.Gid
 }
 
-// CopyOut returns the path as a tar, entries named relative to its parent.
-// A missing path returns an empty tar (GST-11).
-//
-// SHORTCUT(#6): hard links and extended attributes are not kept.
+// CopyOut returns the path as a tar, entries named relative to its parent,
+// with hard links and extended attributes kept. A missing path returns an
+// empty tar, two zero blocks (GST-11).
 func (s *server) CopyOut(req *agentv1.CopyOutRequest, stream agentv1.AgentService_CopyOutServer) error {
 	src := req.GetPath()
 	if !filepath.IsAbs(src) {
@@ -431,8 +430,12 @@ func (s *server) CopyOut(req *agentv1.CopyOutRequest, stream agentv1.AgentServic
 	}), copyChunk)
 	tw := tar.NewWriter(w)
 	if _, err := os.Lstat(src); err == nil {
-		if err := archive(tw, src); err != nil {
-			return status.Errorf(codes.Internal, "copy out %s: %v", src, err)
+		skipped, firstSkip, err := archive(tw, src)
+		if err != nil {
+			return copyOutError(src, err)
+		}
+		if skipped > 0 {
+			s.log.Warn("extended attributes not kept", "path", src, "count", skipped, "first", firstSkip)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return status.Errorf(codes.FailedPrecondition, "copy out %s: %v", src, err)
@@ -443,26 +446,59 @@ func (s *server) CopyOut(req *agentv1.CopyOutRequest, stream agentv1.AgentServic
 	return w.Flush()
 }
 
-// sendChunks is a writer that sends a copy of each write.
+// copyOutError is the status of a CopyOut of src that failed with err: the
+// stream's own status when a send failed; FailedPrecondition when the
+// guest's files failed to read, by a permission or I/O error or a file cut
+// short while it was copied, which are the job's doing, not the agent's;
+// else Internal, a bug in the agent.
+func copyOutError(src string, err error) error {
+	code := codes.Internal
+	if s, ok := status.FromError(err); ok {
+		code = s.Code()
+	} else if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.As(err, new(*fs.PathError)) || errors.As(err, new(syscall.Errno)) {
+		code = codes.FailedPrecondition
+	}
+	return status.Errorf(code, "copy out %s: %v", src, err)
+}
+
+// sendChunks is a writer that sends a copy of each write, in chunks of at
+// most copyChunk: a buffered writer passes a large write straight through.
 type sendChunks func([]byte) error
 
 func (f sendChunks) Write(p []byte) (int, error) {
-	if err := f(append([]byte(nil), p...)); err != nil {
-		return 0, err
+	for n := 0; n < len(p); n += copyChunk {
+		if err := f(append([]byte(nil), p[n:min(n+copyChunk, len(p))]...)); err != nil {
+			return n, err
+		}
 	}
 	return len(p), nil
 }
 
-// archive writes src and, for a directory, everything under it to tw.
-func archive(tw *tar.Writer, src string) error {
+// fileID is a file's identity, which its hard links share.
+type fileID struct{ dev, ino uint64 }
+
+// archive writes src and, for a directory, everything under it to tw. A
+// regular file reached again through another hard link is written as a
+// link to the first name, and each entry's extended attributes go in its
+// PAX records. Times are kept to the second, with no access or change
+// time, as Docker's archives do: they would otherwise change every read.
+// A socket has no tar form and is left out. So is an extended attribute
+// whose name holds "=", which Linux allows and a PAX record can't: archive
+// counts them, and returns the first.
+func archive(tw *tar.Writer, src string) (skipped int, firstSkip error, err error) {
 	parent := filepath.Dir(src)
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+	links := map[fileID]string{}
+	err = filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		fi, err := d.Info()
 		if err != nil {
 			return err
+		}
+		if fi.Mode()&fs.ModeSocket != 0 {
+			return nil
 		}
 		link := ""
 		if fi.Mode()&fs.ModeSymlink != 0 {
@@ -482,10 +518,37 @@ func archive(tw *tar.Writer, src string) error {
 		if d.IsDir() {
 			hdr.Name += "/"
 		}
+		hdr.ModTime = hdr.ModTime.Truncate(time.Second)
+		hdr.AccessTime, hdr.ChangeTime = time.Time{}, time.Time{}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && fi.Mode().IsRegular() && st.Nlink > 1 {
+			id := fileID{dev: st.Dev, ino: st.Ino}
+			if first, ok := links[id]; ok {
+				hdr.Typeflag, hdr.Linkname, hdr.Size = tar.TypeLink, first, 0
+			} else {
+				links[id] = hdr.Name
+			}
+		}
+		attrs, err := lxattrs(p)
+		if err != nil {
+			return fmt.Errorf("extended attributes of %s: %w", p, err)
+		}
+		for k, v := range attrs {
+			if strings.Contains(k, "=") {
+				if skipped == 0 {
+					firstSkip = fmt.Errorf("%s: %q: a PAX record's key can't hold \"=\"", hdr.Name, k)
+				}
+				skipped++
+				continue
+			}
+			if hdr.PAXRecords == nil {
+				hdr.PAXRecords = map[string]string{}
+			}
+			hdr.PAXRecords[paxXattr+k] = v
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		if !fi.Mode().IsRegular() {
+		if hdr.Typeflag != tar.TypeReg {
 			return nil
 		}
 		f, err := os.Open(p) //nolint:gosec // G304: the path the runner asked for, inside the guest
@@ -496,6 +559,7 @@ func archive(tw *tar.Writer, src string) error {
 		_, err = io.CopyN(tw, f, hdr.Size)
 		return errors.Join(err, f.Close())
 	})
+	return skipped, firstSkip, err
 }
 
 // paxXattr prefixes an extended attribute's name in a tar's PAX records.
