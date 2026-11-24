@@ -20,6 +20,8 @@ import (
 
 	"github.com/containerd/continuity/tarconv"
 	erofs "github.com/erofs/go-erofs"
+	"golang.org/x/sys/unix"
+	"google.golang.org/grpc/status"
 )
 
 // ext4Disk makes a 16 MiB ext4 file with the host's mkfs.ext4, holding a
@@ -142,8 +144,9 @@ echo "disks ok: $((6 * 7))"
 
 // A disk that is neither ext4 nor EROFS fails Start, saying so; so does a
 // read-only ext4 disk whose journal needs recovery, saying how to replay
-// it, and a disk whose source is deleted after the config was read, naming
-// the source (STO-4, PROTO-10).
+// it, an EROFS disk attached read-write, saying it must be ext4, and a disk
+// whose source is deleted after the config was read, naming the source
+// (STO-4, PROTO-10).
 func TestDiskFailsStart(t *testing.T) {
 	img, host := baseImage(t)
 	neither := filepath.Join(t.TempDir(), "zeros.img")
@@ -158,9 +161,11 @@ func TestDiskFailsStart(t *testing.T) {
     disks: [{source: %s, target: /data}]
   recovering:
     disks: [{source: %s, target: /data}]
+  erofs-rw:
+    disks: [{source: %s, target: /data, read_write: true}]
   gone:
     disks: [{source: %s, target: /data}]
-`, neither, recovering, gone))
+`, neither, recovering, erofsDisk(t, "erofs-rw"), gone))
 	if err := os.Remove(gone); err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +173,7 @@ func TestDiskFailsStart(t *testing.T) {
 	for _, tc := range []struct{ profile, msg string }{
 		{"neither", "disk /data: not ext4 or EROFS"},
 		{"recovering", "disk /data: its ext4 journal needs recovery, which a read-only mount can't do: mount the disk read-write once to replay it"},
+		{"erofs-rw", "disk /data: read-write disks must be ext4"},
 		{"gone", fmt.Sprintf("disk %s: does not exist", gone)},
 	} {
 		label := "microvm-" + tc.profile
@@ -200,4 +206,104 @@ func setNeedsRecovery(t *testing.T, p string) {
 	if _, err := f.WriteAt(b, 1120); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A read-write ext4 disk is a writable filesystem at its target: a step
+// sees it ext4 and rw, writes a file to it and reads it back, and the host
+// file has changed (STO-4).
+func TestReadWriteDisk(t *testing.T) {
+	img, host := baseImage(t)
+	disk := ext4Disk(t, "store")
+	before := fileBytes(t, disk)
+	p := startPluginWith(t, buildPlugin(t), fmt.Sprintf(`profiles:
+  rw:
+    cpus: 1
+    memory_mib: 512
+    disks: [{source: %s, target: /data, read_write: true}]
+`, disk))
+	v := bootImage(t, p, "rw-disk", pushImage(t, host, "rw-disk", img)+";profile=rw")
+	if code, out := as(t, v, "0", `
+fstype=$(awk '$2 == "/data" { t = $3 } END { print t }' /proc/mounts)
+opts=$(awk '$2 == "/data" { o = $4 } END { print o }' /proc/mounts)
+test "$fstype" = ext4 || { echo "type: $fstype"; exit 1; }
+case ",$opts," in *,rw,*) ;; *) echo "options: $opts"; exit 1;; esac
+test "$(cat /data/marker)" = store
+echo written > /data/new
+sync
+test "$(cat /data/new)" = written`); code != 0 {
+		t.Fatalf("the step exited %d:\n%s", code, out)
+	}
+	if bytes.Equal(fileBytes(t, disk), before) {
+		t.Error("the host file is unchanged after the guest wrote the disk")
+	}
+}
+
+// holdLock opens the host file p on an open file of the test's own, a
+// process other than any job's, and takes how, LOCK_EX or LOCK_SH, on it.
+// The returned func, also run on cleanup, closes it, releasing the lock.
+func holdLock(t *testing.T, p string, how int) func() {
+	t.Helper()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), how|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("lock %s: %v", p, err)
+	}
+	release := func() { _ = f.Close() }
+	t.Cleanup(release)
+	return release
+}
+
+// Every disk takes a disk lock at Start. Against the test's exclusive lock
+// on the disk file, a job with it read-only and one with it read-write each
+// fail Start with the same text; against the test's shared lock, the
+// read-write job fails and the read-only one boots, and a second read-only
+// job boots beside it, two VMs reading one disk at once. With the test's
+// lock gone, the two read-only VMs' own shared locks still fail the
+// read-write job (STO-7, STO-8). The two VMs are as small as boot allows.
+func TestDiskLocks(t *testing.T) {
+	img, host := baseImage(t)
+	disk := ext4Disk(t, "shared")
+	p := startPluginWith(t, buildPlugin(t), fmt.Sprintf(`profiles:
+  ro:
+    cpus: 1
+    memory_mib: 512
+    disks: [{source: %[1]s, target: /data}]
+  rw:
+    cpus: 1
+    memory_mib: 512
+    disks: [{source: %[1]s, target: /data, read_write: true}]
+`, disk))
+	ref := pushImage(t, host, "disk-locks", img)
+	inUse := fmt.Sprintf("disk %s is in use by another process", disk)
+	n := 0
+	wantInUse := func(profile, holder string) {
+		t.Helper()
+		n++
+		v := createImage(t, p, fmt.Sprintf("%s-%d", profile, n), ref+";profile="+profile)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		err := v.start(ctx)
+		if msg := status.Convert(err).Message(); err == nil || !strings.Contains(msg, inUse) {
+			t.Errorf("%s job against %s: Start = %v, want %q", profile, holder, err, inUse)
+		}
+	}
+	release := holdLock(t, disk, unix.LOCK_EX)
+	wantInUse("ro", "an exclusive lock")
+	wantInUse("rw", "an exclusive lock")
+	release()
+
+	release = holdLock(t, disk, unix.LOCK_SH)
+	wantInUse("rw", "a shared lock")
+	a := bootImage(t, p, "ro-a", ref+";profile=ro")
+	b := bootImage(t, p, "ro-b", ref+";profile=ro")
+	release()
+	for _, v := range []*vm{a, b} {
+		if code, out := as(t, v, "0", "test \"$(cat /data/marker)\" = shared"); code != 0 {
+			t.Errorf("a read-only job's step exited %d:\n%s", code, out)
+		}
+	}
+	wantInUse("rw", "two read-only jobs")
 }
