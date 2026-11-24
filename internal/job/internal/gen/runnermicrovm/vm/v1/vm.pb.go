@@ -53,8 +53,11 @@ type Spec struct {
 	RootDir string `protobuf:"bytes,4,opt,name=root_dir,json=rootDir,proto3" json:"root_dir,omitempty"`
 	// The scratch disk's file, already created by the job process (VM-5).
 	ScratchDisk string `protobuf:"bytes,5,opt,name=scratch_disk,json=scratchDisk,proto3" json:"scratch_disk,omitempty"`
-	// The VM's layer link directory, shared read-only (IMG-8, IMG-9).
+	// The VM's layer link directory, shared read-only (IMG-8, IMG-9), and the
+	// virtiofs tag it is shared under: the same value as the boot config's
+	// layer_tag, which the agent mounts.
 	LayerDir string `protobuf:"bytes,6,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
+	LayerTag string `protobuf:"bytes,14,opt,name=layer_tag,json=layerTag,proto3" json:"layer_tag,omitempty"`
 	// The file libkrun writes the VM's console to.
 	Console string `protobuf:"bytes,7,opt,name=console,proto3" json:"console,omitempty"`
 	// The unix socket libkrun maps to the agent's vsock port, and that port:
@@ -143,6 +146,13 @@ func (x *Spec) GetScratchDisk() string {
 func (x *Spec) GetLayerDir() string {
 	if x != nil {
 		return x.LayerDir
+	}
+	return ""
+}
+
+func (x *Spec) GetLayerTag() string {
+	if x != nil {
+		return x.LayerTag
 	}
 	return ""
 }
@@ -318,7 +328,7 @@ var File_runnermicrovm_vm_v1_vm_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"\n" +
-	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xc3\x03\n" +
+	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xe0\x03\n" +
 	"\x04Spec\x12\x17\n" +
 	"\alib_dir\x18\x01 \x01(\tR\x06libDir\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +
@@ -326,7 +336,8 @@ const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"memory_mib\x18\x03 \x01(\rR\tmemoryMib\x12\x19\n" +
 	"\broot_dir\x18\x04 \x01(\tR\arootDir\x12!\n" +
 	"\fscratch_disk\x18\x05 \x01(\tR\vscratchDisk\x12\x1b\n" +
-	"\tlayer_dir\x18\x06 \x01(\tR\blayerDir\x12\x18\n" +
+	"\tlayer_dir\x18\x06 \x01(\tR\blayerDir\x12\x1b\n" +
+	"\tlayer_tag\x18\x0e \x01(\tR\blayerTag\x12\x18\n" +
 	"\aconsole\x18\a \x01(\tR\aconsole\x12!\n" +
 	"\fagent_socket\x18\b \x01(\tR\vagentSocket\x12\x1d\n" +
 	"\n" +

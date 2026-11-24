@@ -21,13 +21,6 @@ import (
 // (internal/plugin's bootConfigPath, which its tests check against this).
 const BootConfigPath = "/.runner-microvm/boot-config.binpb"
 
-// layerTag is the virtiofs tag of the VM's layer link directory.
-//
-// SHORTCUT(#6): provisional pick, and the same tag is what the VM child
-// shares (internal/job/internal/vm's layerTag); the protocol test fails if
-// they part.
-const layerTag = "layers"
-
 // stage holds the scratch disk, each layer and the new root while the agent
 // builds it. devtmpfs is the one writable place before the root exists: the
 // boot root is read-only.
@@ -88,7 +81,7 @@ func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 
 // boot builds the job's root and moves it to / (GST-2):
 //  1. it mounts the scratch disk (ext4);
-//  2. it mounts the layer share read-only;
+//  2. it mounts the layer share read-only, by the boot config's tag;
 //  3. it mounts each layer file as a file-backed EROFS, with no loop device;
 //  4. it builds an overlay of the layers, top first, over the boot root, the
 //     VM's / at boot, with its upper and work directories on the scratch
@@ -118,7 +111,7 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 		func() error { return m.mkdirAll(upper) },
 		func() error { return m.mkdirAll(work) },
 		func() error { return m.mkdirAll(cfg.GetLayerDir()) },
-		func() error { return m.mount(layerTag, cfg.GetLayerDir(), "virtiofs", syscall.MS_RDONLY, "") },
+		func() error { return m.mount(cfg.GetLayerTag(), cfg.GetLayerDir(), "virtiofs", syscall.MS_RDONLY, "") },
 	}
 	// Lower layers top first, the boot root at the bottom.
 	lowers := []string{"/"}
@@ -244,7 +237,7 @@ func parentsFirst(targets []scratchTarget) []int {
 }
 
 // checkBootConfig refuses a config whose layer names would leave the layer
-// share, that names no scratch device or vsock port, whose scratch paths or
+// share, that names no scratch device, vsock port or layer tag, whose scratch paths or
 // guest directories aren't absolute, clean paths below /, or whose guest
 // directory's mode isn't permission bits.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
@@ -253,6 +246,9 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 	}
 	if cfg.GetScratchDevice() == "" {
 		return fmt.Errorf("boot config: no scratch device")
+	}
+	if cfg.GetLayerTag() == "" {
+		return fmt.Errorf("boot config: no layer tag")
 	}
 	if !path.IsAbs(cfg.GetLayerDir()) {
 		return fmt.Errorf("boot config: layer directory %q is not absolute", cfg.GetLayerDir())

@@ -81,8 +81,11 @@ message VM {
   // agent and its boot config. It is the bottom layer of the guest's root.
   string root_dir = 10;
   // The VM's layer link directory, <cache>/jobs/<id>/<n>/, shared into the
-  // VM read-only (IMG-8, IMG-9).
+  // VM read-only (IMG-8, IMG-9), and the virtiofs tag it is shared under:
+  // `layers`, the same value as the boot config's layer_tag, which the agent
+  // mounts.
   string layer_dir = 11;
+  string layer_tag = 17;
   // The VM's mounts and disks (STO-1), disks in guest device order. Today
   // they come only from the label's profile, because the plugin protocol
   // passes no workflow mounts or volumes.

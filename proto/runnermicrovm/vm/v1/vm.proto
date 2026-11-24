@@ -33,8 +33,11 @@ message Spec {
   string root_dir = 4;
   // The scratch disk's file, already created by the job process (VM-5).
   string scratch_disk = 5;
-  // The VM's layer link directory, shared read-only (IMG-8, IMG-9).
+  // The VM's layer link directory, shared read-only (IMG-8, IMG-9), and the
+  // virtiofs tag it is shared under: the same value as the boot config's
+  // layer_tag, which the agent mounts.
   string layer_dir = 6;
+  string layer_tag = 14;
   // The file libkrun writes the VM's console to.
   string console = 7;
   // The unix socket libkrun maps to the agent's vsock port, and that port:

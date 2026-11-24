@@ -38,11 +38,16 @@ const (
 	bootConfigPath = agentDir + "/boot-config.binpb"
 )
 
-// Where the agent mounts the layer share.
-//
-// SHORTCUT(#6): provisional pick, under the agent's staging directory; the
-// VM child's layer share tag is the same kind of pick.
-const guestLayerDir = "/dev/.runner-microvm/layers"
+// The layer share: the virtiofs tag the VM's layer link directory is shared
+// under, and where the agent mounts it. Only the plugin sets them: the job
+// spec carries the tag for libkrun, and the boot config both for the agent,
+// so the share and the mount can't name two tags. The mount point is under
+// the agent's staging directory: the devtmpfs is the one writable place
+// before the job's root exists.
+const (
+	layerTag      = "layers"
+	guestLayerDir = "/dev/.runner-microvm/layers"
+)
 
 // The scratch disk is the VM's first block device.
 const scratchDevice = "/dev/vda"
@@ -158,6 +163,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 	}
 	boot := &agentv1.BootConfig{
 		LayerDir:      guestLayerDir,
+		LayerTag:      layerTag,
 		Layers:        img.Layers,
 		ScratchDevice: scratchDevice,
 		ScratchPaths:  j.profile.ScratchPaths,
@@ -186,6 +192,7 @@ func (s *Server) boot(ctx context.Context, j *job) (map[string]string, error) {
 		AgentPort:        agentPort,
 		RootDir:          root,
 		LayerDir:         img.LinkDir,
+		LayerTag:         layerTag,
 		GuestAddress:     addr.String(),
 		GuestMac:         mac.String(),
 		Boot:             boot,

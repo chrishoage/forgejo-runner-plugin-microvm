@@ -249,6 +249,7 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.Fi
 		RootDir:     v.GetRootDir(),
 		ScratchDisk: v.GetScratchDisk(),
 		LayerDir:    v.GetLayerDir(),
+		LayerTag:    v.GetLayerTag(),
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),

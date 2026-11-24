@@ -72,6 +72,7 @@ func testGuestDirs() []*agentv1.GuestDir {
 func testBootConfig() *agentv1.BootConfig {
 	return &agentv1.BootConfig{
 		LayerDir:      "/dev/.runner-microvm/layers",
+		LayerTag:      "the-layers",
 		Layers:        []string{"0.erofs", "1.erofs", "2.erofs"},
 		ScratchDevice: "/dev/vda",
 		VsockPort:     1024,
@@ -79,7 +80,7 @@ func testBootConfig() *agentv1.BootConfig {
 }
 
 // The agent builds the root from the boot config: the scratch disk, the
-// layer share read-only, each layer as a file-backed EROFS, and one overlay
+// layer share read-only, by the boot config's tag, each layer as a file-backed EROFS, and one overlay
 // of the layers, top first, over the boot root, with its upper and work
 // directories on the scratch disk. It makes the API mounts in it, then moves
 // it to / (GST-2).
@@ -97,7 +98,7 @@ func TestBootBuildsTheRoot(t *testing.T) {
 		"mkdir " + s + "/scratch/upper",
 		"mkdir " + s + "/scratch/work",
 		"mkdir " + s + "/layers",
-		fmt.Sprintf("mount layers %s/layers virtiofs %#x ", s, ro),
+		fmt.Sprintf("mount the-layers %s/layers virtiofs %#x ", s, ro),
 		"mkdir " + s + "/l/0",
 		fmt.Sprintf("mount %s/layers/0.erofs %s/l/0 erofs %#x ", s, s, ro),
 		"mkdir " + s + "/l/1",
@@ -263,6 +264,7 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		"no scratch device":  func(c *agentv1.BootConfig) { c.ScratchDevice = "" },
 		"no vsock port":      func(c *agentv1.BootConfig) { c.VsockPort = 0 },
 		"relative layer dir": func(c *agentv1.BootConfig) { c.LayerDir = "layers" },
+		"no layer tag":       func(c *agentv1.BootConfig) { c.LayerTag = "" },
 		"layer path":         func(c *agentv1.BootConfig) { c.Layers = []string{"../x"} },
 		"empty layer":        func(c *agentv1.BootConfig) { c.Layers = []string{""} },
 		"relative scratch":   func(c *agentv1.BootConfig) { c.ScratchPaths = []string{"srv"} },

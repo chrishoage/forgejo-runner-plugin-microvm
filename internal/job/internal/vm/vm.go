@@ -35,12 +35,6 @@ var agentEnv = []string{}
 // rootTag is the virtiofs tag libkrun boots from (KRUN_FS_ROOT_TAG).
 const rootTag = "/dev/root"
 
-// layerTag is the virtiofs tag of the VM's layer link directory.
-//
-// SHORTCUT(#6): provisional pick, and the same tag is what the agent mounts
-// (internal/agent's layerTag); the protocol test fails if they part.
-const layerTag = "layers"
-
 // scratchBlockID is the scratch disk's block id in libkrun.
 const scratchBlockID = "scratch"
 
@@ -97,6 +91,9 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		return fmt.Errorf("%d CPUs: libkrun takes 1 to 255", cpus)
 	}
 	vcpus := uint8(cpus)
+	if spec.GetLayerTag() == "" {
+		return fmt.Errorf("no layer tag")
+	}
 	mac, err := net.ParseMAC(spec.GetGuestMac())
 	if err != nil || len(mac) != 6 {
 		return fmt.Errorf("guest MAC %q: not an Ethernet address", spec.GetGuestMac())
@@ -119,7 +116,7 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		// guest can't write them even after remounting them read-write
 		// (IMG-9). No DAX window.
 		{"krun_add_virtiofs3 " + rootTag, func() int32 { return lib.addVirtiofs3(ctx, rootTag, spec.GetRootDir(), 0, true) }},
-		{"krun_add_virtiofs3 " + layerTag, func() int32 { return lib.addVirtiofs3(ctx, layerTag, spec.GetLayerDir(), 0, true) }},
+		{"krun_add_virtiofs3 " + spec.GetLayerTag(), func() int32 { return lib.addVirtiofs3(ctx, spec.GetLayerTag(), spec.GetLayerDir(), 0, true) }},
 		// The scratch disk is the first block device, /dev/vda,
 		// read-write (VM-5).
 		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
