@@ -351,6 +351,9 @@ type plugin struct {
 	state string
 	pid   int
 	log   *syncBuffer
+	// base holds its config file and directories, bin is its binary, and
+	// profiles its config file's profiles, for restart.
+	base, bin, profiles string
 }
 
 // writeConfig replaces p's config file with its directory keys and
@@ -476,6 +479,27 @@ func launchPlugin(t *testing.T, bin, profiles string, root bool) *plugin {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return launchPluginIn(t, base, bin, profiles, root)
+}
+
+// restart runs the plugin p ran again, unprivileged, on the same config
+// file and directories, once p's own process has died: launchPluginIn on
+// p's base. The listen socket p left is deleted first.
+//
+// SHORTCUT(#11): startup doesn't delete a socket a crashed plugin left, so
+// the test does.
+func (p *plugin) restart(t *testing.T) *plugin {
+	t.Helper()
+	if err := os.Remove(p.sock); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return launchPluginIn(t, p.base, p.bin, p.profiles, false)
+}
+
+// launchPluginIn is launchPlugin with its config file and directories in
+// base, which its cleanup deletes.
+func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin {
+	t.Helper()
 	remove := func() error { return removeAll(base) }
 	kill := killWithJobs
 	killGroup := func(pgid int) { _ = syscall.Kill(-pgid, syscall.SIGKILL) }
@@ -591,7 +615,10 @@ func launchPlugin(t *testing.T, bin, profiles string, root bool) *plugin {
 			t.Fatal(err)
 		}
 	}
-	return &plugin{sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log}
+	return &plugin{
+		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
+		base: base, bin: bin, profiles: profiles,
+	}
 }
 
 // removeAll deletes dir, giving back the write bit an image's read-only
