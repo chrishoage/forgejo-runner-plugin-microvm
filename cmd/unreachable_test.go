@@ -20,13 +20,20 @@ import (
 )
 
 // The job network's addresses as the guest sees them (docs/architecture.md,
-// Job network), and the agent's vsock port.
+// Job network), the agent's vsock port, and how long the probe gives a
+// connection that must not open.
 const (
-	gatewayIP   = "198.18.0.1"
-	vmIP        = "198.18.0.2"
-	jobSubnet   = "198.18.0.0/24"
-	unusedIP    = "198.18.0.254"
-	agentVsock  = "1024"
+	gatewayIP  = "198.18.0.1"
+	vmIP       = "198.18.0.2"
+	jobSubnet  = "198.18.0.0/24"
+	unusedIP   = "198.18.0.254"
+	agentVsock = "1024"
+	// An unused subnet address never answers ARP, so a connection to it
+	// neither opens nor fails until the bound. One that would open does
+	// so within milliseconds: a NAT entry mapping the address to the
+	// host's loopback, as gvproxy's defaults have for their .254, has the
+	// gateway answer ARP for it at once and its forwarder dial the host's
+	// loopback.
 	unreachWait = "1s"
 )
 
@@ -77,7 +84,9 @@ func (l *hostListener) accepted() []netip.Addr {
 	return slices.Clone(l.from)
 }
 
-// waitAccepted fails t unless l has accepted a connection within 10 s.
+// waitAccepted fails t unless l has accepted a connection within 10 s. A
+// connection the guest opened is accepted within milliseconds, so only a
+// missing one waits it out.
 func (l *hostListener) waitAccepted(t *testing.T) {
 	t.Helper()
 	select {
@@ -157,7 +166,8 @@ func (l *hostUDP) received() []netip.Addr {
 }
 
 // probeIn runs the probe in v with args, allowing it up to five minutes,
-// and fails t unless it exits 0.
+// and fails t unless it exits 0. The probe bounds each of its own waits in
+// seconds, so only an Exec that hangs reaches the bound.
 func probeIn(t *testing.T, v *vm, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
@@ -195,10 +205,12 @@ func TestGuestCantReach(t *testing.T) {
 		loRan = true
 		lo, out := listenPair(t, host)
 		port := strconv.Itoa(int(lo.addr().Port()))
+		// The probe's default 10 s for the positive control, which only
+		// a connection that fails waits out.
 		probeIn(t, v, "connect", out.addr().String())
 		out.waitAccepted(t)
-		// Each within a second: an unused subnet address never answers
-		// ARP, so a connection to it waits rather than being refused.
+		// 127.0.0.1 is the guest's own and the guard resets a connection
+		// to the gateway, so only the unused address waits unreachWait.
 		probeIn(t, v, "unreachable", "-timeout", unreachWait, port, "127.0.0.1", gatewayIP, unusedIP)
 		if from := lo.accepted(); len(from) != 0 {
 			t.Errorf("the listener on the host's loopback accepted from %v", from)
@@ -211,6 +223,8 @@ func TestGuestCantReach(t *testing.T) {
 		outUDP := listenHostUDP(t, netip.AddrPortFrom(host, 0))
 		loPort := strconv.Itoa(int(loUDP.addr().Port()))
 		probeIn(t, v, "udp", "0.0.0.0:"+loPort, "127.0.0.1:"+loPort, outUDP.addr().String())
+		// The control arrives within milliseconds of the probe's exit,
+		// so only a missing one waits out the 10 s.
 		select {
 		case <-outUDP.seen:
 			controlAt = time.Now()
@@ -225,6 +239,8 @@ func TestGuestCantReach(t *testing.T) {
 		// way, so the bound costs only a failing run.
 		probeIn(t, v, "refuses", "-timeout", "5s", gatewayIP, "1-52")
 		probeIn(t, v, "refuses", "-timeout", "5s", gatewayIP, "54-65535")
+		// Each answer waits up to the probe's default 10 s, which only a
+		// missing one waits out.
 		for _, network := range []string{"-tcp=false", "-tcp"} {
 			if out := probeIn(t, v, "resolve", network, "localhost", gatewayIP+":53"); !strings.Contains(out, "127.0.0.1") {
 				t.Errorf("resolve %s: no 127.0.0.1 in %q", network, out)
