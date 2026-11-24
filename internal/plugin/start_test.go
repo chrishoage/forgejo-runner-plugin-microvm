@@ -107,7 +107,7 @@ func TestStartBootsTheVM(t *testing.T) {
 	// The job's name made DNS-safe is the VM's hostname, and the hosts
 	// list names it at its address; there is no search domain to carry.
 	wantBoot := &agentv1.BootConfig{
-		LayerDir: "/dev/.runner-microvm/layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
+		LayerDir: "/dev/.runner-microvm/layers", LayerTag: "layers", Layers: []string{"0.erofs", "1.erofs"}, ScratchDevice: "/dev/vda",
 		Network:   &agentv1.Network{Address: "198.18.0.2/24", Gateway: "198.18.0.1", Mtu: 1500},
 		Hostname:  "forgejo-actions-task-7-job-build",
 		Hosts:     []*agentv1.Host{{Name: "forgejo-actions-task-7-job-build", Address: "198.18.0.2"}},
@@ -134,7 +134,7 @@ func TestStartBootsTheVM(t *testing.T) {
 		vm.GetAgentSocket() != filepath.Join(srv.cfg.Dirs.Runtime, id, "0", "agent.sock") ||
 		vm.GetConsole() != filepath.Join(state, "0", "console") || vm.GetVmLog() != filepath.Join(state, "0", "vm.log") ||
 		vm.GetScratchDisk() != filepath.Join(state, "0", "scratch.ext4") || vm.GetScratchSizeBytes() != 10<<30 ||
-		vm.GetLayerDir() != filepath.Join(srv.cfg.Dirs.Cache, "jobs", id, "0") || !proto.Equal(vm.GetBoot(), wantBoot) ||
+		vm.GetLayerDir() != filepath.Join(srv.cfg.Dirs.Cache, "jobs", id, "0") || vm.GetLayerTag() != "layers" || !proto.Equal(vm.GetBoot(), wantBoot) ||
 		vm.GetGuestAddress() != "198.18.0.2" || vm.GetGuestMac() != "02:00:c6:12:00:02" {
 		t.Errorf("VM = %v", vm)
 	}

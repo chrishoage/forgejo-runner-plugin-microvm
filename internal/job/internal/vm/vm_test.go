@@ -52,7 +52,7 @@ func fakeKrun(calls *[]string, fail string) krun {
 
 func testSpec() *vmv1.Spec {
 	return &vmv1.Spec{
-		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", LayerDir: "/cache/jobs/j/0", Console: "/state/jobs/j/0/console",
+		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", LayerDir: "/cache/jobs/j/0", LayerTag: "the-layers", Console: "/state/jobs/j/0/console",
 		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024, ScratchDisk: "/state/jobs/j/0/scratch.ext4",
 		GuestMac: "02:00:c6:12:00:02",
 	}
@@ -69,7 +69,7 @@ func TestBootConfiguresTheVM(t *testing.T) {
 		"create_ctx",
 		"set_vm_config 7 2 1024",
 		"add_virtiofs3 7 /dev/root /state/jobs/j/0/root 0 true",
-		"add_virtiofs3 7 layers /cache/jobs/j/0 0 true",
+		"add_virtiofs3 7 the-layers /cache/jobs/j/0 0 true",
 		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
 		// No path, fd 4, the VM's MAC, no features and flags 0: no DHCP
 		// client and no vfkit handshake.
@@ -110,6 +110,18 @@ func TestBootRefusesABadMAC(t *testing.T) {
 		if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
 			t.Errorf("MAC %q: err %v, calls %v", mac, err, calls)
 		}
+	}
+}
+
+// The layer share's tag comes from the spec, so the agent mounts what
+// libkrun shares; an empty one would share the layers under no name.
+func TestBootRefusesNoLayerTag(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	spec := testSpec()
+	spec.LayerTag = ""
+	if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
+		t.Errorf("no layer tag: err %v, calls %v", err, calls)
 	}
 }
 

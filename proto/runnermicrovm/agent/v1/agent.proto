@@ -104,8 +104,14 @@ message FlushResponse {}
 // /.runner-microvm/boot-config.binpb, encoded as binary protobuf.
 message BootConfig {
   // The guest directory where the agent mounts the VM's layer link
-  // directory's share.
+  // directory's share: /dev/.runner-microvm/layers, under the agent's
+  // staging directory, since the devtmpfs is the one writable place before
+  // the job's root exists.
   string layer_dir = 1;
+  // The virtiofs tag the VM's layer link directory is shared under, which
+  // the agent mounts: `layers`. Only the plugin sets it: the same value is
+  // the tag libkrun shares the directory under.
+  string layer_tag = 13;
   // The image's layers as file names in layer_dir, bottom layer first. Each
   // is mounted as a file-backed EROFS, and the agent stacks them in one
   // overlay over the boot root, with a writable layer on the scratch disk

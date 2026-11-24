@@ -176,8 +176,11 @@ type VM struct {
 	// agent and its boot config. It is the bottom layer of the guest's root.
 	RootDir string `protobuf:"bytes,10,opt,name=root_dir,json=rootDir,proto3" json:"root_dir,omitempty"`
 	// The VM's layer link directory, <cache>/jobs/<id>/<n>/, shared into the
-	// VM read-only (IMG-8, IMG-9).
+	// VM read-only (IMG-8, IMG-9), and the virtiofs tag it is shared under:
+	// `layers`, the same value as the boot config's layer_tag, which the agent
+	// mounts.
 	LayerDir string `protobuf:"bytes,11,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
+	LayerTag string `protobuf:"bytes,17,opt,name=layer_tag,json=layerTag,proto3" json:"layer_tag,omitempty"`
 	// The VM's mounts and disks (STO-1), disks in guest device order. Today
 	// they come only from the label's profile, because the plugin protocol
 	// passes no workflow mounts or volumes.
@@ -297,6 +300,13 @@ func (x *VM) GetRootDir() string {
 func (x *VM) GetLayerDir() string {
 	if x != nil {
 		return x.LayerDir
+	}
+	return ""
+}
+
+func (x *VM) GetLayerTag() string {
+	if x != nil {
+		return x.LayerTag
 	}
 	return ""
 }
@@ -888,7 +898,7 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\alib_dir\x18\x03 \x01(\tR\x06libDir\x127\n" +
 	"\anetwork\x18\x04 \x01(\v2\x1d.runnermicrovm.job.v1.NetworkR\anetwork\x12*\n" +
 	"\x03vms\x18\x05 \x03(\v2\x18.runnermicrovm.job.v1.VMR\x03vms\x12\x1b\n" +
-	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\"\xa8\x04\n" +
+	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\"\xc5\x04\n" +
 	"\x02VM\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +
@@ -903,7 +913,8 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"agent_port\x18\t \x01(\rR\tagentPort\x12\x19\n" +
 	"\broot_dir\x18\n" +
 	" \x01(\tR\arootDir\x12\x1b\n" +
-	"\tlayer_dir\x18\v \x01(\tR\blayerDir\x123\n" +
+	"\tlayer_dir\x18\v \x01(\tR\blayerDir\x12\x1b\n" +
+	"\tlayer_tag\x18\x11 \x01(\tR\blayerTag\x123\n" +
 	"\x06mounts\x18\f \x03(\v2\x1b.runnermicrovm.job.v1.MountR\x06mounts\x120\n" +
 	"\x05disks\x18\r \x03(\v2\x1a.runnermicrovm.job.v1.DiskR\x05disks\x12#\n" +
 	"\rguest_address\x18\x0e \x01(\tR\fguestAddress\x12\x1b\n" +

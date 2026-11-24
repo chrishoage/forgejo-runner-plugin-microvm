@@ -564,8 +564,14 @@ func (*FlushResponse) Descriptor() ([]byte, []int) {
 type BootConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The guest directory where the agent mounts the VM's layer link
-	// directory's share.
+	// directory's share: /dev/.runner-microvm/layers, under the agent's
+	// staging directory, since the devtmpfs is the one writable place before
+	// the job's root exists.
 	LayerDir string `protobuf:"bytes,1,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
+	// The virtiofs tag the VM's layer link directory is shared under, which
+	// the agent mounts: `layers`. Only the plugin sets it: the same value is
+	// the tag libkrun shares the directory under.
+	LayerTag string `protobuf:"bytes,13,opt,name=layer_tag,json=layerTag,proto3" json:"layer_tag,omitempty"`
 	// The image's layers as file names in layer_dir, bottom layer first. Each
 	// is mounted as a file-backed EROFS, and the agent stacks them in one
 	// overlay over the boot root, with a writable layer on the scratch disk
@@ -641,6 +647,13 @@ func (*BootConfig) Descriptor() ([]byte, []int) {
 func (x *BootConfig) GetLayerDir() string {
 	if x != nil {
 		return x.LayerDir
+	}
+	return ""
+}
+
+func (x *BootConfig) GetLayerTag() string {
+	if x != nil {
+		return x.LayerTag
 	}
 	return ""
 }
@@ -1128,10 +1141,11 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\x98\x04\n" +
+	"\rFlushResponse\"\xb5\x04\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
-	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x16\n" +
+	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x1b\n" +
+	"\tlayer_tag\x18\r \x01(\tR\blayerTag\x12\x16\n" +
 	"\x06layers\x18\x02 \x03(\tR\x06layers\x12%\n" +
 	"\x0escratch_device\x18\x03 \x01(\tR\rscratchDevice\x12#\n" +
 	"\rscratch_paths\x18\x04 \x03(\tR\fscratchPaths\x125\n" +
