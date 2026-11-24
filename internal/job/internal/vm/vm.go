@@ -83,7 +83,7 @@ func Main(in io.Reader, log *slog.Logger) int {
 		log.Error("agent socket directory", "err", err)
 		return 1
 	}
-	lib, err := load(spec.GetLibDir())
+	lib, _, err := load(spec.GetLibDir())
 	if err != nil {
 		log.Error("load libkrun", "err", err)
 		return 1
@@ -93,6 +93,34 @@ func Main(in io.Reader, log *slog.Logger) int {
 	runtime.LockOSThread()
 	if err := boot(lib, spec); err != nil {
 		log.Error("boot", "err", err)
+		return 1
+	}
+	return 0
+}
+
+// Libs loads libkrun and libkrunfw as Main does, from dir or, when it is
+// empty, by soname, requiring every libkrun function Main calls, and prints
+// the files the loader picked to out, one line each:
+//
+//	libkrun.so.1=<file>
+//	libkrunfw.so.5=<file>
+//
+// It is `runner-microvm-job libs [<dir>]`, which the plugin runs once at
+// startup, so that a missing library or function stops the plugin instead
+// of failing every Start. It returns the exit code: 1 after printing the
+// error to errOut.
+func Libs(dir string, out, errOut io.Writer) int {
+	if dir != "" && !filepath.IsAbs(dir) {
+		_, _ = fmt.Fprintf(errOut, "lib_dir %s is not an absolute path\n", dir)
+		return 1
+	}
+	_, files, err := load(dir)
+	if err != nil {
+		_, _ = fmt.Fprintln(errOut, err)
+		return 1
+	}
+	if _, err := fmt.Fprintf(out, "%s=%s\n%s=%s\n", libkrun, files.Libkrun, libkrunfw, files.Libkrunfw); err != nil {
+		_, _ = fmt.Fprintln(errOut, err)
 		return 1
 	}
 	return 0
