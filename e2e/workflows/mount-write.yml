@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Mounts and disks epic's exit check: a job's step, as the guest's root,
+# writes a file to the storage profile's read-write mount, at /mnt/rw. After
+# the run, `just e2e run mount-write` checks the file is in the host
+# directory, owned by the plugin's user (STO-3; docs/development.md, The
+# local harness).
+name: mount-write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mount-write:
+    runs-on: microvm-storage
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          set -eu
+          test "$(id -u)" = 0
+          echo "run ${{ github.run_id }}" >/mnt/rw/written
+          echo "wrote /mnt/rw/written as uid $(id -u): $(ls -ln /mnt/rw/written)"

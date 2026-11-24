@@ -79,6 +79,11 @@ plugin_config := state / "plugin-config.yaml"
 plugin_pid := state / "plugin.pid"
 plugin_log := state / "plugin.log"
 
+# The storage profile's fixtures, which `up` makes when missing, and the
+# marker file's text, which e2e/workflows/mount-read.yml checks.
+storage := state / "storage"
+ro_marker := "read-only fixture of the runner-microvm e2e harness"
+
 # List the harness's recipes.
 [private]
 default:
@@ -98,11 +103,25 @@ up:
     # background, so an agent needs no second terminal. Its pid and log
     # are in .e2e/; `down` stops it.
     just --justfile '{{ justfile_directory() }}/justfile' build
+    # The storage profile's fixtures, under .e2e/storage, made when
+    # missing: a directory holding a marker file, for the read-only mount;
+    # an empty directory, for the read-write mount; and an ext4 disk file,
+    # for the read-write disk. The plugin runs on the host, so its config
+    # names them where they are. They must exist before `check`, which
+    # checks every source.
+    mkdir -p '{{ storage }}/ro' '{{ storage }}/rw'
+    [ -f '{{ storage }}/ro/marker' ] || printf '%s\n' '{{ ro_marker }}' >'{{ storage }}/ro/marker'
+    if [ ! -f '{{ storage }}/disk.ext4' ]; then
+        truncate -s 64M '{{ storage }}/disk.ext4.tmp'
+        mkfs.ext4 -q -F -E root_owner=0:0 '{{ storage }}/disk.ext4.tmp'
+        mv '{{ storage }}/disk.ext4.tmp' '{{ storage }}/disk.ext4'
+    fi
     # Its config file puts its directories under .e2e/plugin, with the
     # listen socket in the runtime directory, which the runner's container
-    # mounts. It defines default and a larger profile, big, which the
-    # microvm-big label names; each key on a line of its own, so an edit
-    # for a reload is one sed.
+    # mounts. It defines default, a larger profile, big, which the
+    # microvm-big label names, and storage, with the fixtures above, which
+    # the microvm-storage label names; each key on a line of its own, so an
+    # edit for a reload is one sed.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
     {
         echo "listen: unix://$sock"
@@ -118,6 +137,20 @@ up:
         echo "    cpus: 2"
         echo "    memory_mib: 1536"
         echo "    scratch_gib: 4"
+        echo "  storage:"
+        echo "    cpus: 1"
+        echo "    memory_mib: 768"
+        echo "    scratch_gib: 2"
+        echo "    mounts:"
+        echo "      - source: {{ storage }}/ro"
+        echo "        target: /mnt/ro"
+        echo "      - source: {{ storage }}/rw"
+        echo "        target: /mnt/rw"
+        echo "        read_write: true"
+        echo "    disks:"
+        echo "      - source: {{ storage }}/disk.ext4"
+        echo "        target: /mnt/disk"
+        echo "        read_write: true"
     } >'{{ plugin_config }}'
     export RUNNER_MICROVM_CONFIG='{{ plugin_config }}'
     '{{ plugin }}' check
@@ -173,7 +206,7 @@ up:
     {{ compose }} logs runner >&2
     exit 1
 
-# Push e2e/workflows/<workflow>.yml to a fresh repository of that name, dispatch it, print the job's log and the VM's shape; fail unless it succeeds and the log shows the first step's output.
+# Push e2e/workflows/<workflow>.yml to a fresh repository of that name, dispatch it, print the job's log and the VM's shape; fail unless it succeeds and the log shows the first step's output, and for mount-write unless the file it wrote is on the host, owned by the plugin's user.
 run workflow="echo":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -212,6 +245,14 @@ run workflow="echo":
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
         GIT_CONFIG_VALUE_0="Authorization: Basic $(printf '%s:%s' '{{ admin }}' "$password" | base64 -w0)" \
         timeout 60 git -C "$work" push -q "http://127.0.0.1:3000/{{ admin }}/{{ workflow }}.git" main
+
+    # mount-write's step writes this file on the read-write mount, and the
+    # check after the run reads its owner, so none may be left from a
+    # run before.
+    written='{{ storage }}/rw/written'
+    if [ '{{ workflow }}' = mount-write ]; then
+        rm -f "$written"
+    fi
 
     run_id=$(call -X POST "$repo/actions/workflows/{{ workflow }}.yml/dispatches" \
         -d '{"ref": "main", "return_run_info": true}' | jq -er .id)
@@ -256,6 +297,21 @@ run workflow="echo":
     # The VM's shape, as each shape step printed it: its own line, like the
     # step's output above.
     grep -E '^shape: ' <<<"$lines" | sed 's/^/run {{ workflow }}: /' || true
+    # The file mount-write's step wrote as the guest's root must be on the
+    # host, owned by the plugin's user, who is the user running the
+    # harness: the plugin runs unprivileged on the host (STO-3).
+    if [ '{{ workflow }}' = mount-write ]; then
+        [ -f "$written" ] || {
+            echo "the job wrote no file to the read-write mount: no $written" >&2
+            exit 1
+        }
+        owner=$(stat -c %u "$written")
+        if [ "$owner" != "$(id -u)" ]; then
+            echo "$written is owned by uid $owner, not by the plugin's user, uid $(id -u)" >&2
+            exit 1
+        fi
+        echo "run {{ workflow }}: $written on the host: $(cat "$written"), owned by $(stat -c '%U (uid %u)' "$written"), the plugin's user"
+    fi
 
 # Send the plugin SIGHUP, so it reloads .e2e/plugin-config.yaml; print the reload's log lines, and fail if it failed.
 reload:

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Mounts and disks epic's exit check: a job reads the storage profile's
+# read-only mount, at /mnt/ro, and finds the marker file `just e2e up` put in
+# its host directory, with the text of `ro_marker` in e2e/mod.just
+# (docs/development.md, The local harness).
+name: mount-read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mount-read:
+    runs-on: microvm-storage
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: |
+          set -eu
+          marker=$(cat /mnt/ro/marker)
+          echo "read from /mnt/ro/marker: $marker"
+          test "$marker" = "read-only fixture of the runner-microvm e2e harness"

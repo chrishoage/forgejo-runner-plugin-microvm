@@ -56,8 +56,9 @@ var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: 
 // plugin client, and the plugin boots the image in e2e/image as real VMs.
 // No Forgejo, no runner daemon. The test maps the harness's microvm and
 // microvm-big labels; a workflow with a job on any other label, such as the
-// Network epic's on microvm-node, needs the harness's Forgejo or the
-// internet, and is skipped, naming the label. Each workflow must succeed
+// Network epic's on microvm-node, which need the harness's Forgejo or the
+// internet, or the Mounts and disks epic's on microvm-storage, which need
+// the harness's fixtures, is skipped, naming the label. Each workflow must succeed
 // and show its first step's output, and workflowChecks adds a workflow's
 // own checks.
 func TestWorkflows(t *testing.T) {
