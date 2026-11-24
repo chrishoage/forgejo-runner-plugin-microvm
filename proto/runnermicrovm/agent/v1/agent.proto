@@ -31,7 +31,10 @@ service AgentService {
   rpc CopyOut(CopyOutRequest) returns (stream CopyOutResponse);
 
   // Flush writes everything on the VM's read-write mounts and disks through
-  // to the host, before a job with read-write storage ends normally (STO-9).
+  // to the host, before a job with read-write storage ends normally (STO-9):
+  // sync(), then FIFREEZE on each read-write disk's mount, which leaves its
+  // ext4 clean. The disks stay frozen: the VM is killed right after. It
+  // fails with FailedPrecondition, naming each disk it could not freeze.
   rpc Flush(FlushRequest) returns (FlushResponse);
 }
 

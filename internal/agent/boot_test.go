@@ -146,7 +146,7 @@ func testBootConfig() *agentv1.BootConfig {
 func TestBootBuildsTheRoot(t *testing.T) {
 	t.Parallel()
 	m := &fakeMounter{}
-	if err := boot(m, testBootConfig()); err != nil {
+	if _, err := boot(m, testBootConfig()); err != nil {
 		t.Fatal(err)
 	}
 	const s = "/dev/.runner-microvm"
@@ -203,7 +203,7 @@ func TestBootMakesTheScratchPaths(t *testing.T) {
 		"/var/lib/docker":         {resolved: "/var/lib/docker", mode: 0o711},
 		"/var/lib/docker/volumes": {resolved: "/var/lib/docker/volumes", uid: 12, gid: 34, mode: 0o700},
 	}}
-	if err := boot(m, cfg); err != nil {
+	if _, err := boot(m, cfg); err != nil {
 		t.Fatal(err)
 	}
 	const s = "/dev/.runner-microvm"
@@ -233,7 +233,7 @@ func TestBootMakesTheScratchPaths(t *testing.T) {
 	}
 	// No scratch paths: no directory for them.
 	m = &fakeMounter{}
-	if err := boot(m, testBootConfig()); err != nil {
+	if _, err := boot(m, testBootConfig()); err != nil {
 		t.Fatal(err)
 	}
 	if slices.ContainsFunc(m.calls, func(c string) bool { return strings.Contains(c, "paths") }) {
@@ -249,7 +249,7 @@ func TestBootOrdersScratchPathsByWhereTheyLand(t *testing.T) {
 	// The image has /deep/x/y -> /top.
 	cfg.ScratchPaths = []string{"/top/z", "/deep/x/y"}
 	m := &fakeMounter{image: map[string]scratchTarget{"/deep/x/y": {resolved: "/top", mode: 0o755}}}
-	if err := boot(m, cfg); err != nil {
+	if _, err := boot(m, cfg); err != nil {
 		t.Fatal(err)
 	}
 	var binds []string
@@ -280,7 +280,7 @@ func TestBootRefusesAScratchPathLandingBadly(t *testing.T) {
 		cfg := testBootConfig()
 		cfg.ScratchPaths = []string{"/srv", "/var/lib/docker"}
 		m := &fakeMounter{image: tc.image}
-		err := boot(m, cfg)
+		_, err := boot(m, cfg)
 		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
 		}
@@ -291,7 +291,7 @@ func TestBootRefusesAScratchPathLandingBadly(t *testing.T) {
 	// /devices is not in /dev.
 	cfg := testBootConfig()
 	cfg.ScratchPaths = []string{"/devices"}
-	if err := boot(&fakeMounter{}, cfg); err != nil {
+	if _, err := boot(&fakeMounter{}, cfg); err != nil {
 		t.Errorf("/devices: %v", err)
 	}
 }
@@ -313,7 +313,7 @@ func TestBootMakesTheMounts(t *testing.T) {
 		{Tag: "mount2", Target: "/link/sub", ReadWrite: true},
 	}
 	m := &fakeMounter{targets: map[string]string{"/link/sub": "/real/sub"}}
-	if err := boot(m, cfg); err != nil {
+	if _, err := boot(m, cfg); err != nil {
 		t.Fatal(err)
 	}
 	const r = "/dev/.runner-microvm/root"
@@ -338,7 +338,7 @@ func TestBootMakesTheMounts(t *testing.T) {
 	cfg.GuestDirs = testGuestDirs()
 	cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/opt/tools"}}
 	m = &fakeMounter{}
-	if err := boot(m, cfg); err != nil {
+	if _, err := boot(m, cfg); err != nil {
 		t.Fatal(err)
 	}
 	want = []string{
@@ -378,7 +378,7 @@ func TestBootRefusesAMountLandingBadly(t *testing.T) {
 		cfg := testBootConfig()
 		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv"}, {Tag: "mount1", Target: "/opt/tools"}}
 		m := &fakeMounter{targets: tc.targets}
-		err := boot(m, cfg)
+		_, err := boot(m, cfg)
 		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
 		}
@@ -424,7 +424,7 @@ func TestBootRefusesAMountHidingAScratchPathOrDirectory(t *testing.T) {
 		cfg.GuestDirs = testGuestDirs()
 		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/data"}, {Tag: "mount1", Target: "/opt/tools"}}
 		m := &fakeMounter{targets: tc.targets, dirs: tc.dirs}
-		err := boot(m, cfg)
+		_, err := boot(m, cfg)
 		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
 		}
@@ -437,7 +437,7 @@ func TestBootRefusesAMountHidingAScratchPathOrDirectory(t *testing.T) {
 	cfg.ScratchPaths = []string{"/srv"}
 	cfg.GuestDirs = testGuestDirs()
 	cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv/tools"}, {Tag: "mount1", Target: "/tmp/x"}, {Tag: "mount2", Target: "/srvx"}}
-	if err := boot(&fakeMounter{}, cfg); err != nil {
+	if _, err := boot(&fakeMounter{}, cfg); err != nil {
 		t.Errorf("under: %v", err)
 	}
 }
@@ -463,7 +463,7 @@ func TestBootMakesTheDisks(t *testing.T) {
 		devices:     map[string]string{"disk0": "/dev/vdd", "disk2": "/dev/vdb"},
 		superblocks: map[string]superblock{"/dev/vdc": {fstype: fsErofs}},
 	}
-	if err := boot(m, cfg); err != nil {
+	if _, err := boot(m, cfg); err != nil {
 		t.Fatal(err)
 	}
 	const r = "/dev/.runner-microvm/root"
@@ -538,7 +538,7 @@ func TestBootRefusesABadDisk(t *testing.T) {
 		cfg := testBootConfig()
 		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv"}}
 		cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/data"}, {BlockId: "disk1", Target: "/opt/tools", ReadWrite: tc.rw}}
-		err := boot(tc.m, cfg)
+		_, err := boot(tc.m, cfg)
 		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
 		}
@@ -552,7 +552,7 @@ func TestBootRefusesABadDisk(t *testing.T) {
 	// replays it.
 	cfg := testBootConfig()
 	cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/data", ReadWrite: true}}
-	if err := boot(&fakeMounter{superblocks: map[string]superblock{"/dev/vdb": {fstype: fsExt4, needsRecovery: true}}}, cfg); err != nil {
+	if _, err := boot(&fakeMounter{superblocks: map[string]superblock{"/dev/vdb": {fstype: fsExt4, needsRecovery: true}}}, cfg); err != nil {
 		t.Errorf("a read-write disk needing recovery: %v", err)
 	}
 }
@@ -571,7 +571,7 @@ func TestBootStopsAtAFailedStep(t *testing.T) {
 		cfg.GuestDirs = testGuestDirs()
 		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/data"}}
 		cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/disk"}}
-		err := boot(m, cfg)
+		_, err := boot(m, cfg)
 		if err == nil || !errors.Is(err, syscall.EINVAL) {
 			t.Errorf("%s fails: err = %v, want EINVAL", fail, err)
 		}
@@ -611,7 +611,7 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		cfg := testBootConfig()
 		edit(cfg)
 		m := &fakeMounter{}
-		if err := boot(m, cfg); err == nil {
+		if _, err := boot(m, cfg); err == nil {
 			t.Errorf("%s: booted", name)
 		}
 		if len(m.calls) != 0 {

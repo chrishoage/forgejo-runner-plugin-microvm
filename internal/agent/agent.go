@@ -40,7 +40,8 @@ func Main(args []string) int {
 		log.Error("boot", "err", err)
 		return 1
 	}
-	if err := boot(kernel{}, cfg); err != nil {
+	rwDisks, err := boot(kernel{}, cfg)
+	if err != nil {
 		log.Error("boot", "err", err)
 		return 1
 	}
@@ -60,17 +61,11 @@ func Main(args []string) int {
 		return 1
 	}
 	log.Info("serving", "addr", lis.Addr())
-	if err := Serve(lis, log, cfg.GetImage()); err != nil {
+	if err := serve(lis, &server{log: log, image: cfg.GetImage(), root: "/", rwDisks: rwDisks}); err != nil {
 		log.Error("serve", "err", err)
 		return 1
 	}
 	return 0
-}
-
-// Serve serves the agent protocol on lis until lis fails, in the job's
-// root, /, with image, the boot config's defaults for Exec.
-func Serve(lis net.Listener, log *slog.Logger, image *agentv1.Image) error {
-	return serve(lis, &server{log: log, image: image, root: "/"})
 }
 
 // serve serves s on lis until lis fails.
@@ -95,6 +90,10 @@ type server struct {
 	// resolves users against: /, once the agent has moved into it; a
 	// directory of a test's.
 	root string
+	// rwDisks are the read-write disks boot mounted, which Flush freezes.
+	rwDisks []rwDisk
+	// flusher is Flush's kernel; nil is the real one.
+	flusher flusher
 	// execExited, when set, is called once Exec has told its output that
 	// the command exited: a test's view of it. Nil outside tests.
 	execExited func()

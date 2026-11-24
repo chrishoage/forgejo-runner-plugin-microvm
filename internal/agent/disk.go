@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // The superblock magics the probe reads (STO-4): EROFS's at byte 1024 of
@@ -45,6 +46,8 @@ type superblock struct {
 	fstype string
 	// needsRecovery is set on an ext4 disk whose journal needs replaying.
 	needsRecovery bool
+	// dev is the block device's number, which probeDisk reads.
+	dev uint64
 }
 
 // probe reads the superblock of the disk r and returns the filesystem it
@@ -70,14 +73,21 @@ func probe(r io.ReaderAt) (superblock, error) {
 	return superblock{}, errNotExt4OrErofs
 }
 
-// probeDisk reads the superblock of the block device device.
+// probeDisk reads the superblock of the block device device, and its
+// device number.
 func (kernel) probeDisk(device string) (superblock, error) {
 	f, err := os.Open(device) //nolint:gosec // G304: a guest block device the agent found by its serial
 	if err != nil {
 		return superblock{}, err
 	}
 	defer func() { _ = f.Close() }()
-	return probe(f)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return superblock{}, err
+	}
+	sb, err := probe(f)
+	sb.dev = st.Rdev
+	return sb, err
 }
 
 // findDisk returns the block device, under /dev, whose virtio-blk serial is
