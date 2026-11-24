@@ -135,6 +135,10 @@ A host directory shared into a VM. Today only the label's profile names mounts, 
 A host file attached to a VM as a block device. Today only the label's profile names disks, for the job's container, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin protocol doesn't pass it today.
 
+**Disk lock**:
+A job process's hold on a disk, which the VM child it is attached to shares, until that VM child has exited: exclusive for a read-write disk, shared for a read-only one. Any number of VMs can read a disk at once, but a writer excludes every other user, readers included.
+_Avoid_: lease, reservation
+
 ## Process
 
 **Harness**:

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Package job is the job process: it reads its spec from the control
-// channel, runs the job network, locks the read-write disks, starts a VM child
+// channel, runs the job network, takes its disks' locks, starts a VM child
 // for each of the spec's VMs and reports status events. With `vm` it is a VM
 // child instead.
 //
@@ -356,13 +356,23 @@ func checkMounts(mounts []*jobv1.Mount) error {
 	return nil
 }
 
-// openDisks opens each disk's source, read-only for a read-only disk, for
-// the VM child to inherit, and returns the files in disks' order. A source
-// that is missing or not a regular file is an error naming it, and closes
-// the files already open (STO-5, PROTO-10). The config checked each source
-// when it was read, but a source can change since; libkrun is handed the
-// open file, so the file checked is the file attached. The open never
-// blocks, so a FIFO put at the source can't hang the job.
+// openDisks opens each disk's source, read-only for a read-only disk, and
+// takes its disk lock, for the VM child to inherit, and returns the files in
+// disks' order. A source that is missing or not a regular file is an error
+// naming it, and so is a disk whose lock another process holds; either
+// closes the files already open, which releases their locks (STO-5, STO-7,
+// STO-8, PROTO-10). The config checked each source when it was read, but a
+// source can change since; libkrun is handed the open file, so the file
+// checked, and locked, is the file attached. The open never blocks, so a
+// FIFO put at the source can't hang the job, and nor does the lock: a disk
+// in use fails at once (until #10's queue), so the order the disks are
+// locked in can't deadlock two jobs.
+//
+// Each file is close-on-exec, so mkfs never holds a lock; only the VM
+// child, which gets the files as fd 5 and up, does. The lock belongs to
+// the open file, which the job process and its VM child then share, so it
+// lasts until both have closed it: as long as any process that can use the
+// disk lives.
 func openDisks(disks []*jobv1.Disk) (files []*os.File, err error) {
 	defer func() {
 		if err != nil {
@@ -393,8 +403,45 @@ func openDisks(disks []*jobv1.Disk) (files []*os.File, err error) {
 		if !fi.Mode().IsRegular() {
 			return files, fmt.Errorf("disk %s: is not a regular file", d.GetSource())
 		}
+		if err := lockDisk(f, d.GetReadWrite()); err != nil {
+			return files, err
+		}
 	}
 	return files, nil
+}
+
+// lockDisk takes the disk lock on f, a disk's open source: an exclusive
+// flock for a read-write disk, a shared one for a read-only disk, never
+// waiting. A lock another open file holds, in this process or another, is
+// `disk <source> is in use by another process`, whichever lock this job
+// wanted (STO-7, STO-8).
+func lockDisk(f *os.File, readWrite bool) error {
+	how := unix.LOCK_SH
+	if readWrite {
+		how = unix.LOCK_EX
+	}
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("disk %s: lock: %w", f.Name(), err)
+	}
+	var lockErr error
+	err = rc.Control(func(fd uintptr) {
+		for {
+			lockErr = unix.Flock(int(fd), how|unix.LOCK_NB)
+			if !errors.Is(lockErr, unix.EINTR) {
+				return
+			}
+		}
+	})
+	switch {
+	case err != nil:
+		return fmt.Errorf("disk %s: lock: %w", f.Name(), err)
+	case errors.Is(lockErr, unix.EWOULDBLOCK):
+		return fmt.Errorf("disk %s is in use by another process", f.Name())
+	case lockErr != nil:
+		return fmt.Errorf("disk %s: lock: %w", f.Name(), lockErr)
+	}
+	return nil
 }
 
 // closeAll closes files.

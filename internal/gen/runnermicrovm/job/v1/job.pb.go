@@ -420,15 +420,18 @@ type Disk struct {
 	// The block id libkrun attaches it under; the boot config names the same
 	// id.
 	BlockId string `protobuf:"bytes,3,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
-	// A read-write disk is locked with an exclusive flock for the life of the
-	// job process and that VM's VM child. A disk held by another process fails
-	// the job: `disk <source> is in use by another process` (STO-7).
+	// Every disk takes a disk lock on the file the job process opened: an
+	// exclusive flock for a read-write disk, a shared one for a read-only
+	// disk, held until that VM's VM child has exited, and released by the
+	// kernel if the job process or the VM child dies first. A disk another
+	// process holds a conflicting lock on fails the job: `disk <source> is in
+	// use by another process` (STO-7, STO-8).
 	//
-	// A read-write disk named twice in one job, in one VM or in two, fails at
-	// Create, so a spec never holds one. One process can't hold two flocks on
-	// one file (two opens in one process block each other), and two VMs
-	// writing one block device corrupt it. Read-only disks are not locked
-	// (STO-8), so a job's VMs may share them.
+	// A disk named twice in one job, in one VM or in two, where either is
+	// read-write, fails at Create, so a spec never holds one: one process
+	// can't hold an exclusive flock and a shared or second exclusive one on
+	// one file through two opens. A disk named twice read-only both times
+	// may be shared by a job's VMs, since shared locks don't block each other.
 	ReadWrite     bool `protobuf:"varint,2,opt,name=read_write,json=readWrite,proto3" json:"read_write,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
