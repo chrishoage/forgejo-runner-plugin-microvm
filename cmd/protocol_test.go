@@ -173,9 +173,49 @@ func unmappedLabels(t *testing.T, file string, labels map[string]string) []strin
 // (CFG-7).
 func TestProfileWorkflow(t *testing.T) {
 	t.Parallel()
+	profileAndReload(t, startPlugin(t, buildPlugin(t)))
+}
+
+// TestWorkflowsAsRoot is the protocol test's root case (VM-9): with serve
+// run as root under `sudo -n`, the echo workflow, then TestProfileWorkflow's
+// profile check and reload, on one plugin. As root, libkrun's virtiofs
+// server switches to the guest's uid and gid for each request, for every
+// VM's boot root and layer share, which the unprivileged run never does.
+// Without passwordless sudo it skips, saying so, unless CI is set.
+func TestWorkflowsAsRoot(t *testing.T) {
+	t.Parallel()
+	needRoot(t)
+	image := readImage(t)
+	p := startRootPluginWith(t, buildPlugin(t), testProfiles)
+	// sudo's child is the plugin.
+	procs := descendants(p.pid)
+	if len(procs) == 0 {
+		t.Fatal("sudo has no child")
+	}
+	if uid := strings.Fields(procStatus(t, procs[0].pid)["Uid"]); len(uid) < 2 || uid[1] != "0" {
+		t.Fatalf("the plugin, %d (%s), runs as uid %v, not root", procs[0].pid, procs[0].comm, uid)
+	}
+	t.Logf("the plugin, %d (%s), runs as root", procs[0].pid, procs[0].comm)
+	t.Run("echo", func(t *testing.T) {
+		log, err := runWorkflowOn(t, p, filepath.Join(workflows, "echo.yml"), map[string]string{"microvm": image})
+		if err != nil {
+			t.Fatalf("the workflow failed: %v", err)
+		}
+		if !strings.Contains(log, stepOut) {
+			t.Fatalf("the job log does not show the first step's output %q", stepOut)
+		}
+		workflowChecks["echo"](t, log, image)
+	})
+	t.Run("profile", func(t *testing.T) { profileAndReload(t, p) })
+}
+
+// profileAndReload runs a workflow on the big profile on p and checks its
+// VM's shape, then raises the profile's CPU count in p's config file,
+// reloads p, and checks that the next job on the profile has the new count.
+func profileAndReload(t *testing.T, p *plugin) {
+	t.Helper()
 	wf := writeWorkflow(t, "  big:\n    runs-on: microvm-big\n    steps:\n      - run: |\n          "+shapeStep+"\n")
 	images := map[string]string{"microvm-big": readImage(t) + ";profile=" + bigProfile}
-	p := startPlugin(t, buildPlugin(t))
 	log, err := runWorkflowOn(t, p, wf, images)
 	if err != nil {
 		t.Fatalf("the workflow failed: %v", err)
