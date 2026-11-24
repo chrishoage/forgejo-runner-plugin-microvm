@@ -232,7 +232,11 @@ func TestGuestCantReach(t *testing.T) {
 				t.Errorf("resolve %s: no 127.0.0.1 in %q", network, out)
 			}
 		}
-		out := probeIn(t, v, "dhcp", "-n", "3", "-timeout", "2s")
+		// The probe sends each DISCOVER once the one before it has its
+		// offer, and stops at the last one's, so only a DISCOVER with no
+		// offer waits out its 10 s, the probe's default; the gateway's
+		// server answers within milliseconds.
+		out := probeIn(t, v, "dhcp", "-n", "3")
 		offers := 0
 		for line := range strings.Lines(out) {
 			if !strings.HasPrefix(line, "offer ") {
