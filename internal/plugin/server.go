@@ -214,18 +214,28 @@ func (s *Server) SetProfiles(ps config.Profiles) bool {
 	return true
 }
 
-// Close tears down every job still in the table, and releases the server.
-// A second Close does nothing more.
+// Close tears down every job still in the table, all at once, each as
+// Remove does, and releases the server: one VM whose flush hangs costs its
+// own flush timeout, not every other job's. A second Close does nothing
+// more.
 func (s *Server) Close(ctx context.Context) error {
 	s.mu.Lock()
 	jobs := s.jobs
 	s.jobs = map[string]*job{}
 	s.closed = true
 	s.mu.Unlock()
-	var errs []error
+	errs := make([]error, 0, len(jobs)+1)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for _, j := range jobs {
-		errs = append(errs, s.remove(ctx, j))
+		wg.Go(func() {
+			err := s.remove(ctx, j)
+			mu.Lock()
+			errs = append(errs, err)
+			mu.Unlock()
+		})
 	}
+	wg.Wait()
 	// A Remove or a backstop that took its job out of the table before
 	// Close did may still be removing it: the plugin stops only once it
 	// has, so its flush is not cut short.
