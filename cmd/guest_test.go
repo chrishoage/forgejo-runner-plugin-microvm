@@ -209,13 +209,13 @@ func TestExecAsUsersInTheGuest(t *testing.T) {
 // the ready timeout has passed, naming the VM and the timeout, then its
 // console's last lines, which the agent's stderr ends; the job is still
 // removed (VM-8).
-// The plugin is built with a ready timeout of 10 s, not the shipped 30 s,
+// The plugin is built with a ready timeout of 5 s, not the shipped 30 s,
 // through the test-only link-time seam (internal/plugin's
 // testReadyTimeout); the shipped timeout is a constant no config can change.
 // Its extracted agent is replaced, before Start, with one that starts and
 // then only waits.
 func TestSilentAgentFailsStart(t *testing.T) {
-	const ready = 10 * time.Second
+	const ready = 5 * time.Second
 	base, host := baseImage(t)
 	p := startPlugin(t, buildPlugin(t, "-X "+module+"/internal/plugin.testReadyTimeout="+ready.String()))
 	agents, err := filepath.Glob(filepath.Join(p.state, "bin", "runner-microvm-agent-*"))
