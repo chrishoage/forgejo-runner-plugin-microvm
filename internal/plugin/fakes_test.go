@@ -142,6 +142,7 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 		WorkingDir: "/src",
 		LinkDir:    link,
 		Layers:     []string{"0.erofs", "1.erofs"},
+		Pulled:     1,
 	}, nil
 }
 

@@ -206,6 +206,34 @@ func TestDeletedLayerIsConvertedAgain(t *testing.T) {
 	}
 }
 
+// A layer the retry pulls again counts once in Pulled: an Acquire never
+// reports more layers pulled than its image has.
+func TestRetryCountsALayerPulledAgainOnce(t *testing.T) {
+	t.Parallel()
+	x, y := headerLayer(t, file("x")), headerLayer(t, file("y"))
+	ref := push(t, image(t, x, y))
+	c := newCache(t)
+	ctx := testCtx(t)
+	n := countConversions(c)
+	gone := c.layerPath(diffID(t, x))
+	var fired atomic.Bool
+	c.beforeLink = func() {
+		if fired.CompareAndSwap(false, true) {
+			if err := os.Remove(gone); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	img := acquire(ctx, t, c, "job-1", ref)
+	if n.Load() != 3 {
+		t.Fatalf("%d conversions, want 3: x and y, then x again", n.Load())
+	}
+	if img.Pulled != 2 {
+		t.Errorf("pulled %d, want 2: x and y, x once", img.Pulled)
+	}
+	unpinned(ctx, t, c)
+}
+
 // A layer deleted again during the single retry fails the Acquire, naming
 // the layer and the cache directory, after one more conversion and with no
 // link directory or temp file left.

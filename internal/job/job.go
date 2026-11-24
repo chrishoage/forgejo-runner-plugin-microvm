@@ -165,7 +165,7 @@ func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *th
 	if err := logging.SetLevel(level, spec.GetLogLevel()); err != nil {
 		return failBug(out, fmt.Errorf("the job spec: %w", err))
 	}
-	log = log.With("job", spec.GetJob())
+	log = log.With("env", spec.GetJob())
 	log.Debug("read the job spec", "vms", len(spec.GetVms()), "subnet", spec.GetNetwork().GetSubnet(),
 		"lib_dir", spec.GetLibDir(), "libkrun_log_level", spec.GetLibkrunLogLevel(), "log_level", spec.GetLogLevel())
 	network, links, err := startNetwork(spec, log)
