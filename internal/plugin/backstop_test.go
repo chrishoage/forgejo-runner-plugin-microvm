@@ -48,7 +48,7 @@ func TestBackstopRemovesAForgottenJob(t *testing.T) {
 		if inTable(srv, id) {
 			t.Fatal("the backstop did not remove the job at the timeout plus 30 s")
 		}
-		if !strings.Contains(log.String(), fired) || !strings.Contains(log.String(), "job="+id) {
+		if !strings.Contains(log.String(), fired) || !strings.Contains(log.String(), "env="+id) {
 			t.Errorf("the log does not say the backstop removed %s:\n%s", id, log)
 		}
 		if !slices.Equal(cache.released, []string{id}) {
@@ -147,7 +147,7 @@ func TestBackstopRemovesAStartedJob(t *testing.T) {
 	// The job leaves the table before its teardown begins, so only the
 	// removal's own log line says its files are gone; walking them sooner
 	// races their deletion.
-	removed := "msg=removed job=" + id + " "
+	removed := "msg=removed env=" + id + " "
 	deadline := time.Now().Add(20 * time.Second)
 	for !strings.Contains(log.String(), removed) {
 		if time.Now().After(deadline) {

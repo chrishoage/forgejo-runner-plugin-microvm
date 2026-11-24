@@ -283,7 +283,7 @@ func TestASecondSignalRemovesEveryJob(t *testing.T) {
 		if files := jobFiles(t, f.srv, id); len(files) != 0 {
 			t.Errorf("job %s left %v", id, files)
 		}
-		if !strings.Contains(log, fmt.Sprintf(`msg=removed job=%s err=<nil>`, id)) {
+		if !strings.Contains(log, fmt.Sprintf(`msg=removed env=%s err=<nil>`, id)) {
 			t.Errorf("job %s was not removed as Remove removes it:\n%s", id, log)
 		}
 	}

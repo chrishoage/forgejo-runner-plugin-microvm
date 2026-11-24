@@ -215,7 +215,8 @@ func TestCreateUsesTheContainerImage(t *testing.T) {
 
 // The request fields the plugin ignores are named once in its log: the
 // first Create that carries any of them warns, naming which it carries,
-// and no later Create warns again.
+// and no later Create warns again. The warning names the job it came
+// with, unless that Create was refused before the job existed.
 func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -245,7 +246,11 @@ func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
 				t.Fatalf("a Create carrying no ignored field warned:\n%s", buf)
 			}
 			tc.first.LabelArg = testImage
-			_, _ = c.Create(testContext(t), tc.first)
+			resp, err := c.Create(testContext(t), tc.first)
+			wantEnv := ""
+			if err == nil {
+				wantEnv = "env=" + resp.GetEnvironmentId() + " "
+			}
 			second := &pluginv1alpha.CreateRequest{
 				LabelArg: testImage, BackendOptions: map[string]string{"k": "v"}, CapAdd: []string{"SYS_ADMIN"}, CapDrop: []string{"ALL"},
 			}
@@ -259,7 +264,12 @@ func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
 				}
 			}
 			if len(warnings) != 1 || !strings.Contains(warnings[0], "fields="+tc.want+"\n") {
-				t.Errorf("warnings %q; want one naming fields=%s", warnings, tc.want)
+				t.Fatalf("warnings %q; want one naming fields=%s", warnings, tc.want)
+			}
+			if gotEnv := strings.Contains(warnings[0], "env="); wantEnv == "" && gotEnv {
+				t.Errorf("the warning of a refused Create names a job: %q", warnings[0])
+			} else if wantEnv != "" && !strings.Contains(warnings[0], wantEnv) {
+				t.Errorf("warning %q; want it to name %s", warnings[0], wantEnv)
 			}
 		})
 	}

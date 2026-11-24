@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -267,6 +268,52 @@ func TestSharedLayerIsStoredOnce(t *testing.T) {
 	}
 	if n.Load() != 3 {
 		t.Errorf("%d conversions, want 3", n.Load())
+	}
+}
+
+// An Acquire counts the layers it pulled, those the cache lacked, and each
+// layer it pulled and converted is one line naming its diffID, its size in
+// the cache and how long it took (LOG-1).
+func TestAcquireCountsAndLogsWhatItPulled(t *testing.T) {
+	t.Parallel()
+	base, a, b := headerLayer(t, file("base")), headerLayer(t, file("a")), headerLayer(t, file("b"))
+	var log bytes.Buffer
+	c, err := New(slog.New(slog.NewTextHandler(&log, nil)), t.TempDir(), WithMaxSize(1<<40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := testCtx(t)
+	for _, tc := range []struct {
+		job    string
+		img    v1.Image
+		pulled int
+	}{
+		{"job-a", image(t, base, a), 2},
+		// base is cached, and a layer named twice is pulled once.
+		{"job-b", image(t, base, b, b), 1},
+		{"job-c", image(t, base, a), 0},
+	} {
+		got, err := c.Acquire(ctx, Request{Job: tc.job, Ref: push(t, tc.img)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Pulled != tc.pulled {
+			t.Errorf("%s: pulled %d, want %d", tc.job, got.Pulled, tc.pulled)
+		}
+		if want := fmt.Sprintf(" env=%s vm=0 ", tc.job); !strings.Contains(log.String(), want) {
+			t.Errorf("no acquired line for %s:\n%s", tc.job, log.String())
+		}
+	}
+	for _, l := range []v1.Layer{base, a, b} {
+		fi, err := os.Stat(c.layerPath(diffID(t, l)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		line := regexp.MustCompile(`msg="pulled and converted" layer=` + regexp.QuoteMeta(diffID(t, l).String()) +
+			fmt.Sprintf(` size=%d took=\d`, fi.Size()))
+		if n := len(line.FindAllString(log.String(), -1)); n != 1 {
+			t.Errorf("%d lines for layer %s, want 1:\n%s", n, diffID(t, l), log.String())
+		}
 	}
 }
 
@@ -579,7 +626,7 @@ func TestLayerLookupFailureStartsNothing(t *testing.T) {
 			return convert(out, r, tmp)
 		}
 		layers := []v1.Layer{a, b}
-		err := c.pull(t.Context(), []v1.Hash{diffID(t, a), diffID(t, b)}, func(i int) (fetchLayer, error) {
+		_, err := c.pull(t.Context(), []v1.Hash{diffID(t, a), diffID(t, b)}, func(i int) (fetchLayer, error) {
 			return fetchLayer{source: fmt.Sprint(i), fetch: func(context.Context) (v1.Layer, error) { return layers[i], nil }}, nil
 		}, false)
 		if !errors.Is(err, syscall.ELOOP) {

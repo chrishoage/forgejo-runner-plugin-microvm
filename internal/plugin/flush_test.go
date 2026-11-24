@@ -145,7 +145,7 @@ func TestRemoveFlushesReadWriteStorage(t *testing.T) {
 			if launcher.alive() != 0 {
 				t.Error("the job process outlived Remove")
 			}
-			if flushed := strings.Contains(log.String(), `msg=flushed job=`+id); flushed != (want == 1) {
+			if flushed := strings.Contains(log.String(), `msg=flushed env=`+id); flushed != (want == 1) {
 				t.Errorf("the log says flushed: %v, want %v:\n%s", flushed, want == 1, log)
 			}
 		})
@@ -199,7 +199,7 @@ func TestRemoveSucceedsWhenTheFlushFails(t *testing.T) {
 					line = l
 				}
 			}
-			if !strings.Contains(line, "job="+id) || !strings.Contains(line, tc.want) {
+			if !strings.Contains(line, "env="+id) || !strings.Contains(line, tc.want) {
 				t.Errorf("no log line of the failed flush naming %s and %q:\n%s", id, tc.want, log)
 			}
 		})
@@ -340,7 +340,7 @@ func TestCloseWaitsForARemoveInFlight(t *testing.T) {
 	if err := within(t, closed, "Close"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if !strings.Contains(log.String(), `msg=flushed job=`+id) {
+	if !strings.Contains(log.String(), `msg=flushed env=`+id) {
 		t.Errorf("Close returned before the flush of the cancelled Remove succeeded:\n%s", log)
 	}
 	if launcher.alive() != 0 {

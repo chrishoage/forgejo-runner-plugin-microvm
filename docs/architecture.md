@@ -609,6 +609,39 @@ The plugin process pulls and converts images, each layer pull in its own gorouti
 - **The plugin passes it to every job process and VM child in their specs, and to every agent in its boot config, so all three programs follow one setting** (field 8 of the job spec, 16 of the VM child spec and 14 of the boot config). One knob for the operator: the job process log, the VM log and the console all match the plugin's stderr. Each program starts at `info` and sets the level from its spec or boot config before it logs anything else; the plugin, from the config file, before it logs the file it read. A job process, VM child or agent given any other value, the empty one included, fails: only the plugin's bug can send one. libkrun's own lines in the VM log follow `libkrun_log_level` instead (libkrun, above).
 - **Events are `info`. What is ignored or degraded is `warn`:** ignored options, a failed flush, an eviction or pruning error, a failed reload, which keeps the running config. **A failure that costs a job or startup is `error`.**
 - **Each program logs one `debug` line once it has its level:** the job process the job spec it read, the VM child the libraries it loaded, and the agent the boot config it read, so `debug` shows in every log.
+- **Every line about a job carries `env=<environment id>`,** the runner protocol's name for the job, so one filter (`env=<id>`) reads a job's whole story out of the plugin's stderr. The job process log carries it too.
+
+### The event list (LOG-1)
+
+One line per event, at `info` unless it says otherwise. A slice that builds an event later adds its line here and in the code together; the ones not built yet name the issue that builds them.
+
+| When | Event | Its line carries |
+|---|---|---|
+| Startup | the config file read, or none found | `path` |
+| | the settings | every plugin-level key in effect |
+| | each profile, `default` always among them | its name and every profile key |
+| | the libraries' files (#95) | `libkrun`, `libkrunfw`, `lib_dir` |
+| | startup cleanup's counts (#97, and the cache's, #45) | `jobs` and `runtime_entries` for `<state>`'s and `<runtime>`'s; the cache's `jobs` and `temp_files`; none when nothing was deleted |
+| | serving | the directories, the job binary, the agent and `mkfs.ext4` |
+| | stopped before serving, or stopped (`error`) | the signal, or the error |
+| Per job | Create | `env`, the runner's job name (`name`), the `label`, the `image`, the `profile` and its values |
+| | ignored options (`warn`, once per plugin process) | `env` (none when that Create failed before the job existed), the job's `name` and the `fields` |
+| | each wait's start and end (QUE-8; not built yet, #10) | `env`, what it waits for, and for how long |
+| | Start done | `env`, the total time (`took`), the `image`, its `digest`, `layers`, `layers_pulled`, the `profile` |
+| | Start failed (`error`) | `env`, its cause (`err`) |
+| | the job process started | `env`, its `pid` |
+| | a progress line not sent (`warn`) | `env`, `err` |
+| | a VM that exited on its own (`error`, #51) | `env`, why |
+| | the flush, or its failure (`warn`) | `env`, `took` or `err` |
+| | Remove (`warn` when its teardown failed) | `env`, `err`, the time since Create (`since_create`); where logs were kept is #101's |
+| | a backstop removal (`warn`, #51) | `env`, `environment_timeout`, `backstop_delay` |
+| Cache | the image acquired | `env`, `vm`, `image`, `digest`, `layers`, `layers_pulled` |
+| | each layer pulled and converted | its diffID (`layer`), its `size` in the cache, `took` |
+| | each eviction and prune; an eviction or pruning error (`warn`); a damaged file deleted (`warn`) | the layer, config or tag, and its size |
+| Reload | its result: reloaded, a changed plugin-level key needing a restart (`warn`), failed (`warn`), or ended after the plugin stopped | the path and the profiles, the key and both values, or the error |
+| Shutdown | drain started | the signal, `jobs` left |
+| | drained | |
+| | ended at once by a second signal (`warn`) | the signal, the `jobs` it removes |
 
 ## Packages
 
@@ -666,7 +699,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 - **The VM child spec has its own proto package, generated under `internal/job/internal/gen/`.** Only the job binary uses it, so the plugin cannot depend on it.
 - **The agent client is its own package (`internal/agentclient`).** Otherwise it drifts into `internal/agent` and pulls host code toward the guest.
 - **Code shared by the three programs is only `logging`, `secret` and the generated protocol packages.** Each program's own code stays in its own tree, so a dependency added for one program can't leak into another.
-- **Only the plugin's two seams have interfaces:** the image cache and the job launcher, both declared in `internal/plugin`, each with a real and a fake adapter. The data that crosses them is plain: `imagecache.Request` (the job, the VM's index, the image ref and whether to pull again), `imagecache.Image` (digest, image environment, one VM's layer link directory and its layers' names in it) and `joblaunch.Process` (the job process's events and exit). The job launcher reads the job process's stdout to its end whether or not the plugin reads `Events`, and `Events` is buffered for every event the control channel allows for the job spec (one network up and one failed, and one VM started and one VM exited for each VM), so a plugin that stops reading never blocks `Exited` or `Kill`. The seams' contracts on cancel and error:
+- **Only the plugin's two seams have interfaces:** the image cache and the job launcher, both declared in `internal/plugin`, each with a real and a fake adapter. The data that crosses them is plain: `imagecache.Request` (the job, the VM's index, the image ref and whether to pull again), `imagecache.Image` (digest, image environment, one VM's layer link directory and its layers' names in it, and how many of them the cache lacked, which Start's line reports) and `joblaunch.Process` (the job process's events and exit). The job launcher reads the job process's stdout to its end whether or not the plugin reads `Events`, and `Events` is buffered for every event the control channel allows for the job spec (one network up and one failed, and one VM started and one VM exited for each VM), so a plugin that stops reading never blocks `Exited` or `Kill`. The seams' contracts on cancel and error:
   - `Launch` that returns an error has killed and reaped every process it started, so no job process is left without a handle to `Kill`.
   - `Exited` closes, and `Kill` returns, only once every process in the job's group has exited and been reaped (Ending a job, above).
   - `Acquire` takes an `imagecache.Request`, not positional arguments, so fields such as per-image registry credentials can be added later without changing callers. It returns one `Image` per VM, whose layer link directory is `<cache>/jobs/<id>/<n>/`, keyed by the VM's index, never its name. Each VM brings its own image once services arrive, so the link directory is the VM's, not the job's. Today only VM 0, the job's container, acquires one, because the plugin protocol passes no VM options for services.
@@ -711,6 +744,7 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
   - the hostname rule is tested table-driven, and the agent's writing of `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` in temporary roots: the files' contents, modes and owner (the test's own user, which the writer takes as a parameter), a symlinked `resolv.conf`, also dangling or naming a host file, replaced with its target untouched, a root without `/etc`, and the failures that name their file;
   - the plugin's flush is tested with the same fakes, a fake agent counting its `Flush` calls: Remove flushes a VM with a read-write mount or disk before it kills the job process, and not one with no storage or only read-only storage; a `Flush` that fails, that the agent's absence fails at once (its listener stopped, so no wait for an agent to answer), or that outlives its limit (shortened by the test) is logged naming the job, and Remove still kills the job process and succeeds; a failed Start, and the Remove after it, make no `Flush` call, nor does the Remove of a job whose VM exited while its agent still answers; the backstop flushes; Close flushes too, two jobs' flushes in flight at once; and a Remove whose call is cancelled while its flush is in flight returns `Canceled` at once, yet its flush still succeeds and its job process is killed before Close returns;
   - the drain is tested with fakes for the server's seams, served as `serve` serves it, with channels for the signals: health says `SERVING` for `""` and the BackendPlugin service before the drain and `NOT_SERVING` during it; a Create during it fails with `Unavailable`, while Start, Exec and Remove on jobs created before it succeed; serving returns once the last job is removed, by Remove or the backstop, and not before; a second signal removes every job as Remove does and serving returns; Close, which serving ends with, returns only once a Remove still tearing its job down has finished (in `testing/synctest`); a SIGHUP during it reloads; and Creates racing its start each either fail with `Unavailable` or leave a job it waits for. The listen socket is bound over a leftover socket at mode 0660 under umasks of 0 and 077, and a regular file, a directory or a symlink at its path stops startup naming it;
+  - the event lines are tested on the plugin with fakes, its log read at a level the test sets: at `info`, Create, Start done and Remove each log one line carrying `env=` and the fields the event list names, and a failed Start one `error` line with its cause. The image cache's test counts the layers an Acquire pulled, a cached one and one named twice included, and finds one line per layer pulled and converted with its size in the cache;
   - the plugin is tested with fakes for its two seams; its Start test reads the boot config it wrote with the agent's own reader, at the agent's own path, and must get back the message it built, vsock port included;
   - the VM child is tested against a fake of libkrun: its calls and their order, an empty, non-NULL environment for the agent, and libkrun's log level by each of its four names, any other refused before a call;
   - the log level is tested in each program's package: `internal/logging` takes exactly `log_level`'s four names and keeps the level on any other; `internal/config` decodes the four, refuses any other naming the line and the key, and reports a change at reload as needing a restart; the plugin's Start test finds the configured level in the job spec and the boot config it built, the job process's in each VM child's spec; the job process logs at its spec's level, its `debug` line only at `debug`, and fails as the plugin's bug on an empty or unknown one, and so does the VM child, before it loads libkrun;

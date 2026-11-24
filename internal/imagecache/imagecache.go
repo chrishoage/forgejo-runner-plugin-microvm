@@ -39,4 +39,10 @@ type Image struct {
 	// Layers are the image's layers as file names in LinkDir, bottom layer
 	// first: 0.erofs, 1.erofs, and so on.
 	Layers []string
+	// Pulled counts the image's distinct layers the cache lacked when this
+	// Acquire looked: each pulled and converted by it, or by another
+	// Acquire whose pull it shared. A layer pulled again after it was
+	// deleted from under the cache counts once, so Pulled is never more
+	// than len(Layers).
+	Pulled int
 }

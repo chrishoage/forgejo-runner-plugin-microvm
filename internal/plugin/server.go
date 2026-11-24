@@ -143,6 +143,9 @@ type Server struct {
 type job struct {
 	id    string
 	image string
+	// created is when Create added the job, which Remove's line measures
+	// from.
+	created time.Time
 	// hostname is the job's container's name on the job network: the
 	// runner's name for the job made DNS-safe (GST-12).
 	hostname string
@@ -346,7 +349,10 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	if s.isDraining() {
 		return nil, errShuttingDown
 	}
-	s.warnIgnored(req)
+	// The warning names the job once there is one; a Create refused
+	// before that warns without it.
+	var env string
+	defer func() { s.warnIgnored(req, env) }()
 	if len(req.GetServices()) > 0 {
 		// The request is well formed; the plugin can't run services until
 		// the protocol carries per-service VM options (PROTO-6).
@@ -375,7 +381,9 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	if err != nil {
 		return nil, err
 	}
-	s.log.Info("created", "job", j.id, "name", req.GetName(), "hostname", j.hostname, "image", image, "profile", j.profileName,
+	env = j.id
+	s.log.Info("created", "env", j.id, "name", req.GetName(), "label", req.GetLabelArg(), "hostname", j.hostname, "image", image,
+		"profile", j.profileName,
 		"environment_timeout", timeout,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
 		"scratch_paths", j.profile.ScratchPaths, "mounts", mountsAttr(j.profile.Mounts), "disks", disksAttr(j.profile.Disks), "force_pull", j.profile.ForcePull)
@@ -395,8 +403,9 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 // them, naming the request fields req carries that the plugin ignores:
 // backend_options (the runner's per-label options, which the config file
 // covers), cap_add and cap_drop (set only by forgejo-runner exec; steps run
-// as root with every capability, in a VM of their own).
-func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest) {
+// as root with every capability, in a VM of their own). env is the job's
+// environment id, or empty when the Create failed before it had one.
+func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest, env string) {
 	var fields []string
 	if len(req.GetBackendOptions()) > 0 {
 		fields = append(fields, "backend_options")
@@ -410,8 +419,11 @@ func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest) {
 	if len(fields) == 0 || !s.warnedIgnored.CompareAndSwap(false, true) {
 		return
 	}
-	s.log.Warn("runner-microvm ignores these Create request fields; this warning is logged once",
-		"name", req.GetName(), "fields", strings.Join(fields, ","))
+	attrs := []any{"name", req.GetName(), "fields", strings.Join(fields, ",")}
+	if env != "" {
+		attrs = append([]any{"env", env}, attrs...)
+	}
+	s.log.Warn("runner-microvm ignores these Create request fields; this warning is logged once", attrs...)
 }
 
 // jobCount returns how many jobs are in the table.
@@ -465,7 +477,7 @@ func (s *Server) add(ctx context.Context, image, hostname, name string, prof con
 			continue
 		}
 		jobCtx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, hostname: hostname, profileName: name, profile: prof, ctx: jobCtx, cancel: cancel, mu: newJobLock()}
+		j := &job{id: id, image: image, created: time.Now(), hostname: hostname, profileName: name, profile: prof, ctx: jobCtx, cancel: cancel, mu: newJobLock()}
 		if timeout > 0 {
 			// It runs only once add has released s.mu.
 			j.backstop = time.AfterFunc(saturatingAdd(timeout, s.cfg.BackstopDelay), func() { s.removeForgotten(ctx, j, timeout) })
@@ -654,7 +666,7 @@ func (s *Server) removeForgotten(ctx context.Context, j *job, timeout time.Durat
 	s.mu.Unlock()
 	defer finish()
 	s.log.Warn("the runner has not removed the job within its environment timeout: removing it",
-		"job", j.id, "environment_timeout", timeout, "backstop_delay", s.cfg.BackstopDelay)
+		"env", j.id, "environment_timeout", timeout, "backstop_delay", s.cfg.BackstopDelay)
 	_ = s.remove(ctx, j)
 }
 
@@ -682,7 +694,13 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 		removeTree(s.jobStateDir(j.id)),
 		removeTree(filepath.Join(s.cfg.Dirs.Runtime, j.id)),
 	)
-	s.log.Info("removed", "job", j.id, "err", err)
+	level := slog.LevelInfo
+	if err != nil {
+		// The job ends either way: a teardown that failed costs it
+		// nothing more, but may leave its files behind.
+		level = slog.LevelWarn
+	}
+	s.log.Log(ctx, level, "removed", "env", j.id, "err", err, "since_create", time.Since(j.created).Round(time.Millisecond))
 	return err
 }
 
@@ -706,10 +724,10 @@ func (s *Server) flush(ctx context.Context, j *job) {
 	defer stop()
 	begin := time.Now()
 	if err := j.agent.Flush(ctx); err != nil {
-		s.log.Warn("the VM's flush failed: its last writes to read-write storage may be lost", "job", j.id, "err", err)
+		s.log.Warn("the VM's flush failed: its last writes to read-write storage may be lost", "env", j.id, "err", err)
 		return
 	}
-	s.log.Info("flushed", "job", j.id, "took", time.Since(begin).Round(time.Millisecond))
+	s.log.Info("flushed", "env", j.id, "took", time.Since(begin).Round(time.Millisecond))
 }
 
 // readWriteStorage reports whether p gives its VM a read-write mount or

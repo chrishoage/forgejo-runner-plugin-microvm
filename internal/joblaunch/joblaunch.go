@@ -159,7 +159,7 @@ func (l *Launcher) Launch(ctx context.Context, spec *jobv1.Spec, logPath string)
 	events := make(chan *jobv1.Event, 2+2*len(spec.GetVms()))
 	exited := make(chan struct{})
 	p := &Process{Events: events, Exited: exited, pid: pid}
-	log := l.log.With("job", spec.GetJob(), "pid", p.pid)
+	log := l.log.With("env", spec.GetJob(), "pid", p.pid)
 	go readEvents(stdoutR, events, log)
 	go p.reap(exited)
 

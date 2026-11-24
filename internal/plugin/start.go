@@ -144,20 +144,21 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 	j.started = true
 	ctx, cancel := callContext(stream.Context(), j)
 	defer cancel()
-	p := &progress{ctx: ctx, stream: stream, begin: time.Now(), log: s.log.With("job", j.id)}
-	env, err := s.boot(ctx, j, p)
+	p := &progress{ctx: ctx, stream: stream, begin: time.Now(), log: s.log.With("env", j.id)}
+	img, err := s.boot(ctx, j, p)
 	if err == nil {
-		err = s.complete(ctx, j, p, env)
+		err = s.complete(ctx, j, p, envMap(img.Env))
 	}
 	if err != nil {
 		// The job process and its VM are gone before Start returns.
 		err = errors.Join(err, s.stop(context.WithoutCancel(ctx), j))
 		j.startErr = err
-		s.log.Error("start failed", "job", j.id, "err", err)
+		s.log.Error("start failed", "env", j.id, "err", err)
 		return startError(ctx, stream.Context(), err)
 	}
 	j.ready.Store(true)
-	s.log.Info("started", "job", j.id, "image", j.image, "profile", j.profileName, "took", time.Since(p.begin).Round(time.Millisecond))
+	s.log.Info("started", "env", j.id, "took", time.Since(p.begin).Round(time.Millisecond), "image", j.image, "digest", img.Digest,
+		"layers", len(img.Layers), "layers_pulled", img.Pulled, "profile", j.profileName)
 	return nil
 }
 
@@ -287,24 +288,24 @@ func (e *bugError) Error() string { return e.err.Error() }
 func (e *bugError) Unwrap() error { return e.err }
 
 // boot does Start's work on j, which is locked, sending its progress to p,
-// and returns the image's environment. On error, j.proc and j.agent may be
-// set: the caller stops them.
-func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]string, error) {
+// and returns the job's container's image. On error, j.proc and j.agent may
+// be set: the caller stops them.
+func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Image, error) {
 	vmState := filepath.Join(s.jobStateDir(j.id), "0")
 	vmRuntime := filepath.Join(s.cfg.Dirs.Runtime, j.id, "0")
 	for _, d := range []string{vmState, vmRuntime} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
-			return nil, err
+			return imagecache.Image{}, err
 		}
 	}
 	addr, mac, err := vmAddress(0)
 	if err != nil {
-		return nil, &bugError{err}
+		return imagecache.Image{}, &bugError{err}
 	}
 	pulling := time.Now()
 	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
 	if err != nil {
-		return nil, fmt.Errorf("image %s: %w", j.image, err)
+		return imagecache.Image{}, fmt.Errorf("image %s: %w", j.image, err)
 	}
 	p.line("image %s ready (%s, %d layers) in %s", j.image, img.Digest, len(img.Layers), seconds(time.Since(pulling)))
 	boot := &agentv1.BootConfig{
@@ -341,7 +342,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
-		return nil, fmt.Errorf("boot root %s: %w", root, err)
+		return imagecache.Image{}, fmt.Errorf("boot root %s: %w", root, err)
 	}
 	vm := &jobv1.VM{
 		Name:             j.hostname,
@@ -374,21 +375,21 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		Vms:             []*jobv1.VM{vm},
 	}, filepath.Join(s.jobStateDir(j.id), "job.log"))
 	if err != nil {
-		return nil, fmt.Errorf("job process: %w", err)
+		return imagecache.Image{}, fmt.Errorf("job process: %w", err)
 	}
 	j.proc = proc
 	// The agent socket's path can outgrow connect's 107 bytes, so it is
 	// dialled through the runtime directory.
 	agent, err := agentclient.New(s.runtime.path(j.id + "/0/agent.sock"))
 	if err != nil {
-		return nil, &bugError{err}
+		return imagecache.Image{}, &bugError{err}
 	}
 	j.agent = agent
 	if err := s.waitReady(ctx, j, vm); err != nil {
-		return nil, err
+		return imagecache.Image{}, err
 	}
 	p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
-	return envMap(img.Env), nil
+	return img, nil
 }
 
 // waitReady waits until j's agent answers Ping, failing as soon as the VM
@@ -474,7 +475,7 @@ func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCaus
 		// Remove kills the job process; only a VM that died on its own
 		// is news.
 		if j.ctx.Err() == nil {
-			s.log.Error("the job's VM died; its calls fail until the runner removes it", "job", j.id, "err", err)
+			s.log.Error("the job's VM died; its calls fail until the runner removes it", "env", j.id, "err", err)
 		}
 	}
 	events, exited := p.Events, p.Exited

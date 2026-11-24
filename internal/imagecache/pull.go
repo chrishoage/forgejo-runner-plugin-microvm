@@ -256,7 +256,7 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 			return Image{}, fmt.Errorf("pull %s: layer %d: %w", req.Ref, i, err)
 		}
 	}
-	linkDir, names, err := c.pullAndLink(ctx, req, diffIDs, c.layerSource(ctx, r))
+	linkDir, names, pulled, err := c.pullAndLink(ctx, req, diffIDs, c.layerSource(ctx, r))
 	if err != nil {
 		return Image{}, err
 	}
@@ -268,10 +268,11 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 	// Release, and this Acquire's own pin, released as it returns, covers
 	// it until then.
 	c.useConfig(req.Job, r.digest)
-	c.log.Info("acquired", "job", req.Job, "vm", req.VM, "image", req.Ref, "digest", r.digest.String(), "layers", len(names))
+	c.log.Info("acquired", "env", req.Job, "vm", req.VM, "image", req.Ref, "digest", r.digest.String(), "layers", len(names),
+		"layers_pulled", pulled)
 	return Image{
 		Digest: r.digest.String(), Env: r.config.Config.Env, User: r.config.Config.User, WorkingDir: r.config.Config.WorkingDir,
-		LinkDir: linkDir, Layers: names,
+		LinkDir: linkDir, Layers: names, Pulled: pulled,
 	}, nil
 }
 
@@ -280,11 +281,17 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 // other than the plugin since it is pinned, is pulled and converted again,
 // once: one retry covers a single deletion, and a loop could spin against
 // something that keeps deleting. A second miss fails, naming the layer and
-// the cache directory.
-func (c *Cache) pullAndLink(ctx context.Context, req Request, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error)) (string, []string, error) {
+// the cache directory. It returns how many of the image's layers it pulled,
+// each counted once: a layer the retry pulls again was pulled already.
+func (c *Cache) pullAndLink(ctx context.Context, req Request, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error)) (string, []string, int, error) {
+	pulled := map[v1.Hash]bool{}
 	for retry := false; ; retry = true {
-		if err := c.pull(ctx, diffIDs, layer, retry); err != nil {
-			return "", nil, fmt.Errorf("pull %s: %w", req.Ref, err)
+		lacked, err := c.pull(ctx, diffIDs, layer, retry)
+		for _, d := range lacked {
+			pulled[d] = true
+		}
+		if err != nil {
+			return "", nil, 0, fmt.Errorf("pull %s: %w", req.Ref, err)
 		}
 		if c.beforeLink != nil {
 			c.beforeLink()
@@ -292,16 +299,16 @@ func (c *Cache) pullAndLink(ctx context.Context, req Request, diffIDs []v1.Hash,
 		linkDir, names, err := c.link(req, diffIDs)
 		var missing *missingLayerError
 		if errors.As(err, &missing) && !retry {
-			c.log.Warn("layer deleted from the cache, converting it again", "job", req.Job, "vm", req.VM, "layer", missing.diffID.String(), "cache", c.dir)
+			c.log.Warn("layer deleted from the cache, converting it again", "env", req.Job, "vm", req.VM, "layer", missing.diffID.String(), "cache", c.dir)
 			continue
 		}
 		if errors.As(err, &missing) {
-			return "", nil, fmt.Errorf("image %s: layer %s was deleted from the image cache %s, converted again, and deleted again: %w", req.Ref, missing.diffID, c.dir, missing.err)
+			return "", nil, 0, fmt.Errorf("image %s: layer %s was deleted from the image cache %s, converted again, and deleted again: %w", req.Ref, missing.diffID, c.dir, missing.err)
 		}
 		if err != nil {
-			return "", nil, fmt.Errorf("image %s: %w", req.Ref, err)
+			return "", nil, 0, fmt.Errorf("image %s: %w", req.Ref, err)
 		}
-		return linkDir, names, nil
+		return linkDir, names, len(pulled), nil
 	}
 }
 
@@ -369,6 +376,11 @@ type pulledLayer struct {
 	mu     sync.Mutex
 	tmp    string
 	stored bool
+	// size is the converted layer's size in bytes, and took how long its
+	// fetch and conversion took, from when it had its place among the
+	// pulls.
+	size int64
+	took time.Duration
 }
 
 // discard deletes the temp file once nobody holds the pull: every Acquire
@@ -384,6 +396,7 @@ func (p *pulledLayer) discard() {
 // pull converts each layer the cache lacks, each once, however often the
 // image names it. All of them are converted before any is renamed into
 // place, so a layer that fails leaves nothing in the cache (IMG-10).
+// It returns the layers it pulled: those the cache lacked, each once.
 //
 // Each layer's pull is shared with every Acquire that needs that layer
 // while it runs (IMG-12), and runs in a context of its own. A cancelled ctx
@@ -403,7 +416,7 @@ func (p *pulledLayer) discard() {
 // A retry, after a layer was deleted from under the cache, shares its pulls
 // only with other retries: a pull another Acquire still holds may have
 // stored the layer that was deleted, and joining it would store nothing.
-func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error), retry bool) error {
+func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (fetchLayer, error), retry bool) ([]v1.Hash, error) {
 	type pending struct {
 		diffID  v1.Hash
 		fetch   fetchLayer
@@ -423,11 +436,11 @@ func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (
 		if _, err := os.Stat(c.layerPath(d)); err == nil {
 			continue
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("layer %s: %w", d, err)
+			return nil, fmt.Errorf("layer %s: %w", d, err)
 		}
 		f, err := layer(i)
 		if err != nil {
-			return fmt.Errorf("layer %s: %w", d, err)
+			return nil, fmt.Errorf("layer %s: %w", d, err)
 		}
 		todo = append(todo, &pending{diffID: d, fetch: f})
 	}
@@ -470,21 +483,23 @@ func (c *Cache) pull(ctx context.Context, diffIDs []v1.Hash, layer func(i int) (
 		}
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
+	lacked := make([]v1.Hash, 0, len(todo))
 	for _, p := range todo {
 		stored, err := c.store(p.p, p.diffID)
 		if err != nil {
-			return c.spaceError(err)
+			return nil, c.spaceError(err)
 		}
+		lacked = append(lacked, p.diffID)
 		if stored {
-			c.log.Info("converted", "layer", p.diffID.String())
+			c.log.Info("pulled and converted", "layer", p.diffID.String(), "size", p.p.size, "took", p.p.took.Round(time.Millisecond))
 		}
 	}
 	if len(todo) > 0 {
-		return syncDir(c.path(layersDir))
+		return lacked, syncDir(c.path(layersDir))
 	}
-	return nil
+	return nil, nil
 }
 
 // pullLayer is one layer's shared pull: it fetches the layer and converts
@@ -510,6 +525,7 @@ func (c *Cache) pullLayer(ctx context.Context, diffID v1.Hash, from fetchLayer) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	begin := time.Now()
 	l, err := from.fetch(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("layer %s: %w", diffID, err)
@@ -518,7 +534,13 @@ func (c *Cache) pullLayer(ctx context.Context, diffID v1.Hash, from fetchLayer) 
 	if err != nil {
 		return nil, err
 	}
-	return &pulledLayer{tmp: tmp}, nil
+	took := time.Since(begin)
+	fi, err := os.Stat(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	return &pulledLayer{tmp: tmp, size: fi.Size(), took: took}, nil
 }
 
 // store renames p's complete temp file into place as the layer diffID,
