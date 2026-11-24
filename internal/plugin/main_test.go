@@ -95,14 +95,13 @@ func TestServeStopsOnAnInvalidConfig(t *testing.T) {
 // whole GiB an int64 of bytes holds (IMG-14). A failure to open it stops
 // startup with that error, and releases the directory locks.
 //
-// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
+// It is not parallel: it sets PATH.
 func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
 	tools := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tools, "mkfs.ext4"), nil, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools)
-	t.Setenv(LibDirEnv, "")
 	errOpen := errors.New("the fake image cache does not open")
 	for content, want := range map[string]int64{
 		"":                            20 << 30,
@@ -146,14 +145,13 @@ func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
 // run closes the job launcher it made when it fails after making it, so a
 // failed startup leaves no forking thread and no liveness pipe behind.
 //
-// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
+// It is not parallel: it sets PATH.
 func TestRunClosesTheLauncherWhenStartupFails(t *testing.T) {
 	tools := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tools, "mkfs.ext4"), nil, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools)
-	t.Setenv(LibDirEnv, "")
 	errOpen := errors.New("the fake image cache does not open")
 	var launcher *joblaunch.Launcher
 	err := run(t.Context(), discardLog(), configOf(testDirs(filepath.Join(t.TempDir(), "plugin"))), nil, nil,

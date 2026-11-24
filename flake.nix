@@ -23,8 +23,8 @@
       # rebuild libkrun. crun's libkrun is not the one the plugin loads.
       podman = nixpkgs.legacyPackages.${system}.podman;
 
-      # libkrun and libkrunfw side by side, in the one directory the plugin
-      # will read them from (RUNNER_MICROVM_LIBDIR).
+      # libkrun and libkrunfw side by side, in one directory, which the
+      # tests and the harness give the plugin as its lib_dir.
       libdir = pkgs.symlinkJoin {
         name = "runner-microvm-libs";
         paths = [
@@ -102,7 +102,9 @@
         # The flake is the only source of Go: never download a toolchain.
         GOTOOLCHAIN = "local";
 
-        # Where the plugin finds libkrun.so.1 and libkrunfw.so.5.
+        # The directory of libkrun.so.1 and libkrunfw.so.5. Only the tests,
+        # the harness and `just check-libs` read it; the plugin reads its
+        # lib_dir key.
         RUNNER_MICROVM_LIBDIR = "${libdir}/lib64";
       };
 

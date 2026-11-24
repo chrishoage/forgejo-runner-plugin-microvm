@@ -118,16 +118,18 @@ up:
     fi
     # Its config file puts its directories under .e2e/plugin, with the
     # listen socket in the runtime directory, which the runner's container
-    # mounts. It defines default, a larger profile, big, which the
-    # microvm-big label names, and storage, with the fixtures above, which
-    # the microvm-storage label names; each key on a line of its own, so an
-    # edit for a reload is one sed.
+    # mounts, and its lib_dir is the dev shell's libraries. It defines
+    # default, a larger profile, big, which the microvm-big label names,
+    # and storage, with the fixtures above, which the microvm-storage label
+    # names; each key on a line of its own, so an edit for a reload is one
+    # sed.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
     {
         echo "listen: unix://$sock"
         echo "state_dir: {{ plugin_dir }}/state"
         echo "cache_dir: {{ plugin_dir }}/cache"
         echo "runtime_dir: {{ plugin_dir }}/runtime"
+        echo "lib_dir: ${RUNNER_MICROVM_LIBDIR:?is not set: run inside the dev shell}"
         echo "profiles:"
         echo "  default:"
         echo "    cpus: 1"

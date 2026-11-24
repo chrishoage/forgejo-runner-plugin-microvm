@@ -62,6 +62,10 @@ type Config struct {
 	// CacheMaxGiB is the image cache's size cap, in GiB, at most
 	// MaxCacheMaxGiB; 0 is taken literally (IMG-14).
 	CacheMaxGiB uint64
+	// LibDir is the directory libkrun and libkrunfw load from, and only
+	// from, absolute and cleaned; empty loads them by soname through the
+	// system's dynamic loader (VM-10).
+	LibDir string
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
 
@@ -200,6 +204,7 @@ func (c *Config) Reload() (*Config, []Change, error) {
 		{"runtime_dir", c.RuntimeDir, f.RuntimeDir},
 		{"max_memory_mib", strconv.FormatUint(c.MaxMemoryMiB, 10), strconv.FormatUint(f.MaxMemoryMiB, 10)},
 		{"cache_max_gib", strconv.FormatUint(c.CacheMaxGiB, 10), strconv.FormatUint(f.CacheMaxGiB, 10)},
+		{"lib_dir", c.LibDir, f.LibDir},
 	} {
 		if k.running != k.file {
 			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
@@ -445,6 +450,8 @@ func (d *decoder) top(c *Config, root *yaml.Node) {
 			ok = d.uint(p, &c.MaxMemoryMiB)
 		case "cache_max_gib":
 			c.CacheMaxGiB, ok = d.integer(p, "", 0, MaxCacheMaxGiB)
+		case "lib_dir":
+			ok = d.absPath(p, &c.LibDir)
 		case "profiles":
 			d.profiles(c, p)
 		default:

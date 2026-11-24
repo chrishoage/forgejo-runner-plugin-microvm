@@ -12,10 +12,9 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-// The libraries' names (VM-10).
-//
-// SHORTCUT(#11): provisional pick: RUNNER_MICROVM_LIBDIR, else by soname;
-// libkrun.so.1 and libkrunfw.so.5.
+// The libraries' names: the sonames of the minimum versions, libkrun's 1.x
+// API and libkrunfw's 5 (VM-10). They load from the plugin's lib_dir, and
+// only from there, or by soname through the system's dynamic loader.
 const (
 	libkrun   = "libkrun.so.1"
 	libkrunfw = "libkrunfw.so.5"
