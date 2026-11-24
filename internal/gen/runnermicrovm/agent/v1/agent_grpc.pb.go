@@ -56,7 +56,10 @@ type AgentServiceClient interface {
 	// CopyOut returns a guest path as a tar (GST-11).
 	CopyOut(ctx context.Context, in *CopyOutRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CopyOutResponse], error)
 	// Flush writes everything on the VM's read-write mounts and disks through
-	// to the host, before a job with read-write storage ends normally (STO-9).
+	// to the host, before a job with read-write storage ends normally (STO-9):
+	// sync(), then FIFREEZE on each read-write disk's mount, which leaves its
+	// ext4 clean. The disks stay frozen: the VM is killed right after. It
+	// fails with FailedPrecondition, naming each disk it could not freeze.
 	Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error)
 }
 
@@ -160,7 +163,10 @@ type AgentServiceServer interface {
 	// CopyOut returns a guest path as a tar (GST-11).
 	CopyOut(*CopyOutRequest, grpc.ServerStreamingServer[CopyOutResponse]) error
 	// Flush writes everything on the VM's read-write mounts and disks through
-	// to the host, before a job with read-write storage ends normally (STO-9).
+	// to the host, before a job with read-write storage ends normally (STO-9):
+	// sync(), then FIFREEZE on each read-write disk's mount, which leaves its
+	// ext4 clean. The disks stay frozen: the VM is killed right after. It
+	// fails with FailedPrecondition, naming each disk it could not freeze.
 	Flush(context.Context, *FlushRequest) (*FlushResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }

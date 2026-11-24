@@ -122,10 +122,11 @@ func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 //
 // The host enforces read-only on both shares, so the guest can't write a
 // layer even after remounting one read-write (IMG-9), and on each read-only
-// mount and disk (STO-2).
-func boot(m mounter, cfg *agentv1.BootConfig) error {
+// mount and disk (STO-2). It returns the read-write disks it mounted, which
+// Flush freezes.
+func boot(m mounter, cfg *agentv1.BootConfig) ([]rwDisk, error) {
 	if err := checkBootConfig(cfg); err != nil {
-		return err
+		return nil, err
 	}
 	scratch := stage + "/scratch"
 	upper, work := scratch+"/upper", scratch+"/work"
@@ -191,18 +192,21 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 			guestDirs,
 		)
 	}
+	var rwDisks []rwDisk
 	if len(cfg.GetMounts()) > 0 || len(cfg.GetDisks()) > 0 {
 		steps = append(steps, func() error {
-			return makeStorage(m, root, cfg.GetMounts(), cfg.GetDisks(), append(append([]landing(nil), scratchHeld...), dirsHeld...))
+			var err error
+			rwDisks, err = makeStorage(m, root, cfg.GetMounts(), cfg.GetDisks(), append(append([]landing(nil), scratchHeld...), dirsHeld...))
+			return err
 		})
 	}
 	steps = append(steps, func() error { return m.moveRoot(root) })
 	for _, step := range steps {
 		if err := step(); err != nil {
-			return fmt.Errorf("build the root: %w", err)
+			return nil, fmt.Errorf("build the root: %w", err)
 		}
 	}
-	return nil
+	return rwDisks, nil
 }
 
 // scratchTarget is where a scratch path lands in the job's root, and the
@@ -280,18 +284,26 @@ type attachment struct {
 // in held, where a scratch path or a guest directory landed, or at, under or
 // above where another target lands, fails, naming both: the mount would hide
 // what is there, or its mount point would be made in the host directory or
-// disk mounted above it (STO-6).
-func makeStorage(m mounter, root string, mounts []*agentv1.Mount, disks []*agentv1.Disk, held []landing) error {
+// disk mounted above it (STO-6). It returns the read-write disks, each with
+// where it landed, which is its mount point once the root is moved to /.
+func makeStorage(m mounter, root string, mounts []*agentv1.Mount, disks []*agentv1.Disk, held []landing) ([]rwDisk, error) {
 	var all []attachment
 	for _, mt := range mounts {
 		all = append(all, attachment{"mount " + mt.GetTarget(), mt.GetTarget(), func(place string) error {
 			return m.mountShare(root, mt.GetTag(), place, !mt.GetReadWrite())
 		}})
 	}
+	// rw holds, for each of all that is a read-write disk, its device's
+	// number.
+	rw := map[int]uint64{}
 	for _, d := range disks {
-		device, fstype, err := diskDevice(m, root, d)
+		device, sb, err := diskDevice(m, root, d)
 		if err != nil {
-			return fmt.Errorf("disk %s: %w", d.GetTarget(), err)
+			return nil, fmt.Errorf("disk %s: %w", d.GetTarget(), err)
+		}
+		fstype := sb.fstype
+		if d.GetReadWrite() {
+			rw[len(all)] = sb.dev
 		}
 		all = append(all, attachment{"disk " + d.GetTarget(), d.GetTarget(), func(place string) error {
 			return m.mountDisk(root, device, fstype, place, !d.GetReadWrite())
@@ -301,37 +313,41 @@ func makeStorage(m mounter, root string, mounts []*agentv1.Mount, disks []*agent
 	for i, a := range all {
 		place, err := m.resolveTarget(root, a.target)
 		if err != nil {
-			return fmt.Errorf("%s: %w", a.what, err)
+			return nil, fmt.Errorf("%s: %w", a.what, err)
 		}
 		if api, ok := inAPIMount(place); ok {
-			return fmt.Errorf("%s: lands at %s, in %s", a.what, place, api)
+			return nil, fmt.Errorf("%s: lands at %s, in %s", a.what, place, api)
 		}
 		if place == "/" {
-			return fmt.Errorf("%s: lands at /, the root", a.what)
+			return nil, fmt.Errorf("%s: lands at /, the root", a.what)
 		}
 		for _, h := range held {
 			if h.place == place || strings.HasPrefix(h.place, place+"/") {
-				return fmt.Errorf("%s: lands at %s, at or above %s, where %s lands: it would hide it",
+				return nil, fmt.Errorf("%s: lands at %s, at or above %s, where %s lands: it would hide it",
 					a.what, place, h.place, h.what)
 			}
 		}
 		for j, prev := range places[:i] {
 			if prev == place {
-				return fmt.Errorf("%s: lands at %s, as %s does", a.what, place, all[j].what)
+				return nil, fmt.Errorf("%s: lands at %s, as %s does", a.what, place, all[j].what)
 			}
 			if rel := nested(place, prev); rel != "" {
-				return fmt.Errorf("%s: lands at %s, %s %s, where %s lands: "+
+				return nil, fmt.Errorf("%s: lands at %s, %s %s, where %s lands: "+
 					"its mount point would be made in what is mounted there", a.what, place, rel, prev, all[j].what)
 			}
 		}
 		places[i] = place
 	}
+	var rwDisks []rwDisk
 	for i, a := range all {
 		if err := a.mount(places[i]); err != nil {
-			return fmt.Errorf("%s: at %s: %w", a.what, places[i], err)
+			return nil, fmt.Errorf("%s: at %s: %w", a.what, places[i], err)
+		}
+		if dev, ok := rw[i]; ok {
+			rwDisks = append(rwDisks, rwDisk{target: a.target, place: places[i], dev: dev})
 		}
 	}
-	return nil
+	return rwDisks, nil
 }
 
 // nested names how place relates to other, two places where targets land in
@@ -355,24 +371,24 @@ func nested(place, other string) string {
 // journal needs recovery is refused rather than mounted with noload, which
 // would show a half-written filesystem; a read-write disk must be ext4,
 // which the guest kernel can write and replay after a kill (STO-4).
-func diskDevice(m mounter, root string, d *agentv1.Disk) (string, string, error) {
+func diskDevice(m mounter, root string, d *agentv1.Disk) (string, superblock, error) {
 	device, err := m.findDisk(root, d.GetBlockId())
 	if err != nil {
-		return "", "", err
+		return "", superblock{}, err
 	}
 	sb, err := m.probeDisk(device)
 	switch {
 	case errors.Is(err, errNotExt4OrErofs):
-		return "", "", err
+		return "", superblock{}, err
 	case err != nil:
-		return "", "", fmt.Errorf("read %s's superblock: %w", device, err)
+		return "", superblock{}, fmt.Errorf("read %s's superblock: %w", device, err)
 	case d.GetReadWrite() && sb.fstype != fsExt4:
-		return "", "", errors.New("read-write disks must be ext4")
+		return "", superblock{}, errors.New("read-write disks must be ext4")
 	case !d.GetReadWrite() && sb.needsRecovery:
-		return "", "", fmt.Errorf("its ext4 journal needs recovery, which a read-only mount can't do: " +
+		return "", superblock{}, fmt.Errorf("its ext4 journal needs recovery, which a read-only mount can't do: " +
 			"mount the disk read-write once to replay it")
 	}
-	return device, sb.fstype, nil
+	return device, sb, nil
 }
 
 // parentsFirst returns the indexes of places, each where a path lands in
