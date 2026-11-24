@@ -281,7 +281,8 @@ The minimums live in `nix/lib-minimums.json`. They apply to the dev shell, CI an
   2. Reloads udev.
   3. Opens `/dev/kvm` read-write as the runner user.
   4. Runs `nix develop -c just check-libs`, then `nix flake check`, so a library below its minimum also fails CI.
-  5. Runs `nix develop -c just test-kvm`.
-- **The job then runs `nix develop -c just test-kvm`:** the tier for tests that boot VMs (`kvm` build tag), the protocol test among them.
+  5. Runs `nix develop -c just test-kvm -v`.
+- **The job then runs `nix develop -c just test-kvm -v`:** the tier for tests that boot VMs (`kvm` build tag), the protocol test among them. It runs as the ordinary runner user, which proves the plugin needs nothing but `/dev/kvm` (VM-9); the tests that run the plugin as root reach root through the job's passwordless `sudo -n` (`docs/architecture.md`, Running as root).
+- **`-v` makes the log list every test's `PASS` or `SKIP`, so it shows that the root cases ran rather than skipped** (#96). A root case that can't get root fails rather than skips with `CI` set, which GitHub sets, so CI can't pass without them; the list makes that visible without reading the test. `just test-kvm` passes any arguments on to `go test`, and run locally it takes none. A passing test logs neither its job logs nor its plugin's log, so the list stays readable; a failing one logs both in full (`docs/architecture.md`, Tests). (Flagged decision, #96: rejected a second step that reruns only the root cases verbosely, which runs them twice, and `go test -json` with a summary, which loses the streamed log.)
 - **It uses the same Nix install and store cache as the other jobs.** The cache matters here, because the libkrunfw overlay builds a kernel. The cache key includes `nix/`, so a change to the overlays builds and saves a fresh store.
 - **`setup-nix` roots the dev shell with `nix develop --profile`,** because `nix develop` makes no GC root and the cache action collects garbage before it saves, which would delete the libraries and make the next run rebuild them.

@@ -150,5 +150,6 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       # Asserts the library minimums and builds the dev shell.
       - run: nix flake check
-      # Every test, with the `kvm` tag and the payload embedded.
-      - run: nix develop -c just test-kvm
+      # Every test, with the `kvm` tag and the payload embedded. -v lists
+      # each test's result, so the log shows the root cases ran.
+      - run: nix develop -c just test-kvm -v

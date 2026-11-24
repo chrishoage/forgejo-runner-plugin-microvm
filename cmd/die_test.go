@@ -102,7 +102,7 @@ func TestPluginKilled(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Error("the executor did not return 30 s after the test's end")
 		}
-		t.Logf("job log:\n%s", log.String())
+		logIfFailed(t, "job log", log)
 	})
 
 	for !strings.Contains(log.String(), "sleep-600-started") {
