@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -51,6 +52,16 @@ type mounter interface {
 	// mountShare mounts the virtiofs share tag at place, where a target
 	// landed, in the job's root at root, read-only when readOnly.
 	mountShare(root, tag, place string, readOnly bool) error
+	// findDisk returns the block device whose virtio-blk serial is
+	// blockID, the block id the host attached it under, reading sysfs in
+	// the job's root at root.
+	findDisk(root, blockID string) (string, error)
+	// probeDisk reads the superblock of the block device device (STO-4).
+	probeDisk(device string) (superblock, error)
+	// mountDisk mounts the block device device, a filesystem of fstype,
+	// at place, where a target landed, in the job's root at root,
+	// read-only when readOnly.
+	mountDisk(root, device, fstype, place string, readOnly bool) error
 	// moveRoot moves the mount at root to / and chroots into it.
 	moveRoot(root string) error
 }
@@ -103,13 +114,15 @@ func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 //  8. it creates the act path, tool cache and temp directory again, so one
 //     at or below a scratch path, hidden by its fresh directory, is made on
 //     the scratch disk; elsewhere they are there now, and left alone;
-//  9. it resolves every mount's target in it, then mounts each share, in
-//     the list's order, none landing under another (STO-6);
+//  9. it finds every disk by its serial and reads its superblock, resolves
+//     every mount's and disk's target in it, then mounts each share and
+//     disk, mounts then disks, in the list's order, none landing under
+//     another (STO-4, STO-6);
 //  10. it moves it to / and chroots.
 //
 // The host enforces read-only on both shares, so the guest can't write a
 // layer even after remounting one read-write (IMG-9), and on each read-only
-// mount (STO-2).
+// mount and disk (STO-2).
 func boot(m mounter, cfg *agentv1.BootConfig) error {
 	if err := checkBootConfig(cfg); err != nil {
 		return err
@@ -178,9 +191,9 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 			guestDirs,
 		)
 	}
-	if mounts := cfg.GetMounts(); len(mounts) > 0 {
+	if len(cfg.GetMounts()) > 0 || len(cfg.GetDisks()) > 0 {
 		steps = append(steps, func() error {
-			return makeMounts(m, root, mounts, append(append([]landing(nil), scratchHeld...), dirsHeld...))
+			return makeStorage(m, root, cfg.GetMounts(), cfg.GetDisks(), append(append([]landing(nil), scratchHeld...), dirsHeld...))
 		})
 	}
 	steps = append(steps, func() error { return m.moveRoot(root) })
@@ -247,49 +260,75 @@ func makeScratchPaths(m mounter, root, dirs string, paths []string) ([]scratchTa
 	return targets, nil
 }
 
-// makeMounts mounts each of mounts, the profile's mounts, in the job's root
-// at root, after the scratch paths (STO-6). It resolves every target before
-// it mounts any, each inside the root, creating one the image lacks, so a
-// target under a scratch path lands on the scratch path's fresh directory;
-// then it mounts them in the list's order. A target that lands in /proc,
-// /sys or /dev, at the root, at or above a place in held, where a scratch
-// path or a guest directory landed, or at, under or above where another
-// target lands, fails, naming both: the mount would hide what is there, or
-// its mount point would be made in the host directory mounted above it
-// (STO-6).
-func makeMounts(m mounter, root string, mounts []*agentv1.Mount, held []landing) error {
-	places := make([]string, len(mounts))
-	for i, mt := range mounts {
-		place, err := m.resolveTarget(root, mt.GetTarget())
+// attachment is one of the profile's mounts or disks, ready to mount.
+type attachment struct {
+	// what names it in errors: "mount" or "disk" and its target.
+	what, target string
+	// mount mounts it at place, where its target landed.
+	mount func(place string) error
+}
+
+// makeStorage mounts each of mounts and disks, the profile's, in the job's
+// root at root, after the scratch paths (STO-6). It first finds every disk
+// by its serial and reads its superblock, so a disk that is missing, holds
+// neither ext4 nor EROFS, or is a read-only ext4 whose journal needs
+// recovery fails before anything is created (STO-4). It then resolves every
+// target, mounts' then disks', before it mounts any, each inside the root,
+// creating one the image lacks, so a target under a scratch path lands on
+// the scratch path's fresh directory; then it mounts them in that order. A
+// target that lands in /proc, /sys or /dev, at the root, at or above a place
+// in held, where a scratch path or a guest directory landed, or at, under or
+// above where another target lands, fails, naming both: the mount would hide
+// what is there, or its mount point would be made in the host directory or
+// disk mounted above it (STO-6).
+func makeStorage(m mounter, root string, mounts []*agentv1.Mount, disks []*agentv1.Disk, held []landing) error {
+	var all []attachment
+	for _, mt := range mounts {
+		all = append(all, attachment{"mount " + mt.GetTarget(), mt.GetTarget(), func(place string) error {
+			return m.mountShare(root, mt.GetTag(), place, !mt.GetReadWrite())
+		}})
+	}
+	for _, d := range disks {
+		device, fstype, err := diskDevice(m, root, d)
 		if err != nil {
-			return fmt.Errorf("mount %s: %w", mt.GetTarget(), err)
+			return fmt.Errorf("disk %s: %w", d.GetTarget(), err)
+		}
+		all = append(all, attachment{"disk " + d.GetTarget(), d.GetTarget(), func(place string) error {
+			return m.mountDisk(root, device, fstype, place, !d.GetReadWrite())
+		}})
+	}
+	places := make([]string, len(all))
+	for i, a := range all {
+		place, err := m.resolveTarget(root, a.target)
+		if err != nil {
+			return fmt.Errorf("%s: %w", a.what, err)
 		}
 		if api, ok := inAPIMount(place); ok {
-			return fmt.Errorf("mount %s: lands at %s, in %s", mt.GetTarget(), place, api)
+			return fmt.Errorf("%s: lands at %s, in %s", a.what, place, api)
 		}
 		if place == "/" {
-			return fmt.Errorf("mount %s: lands at /, the root", mt.GetTarget())
+			return fmt.Errorf("%s: lands at /, the root", a.what)
 		}
 		for _, h := range held {
 			if h.place == place || strings.HasPrefix(h.place, place+"/") {
-				return fmt.Errorf("mount %s: lands at %s, at or above %s, where %s lands: it would hide it",
-					mt.GetTarget(), place, h.place, h.what)
+				return fmt.Errorf("%s: lands at %s, at or above %s, where %s lands: it would hide it",
+					a.what, place, h.place, h.what)
 			}
 		}
 		for j, prev := range places[:i] {
 			if prev == place {
-				return fmt.Errorf("mount %s: lands at %s, as %s does", mt.GetTarget(), place, mounts[j].GetTarget())
+				return fmt.Errorf("%s: lands at %s, as %s does", a.what, place, all[j].what)
 			}
 			if rel := nested(place, prev); rel != "" {
-				return fmt.Errorf("mount %s: lands at %s, %s %s, where mount %s lands: "+
-					"its mount point would be made in the host directory", mt.GetTarget(), place, rel, prev, mounts[j].GetTarget())
+				return fmt.Errorf("%s: lands at %s, %s %s, where %s lands: "+
+					"its mount point would be made in what is mounted there", a.what, place, rel, prev, all[j].what)
 			}
 		}
 		places[i] = place
 	}
-	for i, mt := range mounts {
-		if err := m.mountShare(root, mt.GetTag(), places[i], !mt.GetReadWrite()); err != nil {
-			return fmt.Errorf("mount %s: at %s: %w", mt.GetTarget(), places[i], err)
+	for i, a := range all {
+		if err := a.mount(places[i]); err != nil {
+			return fmt.Errorf("%s: at %s: %w", a.what, places[i], err)
 		}
 	}
 	return nil
@@ -300,7 +339,7 @@ func makeMounts(m mounter, root string, mounts []*agentv1.Mount, held []landing)
 // It is "" otherwise. The config refuses such targets as written; only an
 // image's symlinks, such as /data -> /srv/x with targets /srv and /data, can
 // make two land nested, and then the inner one's mount point would be made
-// in the host directory mounted at the outer one (STO-6).
+// in the host directory or disk mounted at the outer one (STO-6).
 func nested(place, other string) string {
 	switch {
 	case strings.HasPrefix(place, other+"/"):
@@ -309,6 +348,31 @@ func nested(place, other string) string {
 		return "above"
 	}
 	return ""
+}
+
+// diskDevice finds the disk d's block device by its serial, and returns it
+// and the filesystem its superblock names. A read-only ext4 disk whose
+// journal needs recovery is refused rather than mounted with noload, which
+// would show a half-written filesystem; a read-write disk must be ext4
+// (STO-4).
+func diskDevice(m mounter, root string, d *agentv1.Disk) (string, string, error) {
+	device, err := m.findDisk(root, d.GetBlockId())
+	if err != nil {
+		return "", "", err
+	}
+	sb, err := m.probeDisk(device)
+	switch {
+	case errors.Is(err, errNotExt4OrErofs):
+		return "", "", err
+	case err != nil:
+		return "", "", fmt.Errorf("read %s's superblock: %w", device, err)
+	case d.GetReadWrite() && sb.fstype != fsExt4:
+		return "", "", fmt.Errorf("%s is %s, and a read-write disk must be ext4", device, sb.fstype)
+	case !d.GetReadWrite() && sb.needsRecovery:
+		return "", "", fmt.Errorf("its ext4 journal needs recovery, which a read-only mount can't do: " +
+			"mount the disk read-write once to replay it")
+	}
+	return device, sb.fstype, nil
 }
 
 // parentsFirst returns the indexes of places, each where a path lands in
@@ -341,8 +405,9 @@ func parentsFirst(places []string) []int {
 
 // checkBootConfig refuses a config whose layer names would leave the layer
 // share, that names no scratch device, vsock port or layer tag, whose scratch
-// paths, mount targets or guest directories aren't absolute, clean paths
-// below /, with a mount that names no tag, or whose guest directory's mode
+// paths, mount or disk targets or guest directories aren't absolute, clean
+// paths below /, with a mount that names no tag or a disk no block id, or
+// whose guest directory's mode
 // isn't permission bits.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
 	if cfg.GetVsockPort() == 0 {
@@ -373,6 +438,14 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 		}
 		if !belowRoot(mt.GetTarget()) {
 			return fmt.Errorf("boot config: mount target %q is not an absolute, clean path below /", mt.GetTarget())
+		}
+	}
+	for _, d := range cfg.GetDisks() {
+		if d.GetBlockId() == "" {
+			return fmt.Errorf("boot config: disk %s has no block id", d.GetTarget())
+		}
+		if !belowRoot(d.GetTarget()) {
+			return fmt.Errorf("boot config: disk target %q is not an absolute, clean path below /", d.GetTarget())
 		}
 	}
 	for _, d := range cfg.GetGuestDirs() {

@@ -246,6 +246,57 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 	}
 }
 
+// Start attaches each of the job's profile's disks: in the job spec its
+// source, the block id disk<i>, i its position in the list, and its
+// read-write flag, and in the boot config that block id, its target and the
+// flag, in the list's order (STO-1, STO-4). The job's copy, taken at
+// Create, shares nothing with the profiles a reload swaps. Backend options
+// naming volumes or disks attach none (STO-11).
+func TestStartAttachesTheProfilesDisks(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{}
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	ds := []config.Disk{{Source: "/srv/store.ext4", Target: "/var/lib/store"}, {Source: "/srv/tools.erofs", Target: "/opt/tools"}}
+	srv.SetProfiles(config.Profiles{"data": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1, Disks: ds}})
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
+		LabelArg:       testImage + ";profile=data",
+		BackendOptions: map[string]string{"volumes": "/dev/sda:/dev/sda", "disks": "/srv/other.ext4:/data"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds[0].Target = "/changed"
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	vm := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()[0]
+	var attached, mounted []string
+	for _, d := range vm.GetDisks() {
+		attached = append(attached, fmt.Sprintf("%s %s rw=%v", d.GetSource(), d.GetBlockId(), d.GetReadWrite()))
+	}
+	for _, d := range vm.GetBoot().GetDisks() {
+		mounted = append(mounted, fmt.Sprintf("%s %s rw=%v", d.GetBlockId(), d.GetTarget(), d.GetReadWrite()))
+	}
+	if want := []string{"/srv/store.ext4 disk0 rw=false", "/srv/tools.erofs disk1 rw=false"}; !slices.Equal(attached, want) {
+		t.Errorf("job spec disks %q, want %q", attached, want)
+	}
+	if want := []string{"disk0 /var/lib/store rw=false", "disk1 /opt/tools rw=false"}; !slices.Equal(mounted, want) {
+		t.Errorf("boot config disks %q, want %q", mounted, want)
+	}
+	// A profile without disks attaches none.
+	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	if vm := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()[0]; len(vm.GetDisks()) != 0 || len(vm.GetBoot().GetDisks()) != 0 {
+		t.Errorf("no disks: job spec %v, boot config %v", vm.GetDisks(), vm.GetBoot().GetDisks())
+	}
+}
+
 // acquiredBy returns the one request cache's Acquire had for job id.
 func acquiredBy(t *testing.T, cache *fakeCache, id string) imagecache.Request {
 	t.Helper()

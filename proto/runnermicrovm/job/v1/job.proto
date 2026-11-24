@@ -86,7 +86,7 @@ message VM {
   // mounts.
   string layer_dir = 11;
   string layer_tag = 17;
-  // The VM's mounts and disks (STO-1), disks in guest device order. Today
+  // The VM's mounts and disks (STO-1), in the profile's order. Today
   // they come only from the label's profile, because the plugin protocol
   // passes no workflow mounts or volumes.
   repeated Mount mounts = 12;
@@ -112,8 +112,13 @@ message Mount {
 
 // Disk is a host file a VM attaches as a block device (STO-1).
 message Disk {
-  // The absolute host file.
+  // The absolute host file. The job process opens it before it starts the
+  // VM child, read-only for a read-only disk; one that is missing or not a
+  // regular file fails the job, naming it (PROTO-10).
   string source = 1;
+  // The block id libkrun attaches it under; the boot config names the same
+  // id.
+  string block_id = 3;
   // A read-write disk is locked with an exclusive flock for the life of the
   // job process and that VM's VM child. A disk held by another process fails
   // the job: `disk <source> is in use by another process` (STO-7).

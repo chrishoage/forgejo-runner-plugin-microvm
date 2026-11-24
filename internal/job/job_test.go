@@ -331,6 +331,101 @@ func TestRunFailsOnAMountSource(t *testing.T) {
 	}
 }
 
+// The VM child's spec carries each disk's source, block id and read-write
+// flag, in the job spec's order, and the VM child inherits each disk's
+// file as fd 5 and up, in the same order, read-only (STO-1, STO-4).
+func TestRunPassesTheDisks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	saved := filepath.Join(dir, "vm-child-spec")
+	bin := filepath.Join(dir, "runner-microvm-job")
+	script := "#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat > " + saved + "\n" +
+		"cat <&5 > " + dir + "/fd5\ncat <&6 > " + dir + "/fd6\n" +
+		"if echo x >&5; then echo writable > " + dir + "/fd5-writable; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, tools := filepath.Join(dir, "store.ext4"), filepath.Join(dir, "tools.erofs")
+	for _, p := range []string{store, tools} {
+		if err := os.WriteFile(p, []byte(filepath.Base(p)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := testJobSpec(t, bin)
+	spec.Vms[0].Disks = []*jobv1.Disk{{Source: store, BlockId: "disk0"}, {Source: tools, BlockId: "disk1"}}
+	if _, err := runJob(t, spec); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	child := &vmv1.Spec{}
+	if err := protodelim.UnmarshalFrom(bufio.NewReader(f), child); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range child.GetDisks() {
+		got = append(got, fmt.Sprintf("%s %s rw=%v", d.GetSource(), d.GetBlockId(), d.GetReadWrite()))
+	}
+	if want := []string{store + " disk0 rw=false", tools + " disk1 rw=false"}; !slices.Equal(got, want) {
+		t.Errorf("the VM child's disks are %q, want %q", got, want)
+	}
+	for fd, want := range map[string]string{"fd5": "store.ext4", "fd6": "tools.erofs"} {
+		if b, err := os.ReadFile(filepath.Join(dir, fd)); err != nil || string(b) != want {
+			t.Errorf("the VM child's %s read %q, %v, want %q", fd, b, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fd5-writable")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the VM child could write a read-only disk's fd 5: %v", err)
+	}
+}
+
+// A disk source that is gone, or is not a regular file, by Start fails the
+// job before the scratch disk is made and the VM child starts, naming the
+// source; a FIFO there fails at once instead of blocking the open
+// (PROTO-10).
+func TestRunFailsOnADiskSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	good, fifo := filepath.Join(dir, "good.img"), filepath.Join(dir, "fifo")
+	if err := os.WriteFile(good, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		source, want string
+	}{
+		"missing":   {filepath.Join(dir, "missing"), "does not exist"},
+		"directory": {dir, "is not a regular file"},
+		"FIFO":      {fifo, "is not a regular file"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			started := filepath.Join(t.TempDir(), "started")
+			spec := testJobSpec(t, fakeJobBinary(t, "touch "+started))
+			spec.Vms[0].Disks = []*jobv1.Disk{{Source: good, BlockId: "disk0"}, {Source: tt.source, BlockId: "disk1"}}
+			events, err := runJob(t, spec)
+			prefix := "disk " + tt.source + ": " + tt.want
+			if err == nil || !strings.Contains(err.Error(), prefix) {
+				t.Fatalf("err = %v, want one beginning %q", err, prefix)
+			}
+			events = afterNetworkUp(t, events)
+			if len(events) != 1 || !strings.HasPrefix(events[0].GetFailed().GetReason(), prefix) || events[0].GetFailed().GetBug() {
+				t.Fatalf("events = %v, want one Failed beginning %q", events, prefix)
+			}
+			for _, p := range []string{started, spec.GetVms()[0].GetScratchDisk()} {
+				if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s: %v, want nothing there", p, err)
+				}
+			}
+		})
+	}
+}
+
 func TestRunFails(t *testing.T) {
 	t.Parallel()
 	missing := testJobSpec(t, filepath.Join(t.TempDir(), "no-such-binary"))

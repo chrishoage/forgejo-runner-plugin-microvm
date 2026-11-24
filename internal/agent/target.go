@@ -40,16 +40,41 @@ func (kernel) resolveTarget(root, guestPath string) (string, error) {
 
 // mountShare mounts the virtiofs share tag, nosuid and nodev, and read-only
 // when readOnly, at place in the job's root at root, where a target landed.
-// It looks place up again, inside root, and mounts onto the directory it
-// finds by descriptor (fsmount and move_mount), never on a path looked up
-// again. A lookup that lands anywhere but place fails, naming both: no
-// mount lands under another (makeMounts), so none should, but a symlink in
-// a share mounted above it, such as sub -> /, would otherwise redirect the
-// mount past the checks place passed. A host directory's files carry
-// host owners and modes, so the guest gains no privilege from them; the host
-// enforces read-only too, so remounting the share read-write, or mounting
-// the tag again, can't write it (STO-2).
-func (kernel) mountShare(root, tag, place string, readOnly bool) (err error) {
+// A host directory's files carry host owners and modes, so the guest gains
+// no privilege from them; the host enforces read-only too, so remounting the
+// share read-write, or mounting the tag again, can't write it (STO-2).
+func (kernel) mountShare(root, tag, place string, readOnly bool) error {
+	attrs := uintptr(mountAttrNosuid | mountAttrNodev)
+	if readOnly {
+		attrs |= mountAttrRdonly
+	}
+	return mountAt(root, place, "virtiofs", tag, false, attrs)
+}
+
+// mountDisk mounts the block device device, a filesystem of fstype, at
+// place in the job's root at root, where a target landed: read-only, its
+// superblock too, when readOnly. Neither nosuid nor nodev: a disk is a
+// whole filesystem the operator hands over, such as a container store whose
+// images hold setuid binaries, and the VM is the security boundary. The
+// kernel's default relatime applies. The host enforces read-only too, so
+// remounting the disk read-write can't write it (STO-2, STO-4).
+func (kernel) mountDisk(root, device, fstype, place string, readOnly bool) error {
+	attrs := uintptr(0)
+	if readOnly {
+		attrs |= mountAttrRdonly
+	}
+	return mountAt(root, place, fstype, device, readOnly, attrs)
+}
+
+// mountAt mounts a new fstype filesystem from source at place in the job's
+// root at root, read-only at the superblock when sbReadOnly, with the mount
+// attributes attrs. It looks place up again, inside root, and mounts onto
+// the directory it finds by descriptor (fsmount and move_mount), never on a
+// path looked up again. A lookup that lands anywhere but place fails, naming
+// both: no target lands under another (makeStorage), so none should, but a
+// symlink in a share mounted above it, such as sub -> /, would otherwise
+// redirect the mount past the checks place passed.
+func mountAt(root, place, fstype, source string, sbReadOnly bool, attrs uintptr) (err error) {
 	rootFd, err := syscall.Open(root, oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("open the root %s: %w", root, err)
@@ -63,25 +88,26 @@ func (kernel) mountShare(root, tag, place string, readOnly bool) (err error) {
 	if at != place {
 		return fmt.Errorf("%s now lands at %s", place, at)
 	}
-	fd, err := fsopen("virtiofs")
+	fd, err := fsopen(fstype)
 	if err != nil {
-		return fmt.Errorf("fsopen virtiofs: %w", err)
+		return fmt.Errorf("fsopen %s: %w", fstype, err)
 	}
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("virtiofs %s: %w%s", tag, err, fsMessages(fd))
+			err = fmt.Errorf("%s %s: %w%s", fstype, source, err, fsMessages(fd))
 		}
 		_ = syscall.Close(fd)
 	}()
-	if err := fsconfigString(fd, "source", tag); err != nil {
+	if err := fsconfigString(fd, "source", source); err != nil {
 		return fmt.Errorf("source: %w", err)
+	}
+	if sbReadOnly {
+		if err := fsconfigFlag(fd, "ro"); err != nil {
+			return fmt.Errorf("ro: %w", err)
+		}
 	}
 	if _, _, errno := syscall.Syscall6(sysFsconfig, uintptr(fd), fsconfigCmdCreate, 0, 0, 0, 0); errno != 0 {
 		return fmt.Errorf("create: %w", errno)
-	}
-	attrs := uintptr(mountAttrNosuid | mountAttrNodev)
-	if readOnly {
-		attrs |= mountAttrRdonly
 	}
 	mfd, _, errno := syscall.Syscall(sysFsmount, uintptr(fd), fsmountCloexec, attrs)
 	if errno != 0 {

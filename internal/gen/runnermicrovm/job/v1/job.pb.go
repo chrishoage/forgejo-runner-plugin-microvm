@@ -181,7 +181,7 @@ type VM struct {
 	// mounts.
 	LayerDir string `protobuf:"bytes,11,opt,name=layer_dir,json=layerDir,proto3" json:"layer_dir,omitempty"`
 	LayerTag string `protobuf:"bytes,17,opt,name=layer_tag,json=layerTag,proto3" json:"layer_tag,omitempty"`
-	// The VM's mounts and disks (STO-1), disks in guest device order. Today
+	// The VM's mounts and disks (STO-1), in the profile's order. Today
 	// they come only from the label's profile, because the plugin protocol
 	// passes no workflow mounts or volumes.
 	Mounts []*Mount `protobuf:"bytes,12,rep,name=mounts,proto3" json:"mounts,omitempty"`
@@ -413,8 +413,13 @@ func (x *Mount) GetReadWrite() bool {
 // Disk is a host file a VM attaches as a block device (STO-1).
 type Disk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The absolute host file.
+	// The absolute host file. The job process opens it before it starts the
+	// VM child, read-only for a read-only disk; one that is missing or not a
+	// regular file fails the job, naming it (PROTO-10).
 	Source string `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	// The block id libkrun attaches it under; the boot config names the same
+	// id.
+	BlockId string `protobuf:"bytes,3,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
 	// A read-write disk is locked with an exclusive flock for the life of the
 	// job process and that VM's VM child. A disk held by another process fails
 	// the job: `disk <source> is in use by another process` (STO-7).
@@ -462,6 +467,13 @@ func (*Disk) Descriptor() ([]byte, []int) {
 func (x *Disk) GetSource() string {
 	if x != nil {
 		return x.Source
+	}
+	return ""
+}
+
+func (x *Disk) GetBlockId() string {
+	if x != nil {
+		return x.BlockId
 	}
 	return ""
 }
@@ -935,9 +947,10 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x10\n" +
 	"\x03tag\x18\x02 \x01(\tR\x03tag\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x03 \x01(\bR\treadWrite\"=\n" +
+	"read_write\x18\x03 \x01(\bR\treadWrite\"X\n" +
 	"\x04Disk\x12\x16\n" +
-	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1d\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x19\n" +
+	"\bblock_id\x18\x03 \x01(\tR\ablockId\x12\x1d\n" +
 	"\n" +
 	"read_write\x18\x02 \x01(\bR\treadWrite\"\x8a\x01\n" +
 	"\aNetwork\x12\x16\n" +

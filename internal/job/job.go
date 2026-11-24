@@ -243,24 +243,31 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 // 128+n when signal n ended it.
 //
 // Its error names the cause first, as Start's error shows it (PROTO-10): a
-// mount, by its source, the scratch disk, whose path names its VM's
-// directory, or the VM.
+// mount or a disk, by its source, the scratch disk, whose path names its
+// VM's directory, or the VM.
 func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
 	if err := checkMounts(v.GetMounts()); err != nil {
 		return 0, err
 	}
+	disks, err := openDisks(v.GetDisks())
+	if err != nil {
+		return 0, err
+	}
+	// The job process holds its VM's disks until the VM child has exited.
+	defer closeAll(disks)
 	if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
 		return 0, fmt.Errorf("scratch disk: %s: %w", v.GetScratchDisk(), err)
 	}
-	code, err := startVM(ctx, spec, v, link, live, th, out, log)
+	code, err := startVM(ctx, spec, v, link, live, disks, th, out, log)
 	if err != nil {
 		return 0, fmt.Errorf("VM %s: %w", v.GetName(), err)
 	}
 	return code, nil
 }
 
-// startVM is runVM once the VM's scratch disk is made.
-func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
+// startVM is runVM once the VM's disks are open, disks[i] being
+// v.Disks[i]'s file, and its scratch disk is made.
+func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, disks []*os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
 	childSpec, err := specFile(&vmv1.Spec{
 		LibDir:      spec.GetLibDir(),
 		Cpus:        v.GetCpus(),
@@ -270,6 +277,7 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 		LayerDir:    v.GetLayerDir(),
 		LayerTag:    v.GetLayerTag(),
 		Mounts:      childMounts(v.GetMounts()),
+		Disks:       childDisks(v.GetDisks()),
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),
@@ -293,9 +301,9 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 	cmd := exec.CommandContext(ctx, spec.GetJobBinary(), "vm") //nolint:gosec // G204: the plugin names its own job binary
 	cmd.Stdin = childSpec
 	cmd.Stdout, cmd.Stderr = vmLog, vmLog
-	// fd 3 is the liveness pipe, and fd 4 its VM's end of the frame
-	// socket.
-	cmd.ExtraFiles = []*os.File{live, link}
+	// fd 3 is the liveness pipe, fd 4 its VM's end of the frame socket,
+	// and fd 5 and up its disks, in order.
+	cmd.ExtraFiles = append([]*os.File{live, link}, disks...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if err := th.do(ctx, cmd.Start); err != nil {
 		return 0, fmt.Errorf("start the VM child: %w", err)
@@ -346,6 +354,63 @@ func checkMounts(mounts []*jobv1.Mount) error {
 		}
 	}
 	return nil
+}
+
+// openDisks opens each disk's source, read-only for a read-only disk, for
+// the VM child to inherit, and returns the files in disks' order. A source
+// that is missing or not a regular file is an error naming it, and closes
+// the files already open (STO-5, PROTO-10). The config checked each source
+// when it was read, but a source can change since; libkrun is handed the
+// open file, so the file checked is the file attached. The open never
+// blocks, so a FIFO put at the source can't hang the job.
+func openDisks(disks []*jobv1.Disk) (files []*os.File, err error) {
+	defer func() {
+		if err != nil {
+			closeAll(files)
+			files = nil
+		}
+	}()
+	for _, d := range disks {
+		flag := os.O_RDONLY
+		if d.GetReadWrite() {
+			flag = os.O_RDWR
+		}
+		f, err := os.OpenFile(d.GetSource(), flag|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+		var pe *fs.PathError
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return files, fmt.Errorf("disk %s: does not exist", d.GetSource())
+		case errors.As(err, &pe):
+			return files, fmt.Errorf("disk %s: %w", d.GetSource(), pe.Err)
+		case err != nil:
+			return files, fmt.Errorf("disk %s: %w", d.GetSource(), err)
+		}
+		files = append(files, f)
+		fi, err := f.Stat()
+		if err != nil {
+			return files, fmt.Errorf("disk %s: %w", d.GetSource(), err)
+		}
+		if !fi.Mode().IsRegular() {
+			return files, fmt.Errorf("disk %s: is not a regular file", d.GetSource())
+		}
+	}
+	return files, nil
+}
+
+// closeAll closes files.
+func closeAll(files []*os.File) {
+	for _, f := range files {
+		_ = f.Close()
+	}
+}
+
+// childDisks are the VM child's copies of the job spec's disks.
+func childDisks(disks []*jobv1.Disk) []*vmv1.Disk {
+	var out []*vmv1.Disk
+	for _, d := range disks {
+		out = append(out, &vmv1.Disk{Source: d.GetSource(), BlockId: d.GetBlockId(), ReadWrite: d.GetReadWrite()})
+	}
+	return out
 }
 
 // childMounts are the VM child's copies of the job spec's mounts.
