@@ -62,6 +62,10 @@ _Avoid_: garbage collection, recovery
 The host process that owns everything belonging to one job: its job network, its VM children, its disk locks and its files. Ending it ends the job.
 _Avoid_: job runner, worker, shim
 
+**Job logs**:
+A job's process log, and each of its VMs' log and console, on the host. Deleted at Remove unless the operator keeps them; then they are kept logs.
+_Avoid_: job output (what steps print, which goes to the runner)
+
 **Job binary**:
 The program the job process runs, embedded in `runner-microvm` and written out by the plugin.
 

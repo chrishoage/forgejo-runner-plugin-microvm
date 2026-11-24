@@ -143,7 +143,8 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB,
-		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel, "log_level", cfg.LogLevel)
+		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel, "log_level", cfg.LogLevel,
+		"keep_job_logs", cfg.KeepJobLogs)
 	logProfiles(log, cfg.Profiles)
 }
 
@@ -262,6 +263,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 		LibDir:          cfg.LibDir,
 		LibkrunLogLevel: cfg.LibkrunLogLevel,
 		LogLevel:        cfg.LogLevel,
+		KeepJobLogs:     cfg.KeepJobLogs,
 		JobBinary:       jobBinary,
 		MkfsExt4:        mkfs,
 		Agent:           agent,
