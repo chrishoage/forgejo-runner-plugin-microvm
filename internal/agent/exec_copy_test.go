@@ -155,55 +155,129 @@ func TestExecReturnsDespiteABackgroundChild(t *testing.T) {
 	}
 }
 
-// slowExecStream is an Exec stream whose first Send blocks until Exec has
-// handled the command's exit: a runner, or a network, that drains slowly.
+// slowExecStream is an Exec stream whose first stdout Send blocks until Exec
+// has handled the command's exit, and whose every Send, but the exit code's,
+// then takes longer than the output grace: a runner, or a network, that
+// drains slowly. Just before the first blocks, it calls firstSend.
 type slowExecStream struct {
 	grpc.ServerStream
-	ctx    context.Context
-	exited <-chan struct{}
-	slowed bool
-	out    []*agentv1.ExecResponse
+	ctx       context.Context
+	exited    <-chan struct{}
+	firstSend func() error
+	slowed    bool
+	out       []*agentv1.ExecResponse
 }
 
 func (s *slowExecStream) Context() context.Context { return s.ctx }
 
 func (s *slowExecStream) Send(resp *agentv1.ExecResponse) error {
 	if !s.slowed {
+		if resp.GetStdout() == nil {
+			return errors.New("the first Send is not stdout")
+		}
 		s.slowed = true
+		if err := s.firstSend(); err != nil {
+			return err
+		}
 		select {
 		case <-s.exited:
 		case <-s.ctx.Done():
 			return errors.New("Exec did not handle the command's exit")
 		}
 	}
+	if _, last := resp.GetEvent().(*agentv1.ExecResponse_ExitCode); !last {
+		select {
+		case <-time.After(2 * outputGrace):
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
 	s.out = append(s.out, resp)
 	return nil
+}
+
+// pipeSize sets the size of the pipe r reads to size bytes, as small as the
+// kernel gives the pipes of a user over its soft limit
+// (fs.pipe-user-pages-soft), and returns the size the pipe has.
+func pipeSize(r *os.File, size int) (int, error) {
+	rc, err := r.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var got uintptr
+	var errno syscall.Errno
+	err = rc.Control(func(fd uintptr) {
+		if _, _, errno = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_SETPIPE_SZ, uintptr(size)); errno != 0 {
+			return
+		}
+		got, _, errno = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETPIPE_SZ, 0)
+	})
+	if err == nil && errno != 0 {
+		err = errno
+	}
+	return int(got), err
 }
 
 // Everything the command wrote before it exited is sent, however slowly
 // the stream drains: the output grace only bounds the wait for a background
 // child holding the output open.
+//
+// The pipe is shrunk to one page, whatever the host's limits give a new
+// pipe, so the test doesn't depend on them: a command that writes more than
+// the pipe holds blocks, and never exits, while the stream is stuck in its
+// first Send. The command writes half a page, which relay reads, a quarter
+// page at a time, and starts to send. Once that Send has begun, the command
+// writes the other half and exits, while relay is still stuck in the Send.
+// So the second half is in the pipe when the command exits: only relay's
+// drain path, which reads on after the exit, sends it. It takes at least
+// two drain reads, with a Send between them that outlasts the output grace,
+// so the grace must not start before the last of the bytes owed is read.
 func TestExecSendsAllOutputToASlowStream(t *testing.T) {
 	t.Parallel()
 	exited := make(chan struct{})
-	// More than one read takes, less than the pipe holds, so the command
-	// exits while most of it is still in the pipe.
-	const size = 60000
-	stream := &slowExecStream{ctx: testContext(t), exited: exited}
-	req := sh(`head -c ` + strconv.Itoa(size) + ` /dev/zero | tr '\0' x; exit 4`)
-	if err := (&server{execExited: func() { close(exited) }}).Exec(req, stream); err != nil {
+	started := filepath.Join(t.TempDir(), "started")
+	size := os.Getpagesize()
+	half := size / 2
+	stream := &slowExecStream{
+		ctx:       testContext(t),
+		exited:    exited,
+		firstSend: func() error { return os.WriteFile(started, nil, 0o600) },
+	}
+	// The first half may take more than one read; the second half is
+	// written only after the first Send began.
+	req := sh(`head -c ` + strconv.Itoa(half) + ` /dev/zero
+until [ -e "$STARTED" ]; do sleep 0.01; done
+head -c ` + strconv.Itoa(half) + ` /dev/zero
+exit 4`)
+	req.Env["STARTED"] = started
+	srv := &server{
+		execExited:   func() { close(exited) },
+		execReadSize: half / 2,
+		execStdout: func(r *os.File) {
+			if got, err := pipeSize(r, size); err != nil || got != size {
+				t.Errorf("pipe size = %d, %v, want %d", got, err, size)
+			}
+		},
+	}
+	if err := srv.Exec(req, stream); err != nil {
 		t.Fatal(err)
 	}
-	var stdout int
+	var stdout, stdoutSends int
 	var code int32 = -1
 	for _, resp := range stream.out {
 		stdout += len(resp.GetStdout())
+		if len(resp.GetStdout()) > 0 {
+			stdoutSends++
+		}
 		if ev, ok := resp.GetEvent().(*agentv1.ExecResponse_ExitCode); ok {
 			code = ev.ExitCode
 		}
 	}
 	if stdout != size || code != 4 {
 		t.Errorf("sent %d bytes of stdout and exit code %d, want %d and 4", stdout, code, size)
+	}
+	if stdoutSends < 2 {
+		t.Errorf("sent the stdout in %d messages, want the second half apart from the first", stdoutSends)
 	}
 }
 

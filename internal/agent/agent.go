@@ -15,6 +15,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"os"
 
 	"google.golang.org/grpc"
 
@@ -85,6 +86,13 @@ type server struct {
 	// execExited, when set, is called once Exec has told its output that
 	// the command exited: a test's view of it. Nil outside tests.
 	execExited func()
+	// execStdout, when set, is called with the read end of the command's
+	// stdout pipe, before the command starts: a test's hold on the pipe's
+	// size. Nil outside tests.
+	execStdout func(*os.File)
+	// execReadSize, when positive, replaces relayReadSize: a test's way to
+	// make a small output take several reads. Zero outside tests.
+	execReadSize int
 }
 
 // Ping answers: the agent is ready.

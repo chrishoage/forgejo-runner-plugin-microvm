@@ -29,6 +29,9 @@ const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bi
 // the output open can't keep the step running (GST-9).
 const outputGrace = 200 * time.Millisecond
 
+// relayReadSize is how much of an output Exec reads, and sends, at once.
+const relayReadSize = 32 << 10
+
 // Exec runs one command and streams its output, then its exit code, or why
 // it could not start. Cancelling the call kills the command's process group
 // at once (GST-8).
@@ -82,6 +85,9 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 	}
 	defer stdout.close()
 	defer stderr.close()
+	if s.execStdout != nil {
+		s.execStdout(stdout.r)
+	}
 	cmd.Stdout, cmd.Stderr = stdout.w, stderr.w
 	if err := cmd.Start(); err != nil {
 		return startError("%v", err)
@@ -98,6 +104,10 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 			return stream.Send(wrap(append([]byte(nil), b...)))
 		}
 	}
+	readSize := relayReadSize
+	if s.execReadSize > 0 {
+		readSize = s.execReadSize
+	}
 	relayed := make(chan error, 2)
 	for _, o := range []struct {
 		out  *output
@@ -111,7 +121,7 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 		}},
 	} {
 		go func() {
-			err := o.out.relay(send(o.wrap))
+			err := o.out.relay(send(o.wrap), readSize)
 			if err != nil {
 				// Nobody gets the output: the command is of no use.
 				cancel()
@@ -176,8 +186,8 @@ func (o *output) exited() { _ = o.r.SetReadDeadline(time.Unix(1, 0)) }
 // it exited, however slowly send takes it; after that it waits at most
 // outputGrace for the end, which a background child holding the pipe open
 // delays (GST-9).
-func (o *output) relay(send func([]byte) error) error {
-	buf := make([]byte, 32<<10)
+func (o *output) relay(send func([]byte) error, readSize int) error {
+	buf := make([]byte, readSize)
 	draining := false
 	// owed is how much of what was in the pipe when the command exited is
 	// not read yet.
