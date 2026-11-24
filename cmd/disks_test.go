@@ -91,6 +91,7 @@ func fileBytes(t *testing.T, p string) []byte {
 // is created, and one under a scratch path sits on its fresh directory
 // (STO-1, STO-2, STO-4, STO-6).
 func TestReadOnlyDisks(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disks := []string{ext4Disk(t, "first"), erofsDisk(t, "tools"), ext4Disk(t, "second")}
 	before := make([][]byte, len(disks))
@@ -148,6 +149,7 @@ echo "disks ok: $((6 * 7))"
 // whose source is deleted after the config was read, naming the source
 // (STO-4, PROTO-10).
 func TestDiskFailsStart(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	neither := filepath.Join(t.TempDir(), "zeros.img")
 	if err := os.WriteFile(neither, make([]byte, 1<<20), 0o600); err != nil {
@@ -212,6 +214,7 @@ func setNeedsRecovery(t *testing.T, p string) {
 // sees it ext4 and rw, writes a file to it and reads it back, and the host
 // file has changed (STO-4).
 func TestReadWriteDisk(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disk := ext4Disk(t, "store")
 	before := fileBytes(t, disk)
@@ -264,6 +267,7 @@ func holdLock(t *testing.T, p string, how int) func() {
 // lock gone, the two read-only VMs' own shared locks still fail the
 // read-write job (STO-7, STO-8). The two VMs are as small as boot allows.
 func TestDiskLocks(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disk := ext4Disk(t, "shared")
 	p := startPluginWith(t, buildPlugin(t), fmt.Sprintf(`profiles:

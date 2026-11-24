@@ -35,6 +35,7 @@ func addresses(out string) []string {
 // loopback, and every other name through the gateway, as a step's programs
 // resolve them: through /etc/hosts and /etc/resolv.conf (GST-12).
 func TestGuestNames(t *testing.T) {
+	t.Parallel()
 	// A name only the host's resolver knows: the CI host's own name,
 	// which the guest's /etc/hosts doesn't hold. The job process resolves
 	// it with Go's own resolver, as the test does here.
@@ -101,6 +102,7 @@ func TestGuestNames(t *testing.T) {
 // on Ubuntu without systemd-resolved running, the guest's /etc/resolv.conf
 // is a regular file naming the gateway.
 func TestResolvConfReplacesASymlink(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	img, err := mutate.AppendLayers(base, tarLayer(t, "", &tar.Header{
 		Name: "etc/resolv.conf", Typeflag: tar.TypeSymlink, Linkname: "../run/systemd/resolve/stub-resolv.conf",

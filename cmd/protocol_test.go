@@ -62,6 +62,7 @@ var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: 
 // and show its first step's output, and workflowChecks adds a workflow's
 // own checks.
 func TestWorkflows(t *testing.T) {
+	t.Parallel()
 	image := readImage(t)
 	labels := map[string]string{"microvm": image, "microvm-big": image + ";profile=" + bigProfile}
 	files, err := filepath.Glob(filepath.Join(workflows, "*.yml"))
@@ -165,6 +166,7 @@ func unmappedLabels(t *testing.T, file string, labels map[string]string) []strin
 // sends the plugin SIGHUP: the next job on the profile has the new count
 // (CFG-7).
 func TestProfileWorkflow(t *testing.T) {
+	t.Parallel()
 	wf := writeWorkflow(t, "  big:\n    runs-on: microvm-big\n    steps:\n      - run: |\n          "+shapeStep+"\n")
 	images := map[string]string{"microvm-big": readImage(t) + ";profile=" + bigProfile}
 	p := startPlugin(t, buildPlugin(t))

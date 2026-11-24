@@ -251,6 +251,7 @@ func hostAddr(t *testing.T) netip.Addr {
 // gateway's DNS. The guest's eth0 is 198.18.0.2/24 with MTU 1500, no IPv6
 // address, and a default route via 198.18.0.1, and lo is up.
 func TestGuestNetwork(t *testing.T) {
+	t.Parallel()
 	host := hostAddr(t)
 	ln, err := new(net.ListenConfig).Listen(t.Context(), "tcp4", netip.AddrPortFrom(host, 0).String())
 	if err != nil {

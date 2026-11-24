@@ -163,6 +163,7 @@ func expectOutput(t *testing.T, workflow, image string, want ...string) {
 // layer's file, every layer's file, and not a file a later layer deleted
 // (GST-2, GST-3).
 func TestManyLayersBoot(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	var layers []v1.Layer
 	for i := range 119 {
@@ -188,6 +189,7 @@ echo "layers ok: $((6 * 7))"
 // An image with no /proc, /sys or /dev boots, and the job still gets them
 // (GST-2).
 func TestImageWithoutMountPointsBoots(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	img := imageWithout(t, base, "proc", "sys", "dev")
 	expectOutput(t, writeWorkflow(t, step("bare", `
@@ -256,6 +258,7 @@ func bytesLayer(t *testing.T, b []byte) v1.Layer {
 // A step can't write a layer through the layer share, also after
 // remounting it read-write: the host enforces read-only (IMG-9).
 func TestLayerShareIsReadOnly(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	expectOutput(t, writeWorkflow(t, step("share", `
 mkdir -p /mnt/layers
@@ -273,6 +276,7 @@ echo "share read-only: $((6 * 7))"
 // A file a job writes to / isn't there in the next job on the same image:
 // each VM gets a fresh scratch disk (VM-5).
 func TestNextJobStartsFresh(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	second := strings.Replace(step("second", `
 test ! -e /left-behind
