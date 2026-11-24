@@ -58,6 +58,20 @@ func buildStatic(t *testing.T, name string) string {
 type vm struct {
 	c  pluginv1alpha.BackendPluginClient
 	id string
+	// removed is set once the test removed v, or forgot it, so its
+	// cleanup doesn't remove it.
+	removed bool
+}
+
+// remove removes v now, failing t unless Remove succeeds.
+func (v *vm) remove(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	v.removed = true
+	if _, err := v.c.Remove(ctx, &pluginv1alpha.RemoveRequest{EnvironmentId: v.id}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
 }
 
 // bootVM creates and starts a job named name on p's plugin with the image
@@ -98,6 +112,9 @@ func createImage(t *testing.T, p *plugin, name, image string) *vm {
 	}
 	v := &vm{c: c, id: resp.GetEnvironmentId()}
 	t.Cleanup(func() {
+		if v.removed {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		if _, err := c.Remove(ctx, &pluginv1alpha.RemoveRequest{EnvironmentId: v.id}); err != nil {

@@ -92,3 +92,12 @@ func (c *Client) CopyIn(ctx context.Context) (agentv1.AgentService_CopyInClient,
 func (c *Client) CopyOut(ctx context.Context, req *agentv1.CopyOutRequest) (agentv1.AgentService_CopyOutClient, error) {
 	return c.rpc.CopyOut(ctx, req)
 }
+
+// Flush writes everything on the VM's read-write mounts and disks through
+// to the host and leaves each read-write disk clean (STO-9). It does not
+// wait for the agent to be ready: a VM whose agent is gone fails it at
+// once.
+func (c *Client) Flush(ctx context.Context) error {
+	_, err := c.rpc.Flush(ctx, &agentv1.FlushRequest{})
+	return err
+}

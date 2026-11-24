@@ -84,6 +84,8 @@ type Config struct {
 	// BackstopDelay is how long after its environment timeout the plugin
 	// removes a job the runner has not (PROTO-14).
 	BackstopDelay time.Duration
+	// FlushTimeout is how long Remove waits for a VM's flush (STO-9).
+	FlushTimeout time.Duration
 	// Arch is the runner's name for the host's architecture (runnerArch),
 	// which Create returns.
 	Arch string
@@ -107,9 +109,9 @@ type Server struct {
 	// closed is set by Close: SetProfiles then does nothing.
 	closed bool
 
-	// backstops counts the backstop's removals in progress, which Close
-	// waits for.
-	backstops sync.WaitGroup
+	// removals counts the removals in progress of jobs Remove or the
+	// backstop took out of the table, which Close waits for.
+	removals sync.WaitGroup
 
 	// warnedIgnored is set by the first Create that carries a request field
 	// the plugin ignores, which logs the one warning naming them.
@@ -192,6 +194,9 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	if cfg.BackstopDelay == 0 {
 		cfg.BackstopDelay = backstopDelay
 	}
+	if cfg.FlushTimeout == 0 {
+		cfg.FlushTimeout = flushTimeout
+	}
 	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles}, nil
 }
 
@@ -221,9 +226,10 @@ func (s *Server) Close(ctx context.Context) error {
 	for _, j := range jobs {
 		errs = append(errs, s.remove(ctx, j))
 	}
-	// A backstop that took its job out of the table before Close did is
-	// still removing it.
-	s.backstops.Wait()
+	// A Remove or a backstop that took its job out of the table before
+	// Close did may still be removing it: the plugin stops only once it
+	// has, so its flush is not cut short.
+	s.removals.Wait()
 	s.closeOnce.Do(func() { errs = append(errs, s.runtime.Close()) })
 	return errors.Join(errs...)
 }
@@ -477,19 +483,41 @@ func await(ctx context.Context, op func() error) error {
 
 // Remove takes the job out of the table and tears it down. It cancels any
 // call still unwinding on the job first, and waits for it (PROTO-13).
+//
+// Once the job is out of the table, its teardown is the server's, not the
+// call's: it runs to its end whatever becomes of ctx, so a Remove whose
+// call the plugin's stop cancels still flushes its VM (STO-9), and Close
+// waits for it. The call returns at once when ctx ends, with ctx's status,
+// and otherwise with the teardown's outcome.
 func (s *Server) Remove(ctx context.Context, req *pluginv1alpha.RemoveRequest) (*pluginv1alpha.RemoveResponse, error) {
 	id := req.GetEnvironmentId()
 	s.mu.Lock()
 	j, ok := s.jobs[id]
 	delete(s.jobs, id)
+	if ok {
+		// Counted under mu, so a Close that finds the table without j
+		// waits for its removal.
+		s.removals.Add(1)
+	}
 	s.mu.Unlock()
 	if !ok {
 		return nil, notFound(id)
 	}
-	if err := s.remove(ctx, j); err != nil {
-		return nil, status.Errorf(codes.Internal, "remove %s: %v", id, err)
+	done := make(chan error, 1)
+	go func() {
+		defer s.removals.Done()
+		// The teardown is bounded by the flush timeout and the kill.
+		done <- s.remove(context.WithoutCancel(ctx), j)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "remove %s: %v", id, err)
+		}
+		return &pluginv1alpha.RemoveResponse{}, nil
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
-	return &pluginv1alpha.RemoveResponse{}, nil
 }
 
 // backstopDelay is how long after a job's environment timeout the plugin
@@ -509,16 +537,21 @@ func (s *Server) removeForgotten(ctx context.Context, j *job, timeout time.Durat
 		return
 	}
 	delete(s.jobs, j.id)
-	s.backstops.Add(1)
+	s.removals.Add(1)
 	s.mu.Unlock()
-	defer s.backstops.Done()
+	defer s.removals.Done()
 	s.log.Warn("the runner has not removed the job within its environment timeout: removing it",
 		"job", j.id, "environment_timeout", timeout, "backstop_delay", s.cfg.BackstopDelay)
 	_ = s.remove(ctx, j)
 }
 
+// flushTimeout is how long Remove waits for a VM's flush: ample for a sync
+// and a freeze (STO-9).
+const flushTimeout = 30 * time.Second
+
 // remove tears down j, which is out of the table: it stops its backstop,
-// ends the job process, which ends the VM, and deletes the job's files.
+// flushes its VM, ends the job process, which ends the VM, and deletes the
+// job's files.
 func (s *Server) remove(ctx context.Context, j *job) error {
 	if j.backstop != nil {
 		j.backstop.Stop()
@@ -527,6 +560,7 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.removed = true
+	s.flush(ctx, j)
 	// The kill can't be left half done: it returns once the group is
 	// reaped, moments after SIGKILL.
 	err := s.stop(context.WithoutCancel(ctx), j)
@@ -537,6 +571,39 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 	)
 	s.log.Info("removed", "job", j.id, "err", err)
 	return err
+}
+
+// flush flushes the VM of j, which is locked, before Remove kills it, so the
+// next job on its read-write mounts and disks sees what it wrote, and finds
+// each disk clean (STO-9). Only a started job whose VM has read-write
+// storage and has not died is flushed: a VM with nothing to keep is
+// removed as fast as before, a failed Start kills its VM at once, and a
+// dead VM's agent can't answer. The flush has flushTimeout, and ends at
+// once when the VM dies meanwhile, or when ctx ends, which Remove's,
+// the backstop's and Close's removals never cancel. A flush that fails is
+// logged, naming the job, and Remove carries on: the runner can do nothing
+// with a failed Remove, and the job is ending either way.
+func (s *Server) flush(ctx context.Context, j *job) {
+	if !j.ready.Load() || j.agent == nil || !readWriteStorage(j.profile) || j.gone.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.FlushTimeout)
+	defer cancel()
+	stop := context.AfterFunc(j.gone, cancel) //nolint:contextcheck // j.gone only cancels the flush's own context, derived from ctx
+	defer stop()
+	begin := time.Now()
+	if err := j.agent.Flush(ctx); err != nil {
+		s.log.Warn("the VM's flush failed: its last writes to read-write storage may be lost", "job", j.id, "err", err)
+		return
+	}
+	s.log.Info("flushed", "job", j.id, "took", time.Since(begin).Round(time.Millisecond))
+}
+
+// readWriteStorage reports whether p gives its VM a read-write mount or
+// disk.
+func readWriteStorage(p config.Profile) bool {
+	return slices.ContainsFunc(p.Mounts, func(m config.Mount) bool { return m.ReadWrite }) ||
+		slices.ContainsFunc(p.Disks, func(d config.Disk) bool { return d.ReadWrite })
 }
 
 // stop closes j's agent connection and kills its job process, if any, and

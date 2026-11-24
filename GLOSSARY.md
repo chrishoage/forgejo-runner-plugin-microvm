@@ -139,6 +139,10 @@ _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin pro
 A job process's hold on a disk, which the VM child it is attached to shares, until that VM child has exited: exclusive for a read-write disk, shared for a read-only one. Any number of VMs can read a disk at once, but a writer excludes every other user, readers included.
 _Avoid_: lease, reservation
 
+**Flush**:
+Writing everything a VM holds for its read-write mounts and disks through to the host, and leaving each read-write disk clean, just before its job ends normally. A VM that is killed is never flushed, so its last writes may be lost.
+_Avoid_: sync (the system call it uses), shutdown
+
 ## Process
 
 **Harness**:
