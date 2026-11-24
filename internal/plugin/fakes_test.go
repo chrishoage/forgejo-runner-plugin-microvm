@@ -90,6 +90,10 @@ type fakeCache struct {
 	// unwind, when set, makes a cancelled Acquire wait for it to close
 	// before it returns, as a call still unwinding.
 	unwind chan struct{}
+	// releasing, when set, makes Release send its job on it, then wait
+	// for unrelease to close, as a removal still tearing its job down.
+	releasing chan string
+	unrelease chan struct{}
 
 	mu       sync.Mutex
 	acquired []imagecache.Request
@@ -138,6 +142,10 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 }
 
 func (c *fakeCache) Release(_ context.Context, job string) error {
+	if c.releasing != nil {
+		c.releasing <- job
+		<-c.unrelease
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.released = append(c.released, job)

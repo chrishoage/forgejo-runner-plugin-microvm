@@ -82,12 +82,14 @@ func wantCode(t *testing.T, err error, want codes.Code) {
 func TestHealthServing(t *testing.T) {
 	t.Parallel()
 	conn := serve(t, newTestServer(t, &fakeCache{}, &fakeLauncher{}))
-	resp, err := healthv1.NewHealthClient(conn).Check(testContext(t), &healthv1.HealthCheckRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.GetStatus() != healthv1.HealthCheckResponse_SERVING {
-		t.Fatalf("health = %v, want SERVING", resp.GetStatus())
+	for _, svc := range []string{"", pluginv1alpha.BackendPlugin_ServiceDesc.ServiceName} {
+		resp, err := healthv1.NewHealthClient(conn).Check(testContext(t), &healthv1.HealthCheckRequest{Service: svc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetStatus() != healthv1.HealthCheckResponse_SERVING {
+			t.Errorf("health of %q = %v, want SERVING", svc, resp.GetStatus())
+		}
 	}
 }
 

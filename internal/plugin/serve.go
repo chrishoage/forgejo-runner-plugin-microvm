@@ -19,12 +19,12 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
@@ -41,14 +41,16 @@ import (
 const usage = `usage: runner-microvm <command>
 
 Commands:
-  serve   run the plugin until SIGINT or SIGTERM; SIGHUP reloads the profiles
+  serve   run the plugin; SIGINT or SIGTERM drains it, and a second one stops
+          it at once; SIGHUP reloads the profiles
   check   validate the config file, print every error, and exit
 
 The config file is ` + config.DefaultPath + `, or the file ` + config.PathEnv + ` names.
 `
 
 // Main runs the subcommand in args, reading the environment through getenv,
-// and returns its exit code: serve runs the plugin until SIGINT or SIGTERM;
+// and returns its exit code: serve runs the plugin until a drain, which
+// SIGINT or SIGTERM begins, has ended;
 // check validates the config file and exits 0, or 1 after printing every
 // error. Anything else prints the usage and exits 2.
 func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
@@ -83,25 +85,28 @@ func checkCmd(stdout, stderr io.Writer, getenv func(string) string) int {
 	return 0
 }
 
-// serveCmd is serve: it runs the plugin until SIGINT or SIGTERM, and
-// reloads the config file on each SIGHUP.
+// serveCmd is serve: it runs the plugin until its drain, which SIGINT or
+// SIGTERM begins, has ended, or a second one of them, and reloads the config
+// file on each SIGHUP.
 func serveCmd(getenv func(string) string) int {
 	log := logging.Setup(Name)
 	// First, so a SIGHUP during startup can't end the plugin, which is
 	// SIGHUP's default action. One queued signal is enough: a reload reads
-	// the file as it is then.
+	// the file as it is then. Two queued SIGINTs or SIGTERMs are: the first
+	// drains, the second stops at once.
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
+	term := make(chan os.Signal, 2)
+	signal.Notify(term, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(term)
 	cfg, err := config.Load(getenv)
 	if err != nil {
 		log.Error("stopped: invalid config", "err", err)
 		return 1
 	}
 	logConfig(log, cfg)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, log, cfg, hup, newImageCache, joblaunch.New); err != nil {
+	if err := run(context.Background(), log, cfg, hup, term, newImageCache, joblaunch.New); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
@@ -139,10 +144,13 @@ func newImageCache(log *slog.Logger, dir string, maxSize int64) (ImageCache, err
 // run closes the launcher it made.
 type newLauncherFunc func(log *slog.Logger) (*joblaunch.Launcher, error)
 
-// run runs the plugin with cfg until ctx ends, reloading the config file on
-// each signal from hup. It opens the image cache with newCache, and makes the
-// job launcher with newLauncher, which it closes on every return.
-func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan os.Signal, newCache newCacheFunc, newLauncher newLauncherFunc) error {
+// run runs the plugin with cfg until ctx ends or its drain has ended,
+// reloading the config file on each signal from hup; the first signal from
+// term drains it, and a second stops it at once (serveWithReloads). A signal
+// from term during startup stops it before it serves. It opens the image
+// cache with newCache, and makes the job launcher with newLauncher, which it
+// closes on every return.
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-chan os.Signal, newCache newCacheFunc, newLauncher newLauncherFunc) error {
 	// An architecture libkrun doesn't support, or a missing host tool,
 	// stops startup before anything is written.
 	arch, err := runnerArch(runtime.GOARCH)
@@ -216,6 +224,13 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 	if err != nil {
 		return err
 	}
+	// With no job yet, a drain asked for during startup ends at once.
+	select {
+	case sig := <-term:
+		log.Info("stopped before serving", "signal", sig)
+		return srv.Close(context.WithoutCancel(ctx))
+	default:
+	}
 	lis, closeLis, err := listen(ctx, dirs.Listen)
 	if err != nil {
 		return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
@@ -223,22 +238,50 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup <-chan o
 	defer closeLis()
 	log.Info("serving", "listen", dirs.Listen, "state", dirs.State, "cache", dirs.Cache, "runtime", dirs.Runtime,
 		"job_binary", jobBinary, "agent", agent, "lib_dir", libDir, "mkfs_ext4", mkfs)
-	return serveWithReloads(ctx, log, lis, srv, hup, cfg, (*config.Config).Reload)
+	return serveWithReloads(ctx, log, lis, srv, hup, term, cfg, (*config.Config).Reload)
 }
 
-// serveWithReloads serves srv on lis until ctx ends, reloading the config
-// file with read on each signal from hup, then closes srv. It doesn't wait
-// for a reload still reading the file: one blocked on a stalled network
+// serveWithReloads serves srv on lis, reloading the config file with read on
+// each signal from hup, then closes srv, which removes every job left. The
+// first signal from term begins srv's drain, and serving ends once the
+// drain has; a second signal, or ctx ending, ends it at once. It doesn't
+// wait for a reload still reading the file: one blocked on a stalled network
 // mount would keep the plugin, and its directory locks, alive until SIGKILL.
 // That reload finishes on its own and finds srv closed, so it changes
 // nothing; it touches nothing else the caller frees.
-func serveWithReloads(ctx context.Context, log *slog.Logger, lis net.Listener, srv *Server, hup <-chan os.Signal, cfg *config.Config, read readConfig) error {
-	reloadCtx, stopReloads := context.WithCancel(ctx)
-	defer stopReloads()
-	go reloadOnSignal(reloadCtx, log, hup, srv, cfg, read)
+func serveWithReloads(ctx context.Context, log *slog.Logger, lis net.Listener, srv *Server, hup, term <-chan os.Signal, cfg *config.Config, read readConfig) error {
+	ctx, stopNow := context.WithCancel(ctx)
+	defer stopNow()
+	go reloadOnSignal(ctx, log, hup, srv, cfg, read)
+	var signals sync.WaitGroup
+	signals.Go(func() { drainOnSignals(ctx, log, term, srv, stopNow) })
 	err := Serve(ctx, lis, srv)
-	// Every job's VM ends with the plugin.
+	stopNow()
+	signals.Wait()
+	// Every job's VM ends with the plugin: after a drain there is none;
+	// after a second signal, Close removes each one as Remove does.
 	return errors.Join(err, srv.Close(context.WithoutCancel(ctx)))
+}
+
+// drainOnSignals begins srv's drain at the first signal from term, and calls
+// stopNow at a second one, until ctx ends or the drain has ended.
+func drainOnSignals(ctx context.Context, log *slog.Logger, term <-chan os.Signal, srv *Server, stopNow context.CancelFunc) {
+	select {
+	case <-ctx.Done():
+		return
+	case sig := <-term:
+		log.Info("draining: taking no new jobs, and serving each job until it is removed; a second signal removes every job at once",
+			"signal", sig, "jobs", srv.jobCount())
+		srv.Drain()
+	}
+	select {
+	case <-ctx.Done():
+	case <-srv.Drained():
+		log.Info("drained: no job is left; stopping")
+	case sig := <-term:
+		log.Warn("a second signal: removing every job", "signal", sig, "jobs", srv.jobCount())
+		stopNow()
+	}
 }
 
 // testReadyTimeout is the ready timeout, as a duration string, that a test's
@@ -512,8 +555,15 @@ var keepaliveParams = keepalive.ServerParameters{Time: time.Duration(math.MaxInt
 // gRPC's 4 MiB default; CopyIn re-chunks toward it (agentChunk).
 const maxMessage = 32 << 20
 
+// stopGrace bounds how long serving waits, once a drain has ended, for the
+// calls still in flight to send their answers: by then every job is gone, so
+// each such call is a Remove that has finished or a call that fails at once.
+// A health Watch never ends by itself, and must not hold the plugin up.
+const stopGrace = time.Second
+
 // Serve serves srv and the standard health service on lis until ctx ends,
-// then stops at once, ending every call.
+// then stops at once, ending every call, or until srv's drain has ended,
+// then stops once the calls in flight have answered, or after stopGrace.
 func Serve(ctx context.Context, lis net.Listener, srv *Server) error {
 	gs := grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(keepalivePolicy),
@@ -521,8 +571,8 @@ func Serve(ctx context.Context, lis net.Listener, srv *Server) error {
 		grpc.MaxRecvMsgSize(maxMessage),
 	)
 	pluginv1alpha.RegisterBackendPluginServer(gs, srv)
-	// The health service always reports SERVING.
-	healthv1.RegisterHealthServer(gs, health.NewServer())
+	// SERVING until the drain begins, then NOT_SERVING (Server.Drain).
+	healthv1.RegisterHealthServer(gs, srv.health)
 
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -531,6 +581,8 @@ func Serve(ctx context.Context, lis net.Listener, srv *Server) error {
 		select {
 		case <-ctx.Done():
 			gs.Stop()
+		case <-srv.Drained():
+			stopGracefully(ctx, gs)
 		case <-done:
 		}
 	}()
@@ -541,4 +593,22 @@ func Serve(ctx context.Context, lis net.Listener, srv *Server) error {
 		return nil
 	}
 	return err
+}
+
+// stopGracefully stops gs once its calls in flight have answered, or at
+// once when ctx ends or after stopGrace.
+func stopGracefully(ctx context.Context, gs *grpc.Server) {
+	graceful := make(chan struct{})
+	go func() { defer close(graceful); gs.GracefulStop() }()
+	timer := time.NewTimer(stopGrace)
+	defer timer.Stop()
+	select {
+	case <-graceful:
+		return
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+	// Stop ends every call, so GracefulStop returns at once.
+	gs.Stop()
+	<-graceful
 }

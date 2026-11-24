@@ -419,6 +419,9 @@ type plugin struct {
 	// base holds its config file and directories, bin is its binary, and
 	// profiles its config file's profiles, for restart.
 	base, bin, profiles string
+	// exited closes once its process has exited; the process is reaped
+	// only at cleanup, so exitStatus can read its zombie's status.
+	exited <-chan struct{}
 }
 
 // writeConfig replaces p's config file with its directory keys and
@@ -465,8 +468,10 @@ func startPlugin(t *testing.T, bin string) *plugin {
 // RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
 // fresh directory and holds profiles, the profiles section, and returns it
 // once its listen socket exists. On cleanup it stops the plugin with
-// SIGTERM, which removes every job; a plugin still running after that, or
-// at the timeout, is killed with each job process's group (killWithJobs).
+// SIGTERM, which drains it: the cleanups registered after this one, which
+// run before it, have removed every job, so it exits at once. A plugin
+// still running 30 s later, or at the timeout, is killed with each job
+// process's group (killWithJobs).
 func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
 	return launchPlugin(t, bin, profiles, false)
@@ -685,7 +690,7 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 	}
 	return &plugin{
 		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
-		base: base, bin: bin, profiles: profiles,
+		base: base, bin: bin, profiles: profiles, exited: exited,
 	}
 }
 
@@ -702,6 +707,28 @@ func serving(sock string) bool {
 	defer cancel()
 	resp, err := healthv1.NewHealthClient(conn).Check(ctx, &healthv1.HealthCheckRequest{})
 	return err == nil && resp.GetStatus() == healthv1.HealthCheckResponse_SERVING
+}
+
+// exitStatus returns the status p's process exited with, once p.exited has
+// closed: its zombie's exit_code, field 52 of /proc/<pid>/stat.
+func (p *plugin) exitStatus(t *testing.T) syscall.WaitStatus {
+	t.Helper()
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fields after comm, which may hold spaces and parentheses,
+	// start after its last ')', with field 3.
+	s := string(b)
+	rest := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	if len(rest) < 50 {
+		t.Fatalf("/proc/%d/stat has no exit_code: %q", p.pid, s)
+	}
+	code, err := strconv.Atoi(rest[49])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return syscall.WaitStatus(code)
 }
 
 // removeAll deletes dir, giving back the write bit an image's read-only

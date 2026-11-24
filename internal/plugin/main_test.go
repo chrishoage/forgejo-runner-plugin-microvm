@@ -126,7 +126,7 @@ func TestRunPassesCacheMaxGiBToTheImageCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		var calls []int64
-		err = run(t.Context(), discardLog(), cfg, nil, func(_ *slog.Logger, dir string, maxSize int64) (ImageCache, error) {
+		err = run(t.Context(), discardLog(), cfg, nil, nil, func(_ *slog.Logger, dir string, maxSize int64) (ImageCache, error) {
 			if dir != dirs.Cache {
 				t.Errorf("%q: the image cache opened in %s, want %s", content, dir, dirs.Cache)
 			}
@@ -156,7 +156,7 @@ func TestRunClosesTheLauncherWhenStartupFails(t *testing.T) {
 	t.Setenv(LibDirEnv, "")
 	errOpen := errors.New("the fake image cache does not open")
 	var launcher *joblaunch.Launcher
-	err := run(t.Context(), discardLog(), configOf(testDirs(filepath.Join(t.TempDir(), "plugin"))), nil,
+	err := run(t.Context(), discardLog(), configOf(testDirs(filepath.Join(t.TempDir(), "plugin"))), nil, nil,
 		func(*slog.Logger, string, int64) (ImageCache, error) { return nil, errOpen },
 		func(log *slog.Logger) (*joblaunch.Launcher, error) {
 			l, err := joblaunch.New(log)
