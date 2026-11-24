@@ -222,6 +222,9 @@ func TestGuestCantReach(t *testing.T) {
 	})
 
 	t.Run("gateway", func(t *testing.T) {
+		// The guard refuses within milliseconds. Only a port that does
+		// anything else waits out the 5 s, and fails the check either
+		// way, so the bound costs only a failing run.
 		probeIn(t, v, "refuses", "-timeout", "5s", gatewayIP, "1-52")
 		probeIn(t, v, "refuses", "-timeout", "5s", gatewayIP, "54-65535")
 		for _, network := range []string{"-tcp=false", "-tcp"} {
@@ -253,6 +256,8 @@ func TestGuestCantReach(t *testing.T) {
 	})
 
 	t.Run("link-local", func(t *testing.T) {
+		// Refused at once, by the library; as for the gateway, only a
+		// failing run waits out the bound.
 		probeIn(t, v, "refuses", "-timeout", "5s", "169.254.169.254", "80")
 	})
 }

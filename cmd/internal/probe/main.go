@@ -9,7 +9,7 @@
 //	probe unreachable [-timeout d] [-send line] <port> <addr|prefix>...
 //	    connect to port at each address, every address of each prefix
 //	    included; fail if any connection opens, sending it line first
-//	probe refuses [-timeout d] <host> <first>-<last>
+//	probe refuses [-timeout d] <IPv4 address> <first>-<last>
 //	    connect to every port in the range; fail if any port does anything
 //	    but refuse
 //	probe listen [-for d] [-arp marker] <host:port> <control host:port>
@@ -230,23 +230,32 @@ func unreachable(port string, targets []string, wait time.Duration, line string)
 	return nil
 }
 
-// refuses connects to every port of host in ports, "first-last", and fails
-// if any port does anything but refuse within wait.
+// refuses connects to every port of host, an IPv4 address, in ports,
+// "first-last", workers at a time, and fails if any port does anything but
+// refuse within wait.
 func refuses(host, ports string, wait time.Duration) error {
+	a, err := netip.ParseAddr(host)
+	if err != nil || !a.Is4() {
+		return fmt.Errorf("host %q: not an IPv4 address", host)
+	}
 	all, err := portRange(ports, 1, 65535)
 	if err != nil {
 		return err
 	}
-	errs := scan(all, func(p uint32) error {
-		c, err := dial(net.JoinHostPort(host, strconv.FormatUint(uint64(p), 10)), wait)
-		if err != nil {
-			return err
-		}
-		return errors.Join(errors.New("connected"), c.Close())
-	})
+	addrs := make([]unix.Sockaddr, len(all))
+	for i, p := range all {
+		addrs[i] = &unix.SockaddrInet4{Addr: a.As4(), Port: int(p)}
+	}
+	errs, err := connectAll(addrs, wait, workers)
+	if err != nil {
+		return err
+	}
 	var bad []string
-	for _, p := range all {
-		if err := errs[p]; !errors.Is(err, syscall.ECONNREFUSED) {
+	for i, p := range all {
+		switch err := errs[i]; {
+		case err == nil:
+			bad = append(bad, fmt.Sprintf("%d: connected", p))
+		case !errors.Is(err, syscall.ECONNREFUSED):
 			bad = append(bad, fmt.Sprintf("%d: %v", p, err))
 		}
 	}
