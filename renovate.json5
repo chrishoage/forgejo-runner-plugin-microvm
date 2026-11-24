@@ -54,6 +54,16 @@
       matchStrings: ['^(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[0-9a-f]{64})'],
       datasourceTemplate: 'docker',
     },
+    // A workflow's own container image in e2e/workflows/, pinned by tag and
+    // digest on its image: line. The github-actions manager doesn't read
+    // e2e/workflows/, and pointing it there would also move the actions'
+    // tags, which the artifact actions must keep.
+    {
+      customType: 'regex',
+      managerFilePatterns: ['/^e2e/workflows/[^/]+\\.yml$/'],
+      matchStrings: ['\\bimage:\\s*(?<depName>[^\\s:@]+):(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[0-9a-f]{64})'],
+      datasourceTemplate: 'docker',
+    },
   ],
 
   packageRules: [
