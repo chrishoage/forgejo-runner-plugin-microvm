@@ -275,20 +275,21 @@ func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.Fi
 // v.Disks[i]'s file, and its scratch disk is made.
 func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, disks []*os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
 	childSpec, err := specFile(&vmv1.Spec{
-		LibDir:      spec.GetLibDir(),
-		Cpus:        v.GetCpus(),
-		MemoryMib:   v.GetMemoryMib(),
-		RootDir:     v.GetRootDir(),
-		ScratchDisk: v.GetScratchDisk(),
-		LayerDir:    v.GetLayerDir(),
-		LayerTag:    v.GetLayerTag(),
-		Mounts:      childMounts(v.GetMounts()),
-		Disks:       childDisks(v.GetDisks()),
-		Console:     v.GetConsole(),
-		AgentSocket: v.GetAgentSocket(),
-		AgentPort:   v.GetAgentPort(),
-		GuestMac:    v.GetGuestMac(),
-		Boot:        v.GetBoot(),
+		LibDir:          spec.GetLibDir(),
+		LibkrunLogLevel: spec.GetLibkrunLogLevel(),
+		Cpus:            v.GetCpus(),
+		MemoryMib:       v.GetMemoryMib(),
+		RootDir:         v.GetRootDir(),
+		ScratchDisk:     v.GetScratchDisk(),
+		LayerDir:        v.GetLayerDir(),
+		LayerTag:        v.GetLayerTag(),
+		Mounts:          childMounts(v.GetMounts()),
+		Disks:           childDisks(v.GetDisks()),
+		Console:         v.GetConsole(),
+		AgentSocket:     v.GetAgentSocket(),
+		AgentPort:       v.GetAgentPort(),
+		GuestMac:        v.GetGuestMac(),
+		Boot:            v.GetBoot(),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("VM child spec: %w", err)

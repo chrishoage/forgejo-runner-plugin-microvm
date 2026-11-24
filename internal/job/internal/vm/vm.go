@@ -53,8 +53,10 @@ const maxBlockID = 20
 // file; disk i is firstDiskFD+i.
 const firstDiskFD = 5
 
-// libkrun's log level: warnings and errors, on the VM child's stderr.
-const krunLogWarn = 2
+// krunLogLevels are libkrun's log levels by the spec's names: libkrun's
+// own numbers (KRUN_LOG_LEVEL_*), on the VM child's stderr. None is below
+// warnings, so libkrun's errors always reach the VM log.
+var krunLogLevels = map[string]uint32{"warn": 2, "info": 3, "debug": 4, "trace": 5}
 
 // netFD is the VM child's inherited descriptor for its VM's end of the job
 // network's frame socket.
@@ -154,7 +156,11 @@ func boot(lib krun, spec *vmv1.Spec) error {
 	if err != nil || len(mac) != 6 {
 		return fmt.Errorf("guest MAC %q: not an Ethernet address", spec.GetGuestMac())
 	}
-	if err := check("krun_set_log_level", lib.setLogLevel(krunLogWarn)); err != nil {
+	level, ok := krunLogLevels[spec.GetLibkrunLogLevel()]
+	if !ok {
+		return fmt.Errorf("libkrun log level %q: not warn, info, debug or trace", spec.GetLibkrunLogLevel())
+	}
+	if err := check("krun_set_log_level", lib.setLogLevel(level)); err != nil {
 		return err
 	}
 	r := lib.createCtx()

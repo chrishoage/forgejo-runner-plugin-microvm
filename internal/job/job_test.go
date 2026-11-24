@@ -123,6 +123,34 @@ func afterNetworkUp(t *testing.T, events []*jobv1.Event) []*jobv1.Event {
 	return events[1:]
 }
 
+// Each VM child's spec carries the job spec's library directory and libkrun
+// log level.
+func TestRunPassesTheLibrariesOn(t *testing.T) {
+	t.Parallel()
+	got := filepath.Join(t.TempDir(), "vm-spec")
+	bin := filepath.Join(t.TempDir(), "runner-microvm-job")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat >"+got+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := testJobSpec(t, bin)
+	spec.LibDir, spec.LibkrunLogLevel = "/opt/libkrun", "trace"
+	if _, err := runJob(t, spec); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	child := &vmv1.Spec{}
+	if err := protodelim.UnmarshalFrom(bufio.NewReader(f), child); err != nil {
+		t.Fatal(err)
+	}
+	if child.GetLibDir() != "/opt/libkrun" || child.GetLibkrunLogLevel() != "trace" {
+		t.Errorf("VM child spec: lib_dir %q, libkrun_log_level %q; want /opt/libkrun and trace", child.GetLibDir(), child.GetLibkrunLogLevel())
+	}
+}
+
 func TestRunReportsTheVMsExit(t *testing.T) {
 	t.Parallel()
 	spec := testJobSpec(t, fakeJobBinary(t, "echo booting; exit 3"))

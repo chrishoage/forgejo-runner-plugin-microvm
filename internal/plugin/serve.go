@@ -138,7 +138,7 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB,
-		"lib_dir", libDirSetting(cfg.LibDir))
+		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel)
 	logProfiles(log, cfg.Profiles)
 }
 
@@ -252,16 +252,17 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 		return err
 	}
 	srv, err := NewServer(log, Config{
-		Dirs:         dirs,
-		LibDir:       cfg.LibDir,
-		JobBinary:    jobBinary,
-		MkfsExt4:     mkfs,
-		Agent:        agent,
-		Profiles:     cfg.Profiles,
-		Cache:        cache,
-		Launcher:     launcher,
-		Arch:         arch,
-		ReadyTimeout: ready,
+		Dirs:            dirs,
+		LibDir:          cfg.LibDir,
+		LibkrunLogLevel: cfg.LibkrunLogLevel,
+		JobBinary:       jobBinary,
+		MkfsExt4:        mkfs,
+		Agent:           agent,
+		Profiles:        cfg.Profiles,
+		Cache:           cache,
+		Launcher:        launcher,
+		Arch:            arch,
+		ReadyTimeout:    ready,
 	})
 	if err != nil {
 		return err

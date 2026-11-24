@@ -131,7 +131,7 @@ func TestStartBootsTheVM(t *testing.T) {
 	}
 	spec := launcher.specs[0]
 	if spec.GetJob() != id || spec.GetJobBinary() != "/fake/runner-microvm-job" || spec.GetMkfsExt4() != "/fake/mkfs.ext4" ||
-		len(spec.GetVms()) != 1 {
+		spec.GetLibDir() != "/fake/lib" || spec.GetLibkrunLogLevel() != "debug" || len(spec.GetVms()) != 1 {
 		t.Fatalf("job spec = %v", spec)
 	}
 	wantNet := &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500}

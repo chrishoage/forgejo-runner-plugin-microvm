@@ -54,6 +54,10 @@ message Spec {
   string guest_mac = 12;
   // The agent's boot config, passed on to the agent unopened.
   runnermicrovm.agent.v1.BootConfig boot = 13;
+  // libkrun's log level, from the job spec: "warn", "info", "debug" or
+  // "trace". Any other value, the empty one included, fails the VM before
+  // libkrun is called.
+  string libkrun_log_level = 15;
 }
 
 // Mount is a host directory shared into the VM (STO-1).
