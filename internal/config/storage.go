@@ -26,6 +26,19 @@ type Mount struct {
 	ReadWrite bool
 }
 
+// Disk is one of a profile's disks: a host file attached to the job's
+// container as a block device, mounted at a guest path (STO-1, STO-4).
+type Disk struct {
+	// Source is the host file: absolute, cleaned, and a regular file when
+	// the file was read.
+	Source string
+	// Target is the guest path, under the same rules as a mount's (STO-5).
+	Target string
+	// ReadWrite is always false: a read-write disk stops startup until
+	// disk locks exist (#91).
+	ReadWrite bool
+}
+
 // amd64Storage is how many mounts plus disks a VM can have on amd64
 // (CFG-10). libkrun 1.19.8 gives x86_64 VMs 11 virtio-mmio interrupt lines,
 // IRQs 5 to 15, and every VM already uses 8 of them:
@@ -85,6 +98,8 @@ type guestPath struct {
 type storageEntry struct {
 	source, target string
 	readWrite      bool
+	// rwLine is read_write's line, when the entry sets it.
+	rwLine int
 	// claim is the target, for the checks across the lists.
 	claim guestPath
 }
@@ -153,7 +168,7 @@ func (d *decoder) storageEntry(m *yaml.Node, key, scope string, source func(stri
 			haveTarget, ok = true, ok && valid
 		case "read_write":
 			b, valid := d.boolean(kp, scope)
-			e.readWrite, ok = b, ok && valid
+			e.readWrite, e.rwLine, ok = b, kp.key.Line, ok && valid
 		default:
 			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
 			ok = false
@@ -185,6 +200,27 @@ func (d *decoder) mounts(p pair, scope string) ([]Mount, []guestPath, int, bool)
 	return ms, targets, count, ok
 }
 
+// disks decodes p's value, in the profile scope, a profile's disks (STO-1),
+// and returns them, their targets and their count. Each source must be a
+// regular file (STO-5).
+func (d *decoder) disks(p pair, scope string) ([]Disk, []guestPath, int, bool) {
+	entries, count, ok := d.storageList(p, scope, fileSource)
+	var ds []Disk
+	var targets []guestPath
+	for _, e := range entries {
+		// SHORTCUT(#91): a read-write disk stops startup; it needs the
+		// job process's disk lock before it can be offered.
+		if e.readWrite {
+			d.errorf(e.rwLine, scope+": "+p.key.Value, "read_write", "read-write disks are not supported yet")
+			ok = false
+			continue
+		}
+		ds = append(ds, Disk{Source: e.source, Target: e.target})
+		targets = append(targets, e.claim)
+	}
+	return ds, targets, count, ok
+}
+
 // hostPath returns what is wrong with s as a source, or "": it must be an
 // absolute path, and check, given it cleaned, finds nothing wrong with it.
 func hostPath(s string, check func(string) string) string {
@@ -211,6 +247,27 @@ func dirSource(p string) string {
 		return err.Error()
 	case !fi.IsDir():
 		return "is not a directory"
+	}
+	return ""
+}
+
+// fileSource returns what is wrong with p as a disk's source, or "": it
+// must be a regular file, or a symlink to one. A block device is refused:
+// it can be allowed later by adding a rule.
+func fileSource(p string) string {
+	fi, err := os.Stat(p)
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "does not exist"
+	case errors.As(err, &pe):
+		return pe.Err.Error()
+	case err != nil:
+		return err.Error()
+	case fi.Mode()&fs.ModeDevice != 0 && fi.Mode()&fs.ModeCharDevice == 0:
+		return "is a block device: a disk's source must be a regular file"
+	case !fi.Mode().IsRegular():
+		return "is not a regular file"
 	}
 	return ""
 }
