@@ -106,18 +106,19 @@ func wantExited0(t *testing.T, p *plugin, after string) {
 }
 
 // wantNoJobFiles fails t if any per-job file is left in p's directories:
-// <state>/jobs/, <runtime>/ (but its lock and the listen socket, which a
-// clean exit deletes) and <cache>/jobs/.
-func wantNoJobFiles(t *testing.T, p *plugin) {
+// <state>/jobs/, <runtime>/ (but its lock, and the listen socket when
+// listening, since a clean exit deletes it) and <cache>/jobs/.
+func wantNoJobFiles(t *testing.T, p *plugin, listening bool) {
 	t.Helper()
 	base := filepath.Dir(p.state)
-	for _, dir := range []string{filepath.Join(p.state, "jobs"), filepath.Join(base, "runtime"), filepath.Join(base, "cache", "jobs")} {
+	runtime := filepath.Join(base, "runtime")
+	for _, dir := range []string{filepath.Join(p.state, "jobs"), runtime, filepath.Join(base, "cache", "jobs")} {
 		es, err := os.ReadDir(dir)
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 		for _, e := range es {
-			if e.Name() != "lock" {
+			if e.Name() != "lock" && (!listening || filepath.Join(dir, e.Name()) != p.sock) {
 				t.Errorf("%s is left in %s", e.Name(), dir)
 			}
 		}
@@ -152,7 +153,7 @@ func TestDrain(t *testing.T) {
 		t.Fatalf("Remove during the drain: %v", err)
 	}
 	wantExited0(t, p, "the last Remove")
-	wantNoJobFiles(t, p)
+	wantNoJobFiles(t, p, false)
 }
 
 // With a job started, a second SIGTERM ends the drain at once: within 5 s
@@ -180,5 +181,5 @@ func TestSecondSIGTERM(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	wantNoJobFiles(t, p)
+	wantNoJobFiles(t, p, false)
 }

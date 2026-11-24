@@ -5,11 +5,18 @@
 package cmd_test
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 )
 
 // rwDiskProfile is the profile rw: a read-write disk at /data, in a VM as
@@ -139,4 +146,102 @@ func TestRecoveryAfterAKilledPlugin(t *testing.T) {
 	// The liveness pipe and Pdeathsig end them; init reaps them.
 	waitGone(t, procs, dieBound, "the plugin was killed")
 	wantMountsReadWrite(t, p.restart(t), disk, "killed-plugin-2", ref)
+}
+
+// VM-7, startup cleanup: with a job started and an Exec of a long sleep
+// running in it, the test kills the plugin with SIGKILL and starts it again
+// on the same directories as soon as its process is gone. As soon as the
+// new plugin serves, <state>/jobs/, <runtime>/ and <cache>/jobs/ hold
+// nothing but the lock and the listen socket; within dieBound no process of
+// the old job is left; and a kept log planted at <state>/logs/<id>/ before the restart
+// is still there. A fresh job then runs the echo workflow.
+func TestStartupCleanupAfterAKilledPlugin(t *testing.T) {
+	t.Parallel()
+	p := startPlugin(t, buildPlugin(t))
+	v := bootVM(t, p, "startup-cleanup")
+	// Its plugin is gone: nothing can remove it.
+	v.removed = true
+	execSleep(t, v)
+	base := filepath.Dir(p.state)
+	for _, d := range []string{filepath.Join(p.state, "jobs", v.id), filepath.Join(base, "runtime", v.id), filepath.Join(base, "cache", "jobs", v.id)} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("the running job has no %s: %v", d, err)
+		}
+	}
+	logs := filepath.Join(p.state, "logs", v.id)
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logs, "job.log"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	procs := descendants(p.pid)
+	if len(procs) < 2 {
+		t.Fatalf("the plugin has no job process and VM child: %v", procs)
+	}
+
+	if err := syscall.Kill(p.pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	// Its directory locks are released once its process is gone.
+	select {
+	case <-p.exited:
+	case <-time.After(dieBound):
+		t.Fatalf("the plugin still runs %v after SIGKILL", dieBound)
+	}
+	q := p.restart(t)
+	wantNoJobFiles(t, q, true)
+	// A VM child of the killed plugin may still be dying, reaped by init:
+	// it gets dieBound, as in the other kill tests.
+	waitGone(t, procs, dieBound, "the new plugin served")
+	if b, err := os.ReadFile(filepath.Join(logs, "job.log")); err != nil || string(b) != "kept" {
+		t.Errorf("the kept log in %s: %q, %v; want it untouched", logs, b, err)
+	}
+	if !strings.Contains(q.log.String(), `msg="deleted crash leftovers"`) {
+		t.Errorf("the new plugin's log does not say it deleted crash leftovers:\n%s", q.log.String())
+	}
+
+	log, err := runWorkflowOn(t, q, filepath.Join(workflows, "echo.yml"), map[string]string{"microvm": readImage(t)})
+	if err != nil {
+		t.Fatalf("the echo workflow failed after the restart: %v", err)
+	}
+	if !strings.Contains(log, stepOut) {
+		t.Errorf("the job log does not show the first step's output %q", stepOut)
+	}
+}
+
+// execSleep runs a long sleep in v with Exec and returns once the guest's
+// shell says it is about to sleep, leaving the Exec running until its
+// stream ends, at the latest on cleanup.
+func execSleep(t *testing.T, v *vm) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	t.Cleanup(cancel)
+	stream, err := v.c.Exec(ctx, &pluginv1alpha.ExecRequest{
+		EnvironmentId: v.id, Command: []string{"sh", "-c", "echo sleeping; exec sleep 1000"}, Workdir: "/",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	var out strings.Builder
+	for !strings.Contains(out.String(), "sleeping\n") {
+		o, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("Exec of the sleep ended before it slept: %v\n%s", err, out.String())
+		}
+		if o.GetExecComplete() != nil || o.GetExecFailed() != nil {
+			t.Fatalf("Exec of the sleep ended before it slept: %v\n%s", o, out.String())
+		}
+		out.Write(o.GetData().GetData())
+	}
+	// The kill, or cleanup's cancel, ends the stream.
+	var drained sync.WaitGroup
+	drained.Go(func() {
+		for {
+			if _, err := stream.Recv(); err != nil {
+				return
+			}
+		}
+	})
+	t.Cleanup(func() { cancel(); drained.Wait() })
 }
