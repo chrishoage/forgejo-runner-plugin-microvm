@@ -249,12 +249,13 @@ func blockDevice(t *testing.T) string {
 	return ""
 }
 
-// A profile's disks are host files at guest targets, read-only: each source
-// and target cleaned, in the list's order, a symlink to a file included. A
-// profile without disks, or with an empty list, has none (STO-1, STO-4).
+// A profile's disks are host files at guest targets, read-only unless
+// read_write is true: each source and target cleaned, in the list's order, a
+// symlink to a file included. A profile without disks, or with an empty
+// list, has none (STO-1, STO-2, STO-4).
 func TestDisks(t *testing.T) {
 	t.Parallel()
-	src := diskFiles(t, 2)
+	src := diskFiles(t, 3)
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(src[1], link); err != nil {
 		t.Fatal(err)
@@ -266,11 +267,12 @@ profiles:
       - source: %s
         target: /srv/data/
       - {source: %s, target: /a/./b, read_write: false}
+      - {source: %s//, target: /var/lib/store, read_write: true}
   none: {}
   empty:
     disks: []
-`, src[0], link))
-	want := []Disk{{Source: src[0], Target: "/srv/data"}, {Source: link, Target: "/a/b"}}
+`, src[0], link, src[2]))
+	want := []Disk{{Source: src[0], Target: "/srv/data"}, {Source: link, Target: "/a/b"}, {Source: src[2], Target: "/var/lib/store", ReadWrite: true}}
 	if got := cfg.Profiles["data"].Disks; !reflect.DeepEqual(got, want) {
 		t.Errorf("Disks = %+v, want %+v", got, want)
 	}
@@ -311,7 +313,7 @@ func TestInvalidDisksFail(t *testing.T) {
 		{"directory source", disks(dirs[0], "/srv"), fmt.Sprintf(`line 5: profile "big": disks: source: %q is not a regular file`, dirs[0])},
 		{"block device source", disks(dev, "/srv"), fmt.Sprintf(`line 5: profile "big": disks: source: %q is a block device: a disk's source must be a regular file`, dev)},
 		{"character device source", disks("/dev/null", "/srv"), `line 5: profile "big": disks: source: "/dev/null" is not a regular file`},
-		{"read-write", "    disks:\n      - {source: " + src[0] + ", target: /srv, read_write: true}\n", `line 5: profile "big": disks: read_write: read-write disks are not supported yet`},
+		{"read_write not a boolean", "    disks:\n      - {source: " + src[0] + ", target: /srv, read_write: 1}\n", `line 5: profile "big": disks: read_write: must be true or false, not "1"`},
 		{"root target", disks(src[0], "/"), `line 5: profile "big": disks: target: "/" is the root`},
 		{"proc target", disks(src[0], "/proc/x"), `line 5: profile "big": disks: target: "/proc/x" is under /proc`},
 		{"target twice", disks(src[0], "/srv", src[1], "/srv/"), `line 6: profile "big": disks: target: "/srv/" is already a target on line 5`},
@@ -328,6 +330,55 @@ func TestInvalidDisksFail(t *testing.T) {
 	} {
 		path, msg := loadErr(t, "profiles:\n  ok: {}\n  big:\n"+tc.keys)
 		wantErr(t, path, msg, tc.want)
+		if n := strings.Count(msg, "\n") + 1; n != 1 {
+			t.Errorf("%s: %d errors, want 1:\n%s", tc.name, n, msg)
+		}
+	}
+}
+
+// One file may be the source of two disks only when both are read-only:
+// listed twice with either entry read-write, by the same path, another
+// spelling of it, a symlink or a hard link, it stops startup at the later
+// entry's source, naming the line, the key and the profile; two read-only
+// entries for one source load (STO-7, STO-8).
+func TestDiskListedTwice(t *testing.T) {
+	t.Parallel()
+	src := diskFiles(t, 2)
+	link, hard := filepath.Join(t.TempDir(), "link"), filepath.Join(filepath.Dir(src[0]), "hard.img")
+	if err := os.Symlink(src[0], link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(src[0], hard); err != nil {
+		t.Fatal(err)
+	}
+	entry := func(source, target string, rw bool) string {
+		return fmt.Sprintf("      - {source: %s, target: %s, read_write: %v}\n", source, target, rw)
+	}
+	for _, tc := range []struct {
+		name, second      string
+		firstRW, secondRW bool
+		wantFails         bool
+	}{
+		{"both read-write", src[0], true, true, true},
+		{"first read-write", src[0], true, false, true},
+		{"second read-write", src[0], false, true, true},
+		{"another spelling", src[0] + "/", true, false, true},
+		{"by a symlink", link, false, true, true},
+		{"by a hard link", hard, true, false, true},
+		{"both read-only", src[0], false, false, false},
+		{"both read-only by a symlink", link, false, false, false},
+		{"another file", src[1], true, true, false},
+	} {
+		keys := "    disks:\n" + entry(src[0], "/srv/a", tc.firstRW) + entry(tc.second, "/srv/b", tc.secondRW)
+		content := "profiles:\n  ok: {}\n  big:\n" + keys
+		if !tc.wantFails {
+			if got := len(mustLoad(t, content).Profiles["big"].Disks); got != 2 {
+				t.Errorf("%s: %d disks, want 2", tc.name, got)
+			}
+			continue
+		}
+		path, msg := loadErr(t, content)
+		wantErr(t, path, msg, fmt.Sprintf(`line 6: profile "big": disks: source: %q is the same file as the source on line 5: a disk listed twice must be read-only both times`, tc.second))
 		if n := strings.Count(msg, "\n") + 1; n != 1 {
 			t.Errorf("%s: %d errors, want 1:\n%s", tc.name, n, msg)
 		}

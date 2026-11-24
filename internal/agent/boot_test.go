@@ -516,7 +516,7 @@ func TestBootRefusesABadDisk(t *testing.T) {
 		},
 		"read-write EROFS": {
 			&fakeMounter{superblocks: map[string]superblock{"/dev/vdc": {fstype: fsErofs}}}, true,
-			"disk /opt/tools: /dev/vdc is erofs, and a read-write disk must be ext4",
+			"disk /opt/tools: read-write disks must be ext4",
 		},
 		"lands where a mount does": {
 			&fakeMounter{targets: map[string]string{"/opt/tools": "/srv"}}, false,

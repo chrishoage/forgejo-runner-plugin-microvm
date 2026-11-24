@@ -34,8 +34,10 @@ type Disk struct {
 	Source string
 	// Target is the guest path, under the same rules as a mount's (STO-5).
 	Target string
-	// ReadWrite is always false: a read-write disk stops startup until
-	// disk locks exist (#91).
+	// ReadWrite attaches it writable, for an ext4 filesystem the guest
+	// can change (STO-4); false, the default, attaches it read-only
+	// (STO-2). The job process locks it exclusively when true and shared
+	// when false (STO-7, STO-8).
 	ReadWrite bool
 }
 
@@ -98,8 +100,9 @@ type guestPath struct {
 type storageEntry struct {
 	source, target string
 	readWrite      bool
-	// rwLine is read_write's line, when the entry sets it.
-	rwLine int
+	// rawSource is source as written, and srcLine its line.
+	rawSource string
+	srcLine   int
 	// claim is the target, for the checks across the lists.
 	claim guestPath
 }
@@ -154,7 +157,7 @@ func (d *decoder) storageEntry(m *yaml.Node, key, scope string, source func(stri
 					valid = false
 				}
 			}
-			e.source, haveSource, ok = filepath.Clean(s), true, ok && valid
+			e.source, e.rawSource, e.srcLine, haveSource, ok = filepath.Clean(s), s, kp.key.Line, true, ok && valid
 		case "target":
 			s, valid := d.str(kp, scope)
 			if valid {
@@ -168,7 +171,7 @@ func (d *decoder) storageEntry(m *yaml.Node, key, scope string, source func(stri
 			haveTarget, ok = true, ok && valid
 		case "read_write":
 			b, valid := d.boolean(kp, scope)
-			e.readWrite, e.rwLine, ok = b, kp.key.Line, ok && valid
+			e.readWrite, ok = b, ok && valid
 		default:
 			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
 			ok = false
@@ -202,23 +205,39 @@ func (d *decoder) mounts(p pair, scope string) ([]Mount, []guestPath, int, bool)
 
 // disks decodes p's value, in the profile scope, a profile's disks (STO-1),
 // and returns them, their targets and their count. Each source must be a
-// regular file (STO-5).
+// regular file (STO-5); read_write makes a disk read-write (STO-4). One file
+// may be the source of two entries only when both are read-only: the job
+// process locks a read-write disk exclusively, and one process's two
+// exclusive locks on one file block each other (STO-7).
 func (d *decoder) disks(p pair, scope string) ([]Disk, []guestPath, int, bool) {
 	entries, count, ok := d.storageList(p, scope, fileSource)
 	var ds []Disk
 	var targets []guestPath
-	for _, e := range entries {
-		// SHORTCUT(#91): a read-write disk stops startup; it needs the
-		// job process's disk lock before it can be offered.
-		if e.readWrite {
-			d.errorf(e.rwLine, scope+": "+p.key.Value, "read_write", "read-write disks are not supported yet")
-			ok = false
-			continue
+	for i, e := range entries {
+		for _, prev := range entries[:i] {
+			if (e.readWrite || prev.readWrite) && sameFile(e.source, prev.source) {
+				d.errorf(e.srcLine, scope+": "+p.key.Value, "source",
+					"%q is the same file as the source on line %d: a disk listed twice must be read-only both times", e.rawSource, prev.srcLine)
+				ok = false
+				break
+			}
 		}
-		ds = append(ds, Disk{Source: e.source, Target: e.target})
+		ds = append(ds, Disk{Source: e.source, Target: e.target, ReadWrite: e.readWrite})
 		targets = append(targets, e.claim)
 	}
 	return ds, targets, count, ok
+}
+
+// sameFile reports whether the host paths a and b, both cleaned, name the
+// same file: the same path, or, through a symlink or a hard link, the same
+// inode, which is what a flock locks.
+func sameFile(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, errA := os.Stat(a)
+	fb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
 // hostPath returns what is wrong with s as a source, or "": it must be an

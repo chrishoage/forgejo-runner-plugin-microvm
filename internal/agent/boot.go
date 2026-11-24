@@ -353,8 +353,8 @@ func nested(place, other string) string {
 // diskDevice finds the disk d's block device by its serial, and returns it
 // and the filesystem its superblock names. A read-only ext4 disk whose
 // journal needs recovery is refused rather than mounted with noload, which
-// would show a half-written filesystem; a read-write disk must be ext4
-// (STO-4).
+// would show a half-written filesystem; a read-write disk must be ext4,
+// which the guest kernel can write and replay after a kill (STO-4).
 func diskDevice(m mounter, root string, d *agentv1.Disk) (string, string, error) {
 	device, err := m.findDisk(root, d.GetBlockId())
 	if err != nil {
@@ -367,7 +367,7 @@ func diskDevice(m mounter, root string, d *agentv1.Disk) (string, string, error)
 	case err != nil:
 		return "", "", fmt.Errorf("read %s's superblock: %w", device, err)
 	case d.GetReadWrite() && sb.fstype != fsExt4:
-		return "", "", fmt.Errorf("%s is %s, and a read-write disk must be ext4", device, sb.fstype)
+		return "", "", errors.New("read-write disks must be ext4")
 	case !d.GetReadWrite() && sb.needsRecovery:
 		return "", "", fmt.Errorf("its ext4 journal needs recovery, which a read-only mount can't do: " +
 			"mount the disk read-write once to replay it")
