@@ -27,6 +27,7 @@ import (
 	"code.forgejo.org/forgejo/runner/v13/act/model"
 	"code.forgejo.org/forgejo/runner/v13/act/runner"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 // The workflows both the harness and this test run, and what each one's
@@ -395,21 +396,100 @@ func startPlugin(t *testing.T, bin string) *plugin {
 // startPluginWith runs the plugin's serve by path, with
 // RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
 // fresh directory and holds profiles, the profiles section, and returns it
-// once its listen socket exists. On
-// cleanup it stops the plugin with SIGTERM, which removes every job; a
-// plugin still running after that, or at the timeout, is killed with each
-// job process's group (killWithJobs).
+// once its listen socket exists. On cleanup it stops the plugin with
+// SIGTERM, which removes every job; a plugin still running after that, or
+// at the timeout, is killed with each job process's group (killWithJobs).
 func startPluginWith(t *testing.T, bin, profiles string) *plugin {
+	t.Helper()
+	return launchPlugin(t, bin, profiles, false)
+}
+
+// startRootPluginWith is startPluginWith with serve run as root, under
+// `sudo -n`, which needRoot checks first. Its environment is only what the
+// plugin reads: PATH, for mkfs.ext4, HOME, RUNNER_MICROVM_LIBDIR and
+// RUNNER_MICROVM_CONFIG. The test can connect to its socket, and on cleanup
+// the plugin, its jobs and its directories go through sudo too.
+func startRootPluginWith(t *testing.T, bin, profiles string) *plugin {
+	t.Helper()
+	needRoot(t)
+	return launchPlugin(t, bin, profiles, true)
+}
+
+// needRoot skips t, saying why, when `sudo -n` can't run a command as
+// root. With CI set it fails t instead, so CI never skips a root test.
+func needRoot(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sudo", "-n", "true").CombinedOutput()
+	if err == nil {
+		return
+	}
+	if os.Getenv("CI") != "" {
+		t.Fatalf("CI is set, and `sudo -n true` failed: %v\n%s", err, out)
+	}
+	t.Skipf("SKIPPED: this test runs the plugin as root, and `sudo -n true` failed: %v\n%s", err, out)
+}
+
+// asRoot runs argv as root with `sudo -n`, and returns its error and
+// output.
+func asRoot(argv ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sudo", append([]string{"-n"}, argv...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sudo %v: %w\n%s", argv, err, out)
+	}
+	return nil
+}
+
+// killAsRoot kills, as root, the process group pid leads and every process
+// below pid, each with its process group, a job process leading one of its
+// own.
+func killAsRoot(pid int) {
+	args := []string{"kill", "-KILL", "--", "-" + strconv.Itoa(pid)}
+	for _, q := range descendants(pid) {
+		if pgid, err := syscall.Getpgid(q.pid); err == nil {
+			args = append(args, "-"+strconv.Itoa(pgid))
+		}
+		args = append(args, strconv.Itoa(q.pid))
+	}
+	// Some of them may be gone already, which kill reports.
+	_ = asRoot(args...)
+}
+
+// launchPlugin runs the plugin's serve as startPluginWith says, as root
+// when root.
+//
+// Its cleanup kills only processes it can name for sure: it never reaps
+// the plugin's process (or sudo's) before it is done killing. It waits for
+// the exit with waitid's WNOWAIT, which leaves a zombie, so neither the pid
+// nor the process group the command leads can be reused meanwhile. A
+// plugin still running after SIGTERM is killed with its descendants' groups
+// while it is alive and they are still its own. Once it has exited, its
+// group, which a root plugin shares with sudo, is killed too, which reaches
+// a root plugin that outlived sudo; only then is it reaped.
+func launchPlugin(t *testing.T, bin, profiles string, root bool) *plugin {
 	t.Helper()
 	// Short, so the runner's client can connect to the socket by its path.
 	base, err := os.MkdirTemp("", "rm-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sock := filepath.Join(base, "runtime", "runner-microvm.sock")
+	remove := func() error { return removeAll(base) }
+	kill := killWithJobs
+	killGroup := func(pgid int) { _ = syscall.Kill(-pgid, syscall.SIGKILL) }
+	if root {
+		remove = func() error { return asRoot("rm", "-rf", "--", base) }
+		kill = killAsRoot
+		// The group may be empty already, which kill reports.
+		killGroup = func(pgid int) { _ = asRoot("kill", "-KILL", "--", "-"+strconv.Itoa(pgid)) }
+	}
+	runtime := filepath.Join(base, "runtime")
+	sock := filepath.Join(runtime, "runner-microvm.sock")
 	cfg := filepath.Join(base, "config.yaml")
 	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
-		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), filepath.Join(base, "runtime"))
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), runtime)
 	if err := os.WriteFile(cfg, []byte(dirs+profiles), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)
@@ -418,40 +498,85 @@ func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	log := &syncBuffer{}
 	cmd := exec.CommandContext(ctx, bin, "serve")
 	cmd.Env = append(os.Environ(), "RUNNER_MICROVM_CONFIG="+cfg)
-	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { killWithJobs(cmd.Process.Pid); return nil }
+	if root {
+		// The test's own runtime directory, so it can reach the socket
+		// in it.
+		if err := os.Mkdir(runtime, 0o755); err != nil {
+			cancel()
+			_ = os.RemoveAll(base)
+			t.Fatal(err)
+		}
+		cmd = exec.CommandContext(ctx, "sudo", "-n", "env", "-i", "PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME"),
+			"RUNNER_MICROVM_LIBDIR="+os.Getenv("RUNNER_MICROVM_LIBDIR"), "RUNNER_MICROVM_CONFIG="+cfg, bin, "serve")
+		// A session of its own has no terminal, so sudo starts no pty
+		// and runs the plugin in its own process group, the one sudo
+		// leads, rather than in a new session.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	}
+	cmd.Stdout, cmd.Stderr = log, log
+	// reaping is set, under mu, just before the process is reaped, and
+	// every kill by pid checks it under mu first.
+	var mu sync.Mutex
+	reaping := false
+	killAlive := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !reaping {
+			kill(cmd.Process.Pid)
+		}
+	}
+	cmd.Cancel = func() error { killAlive(); return nil }
 	cmd.WaitDelay = 10 * time.Second
 	if err := cmd.Start(); err != nil {
 		cancel()
+		_ = remove()
 		t.Fatal(err)
 	}
-	exited := make(chan error, 1)
-	done := make(chan struct{})
-	go func() { defer close(done); exited <- cmd.Wait() }()
+	pid := cmd.Process.Pid
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		var info unix.Siginfo
+		for {
+			err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+			if !errors.Is(err, unix.EINTR) {
+				return
+			}
+		}
+	}()
 	t.Cleanup(func() {
+		// sudo passes SIGTERM on to the plugin.
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-done:
+		case <-exited:
 		case <-time.After(30 * time.Second):
 			t.Error("the plugin did not stop on SIGTERM")
+			killAlive()
+			<-exited
+		}
+		// A zombie still holds its group's id.
+		killGroup(pid)
+		mu.Lock()
+		reaping = true
+		mu.Unlock()
+		if err := cmd.Wait(); err != nil {
+			t.Logf("the plugin exited: %v", err)
 		}
 		cancel()
-		<-done
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		t.Logf("plugin log:\n%s", log.String())
-		if err := removeAll(base); err != nil {
+		if err := remove(); err != nil {
 			t.Error(err)
 		}
 	})
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			return &plugin{sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: cmd.Process.Pid, log: log}
+			break
 		}
 		select {
-		case <-done:
-			t.Fatalf("the plugin exited at startup: %v\n%s", <-exited, log.String())
+		case <-exited:
+			t.Fatalf("the plugin exited at startup:\n%s", log.String())
 		default:
 		}
 		if time.Now().After(deadline) {
@@ -459,6 +584,14 @@ func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if root {
+		// Its mode is the umask's (internal/plugin's listen), and the
+		// test isn't root.
+		if err := asRoot("chmod", "0666", sock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &plugin{sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log}
 }
 
 // removeAll deletes dir, giving back the write bit an image's read-only

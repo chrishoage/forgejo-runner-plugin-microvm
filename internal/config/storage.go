@@ -21,8 +21,8 @@ type Mount struct {
 	// Target is the guest path: absolute, cleaned, not / and not under
 	// /proc, /sys or /dev (STO-5).
 	Target string
-	// ReadWrite lets the guest write the mount. Always false today: a
-	// read-write mount stops startup until #89.
+	// ReadWrite lets the guest write the mount (STO-3); false, the default,
+	// shares it read-only (STO-2).
 	ReadWrite bool
 }
 
@@ -85,8 +85,6 @@ type guestPath struct {
 type storageEntry struct {
 	source, target string
 	readWrite      bool
-	// rwLine is read_write's line, or 0 when it isn't set.
-	rwLine int
 	// claim is the target, for the checks across the lists.
 	claim guestPath
 }
@@ -155,7 +153,7 @@ func (d *decoder) storageEntry(m *yaml.Node, key, scope string, source func(stri
 			haveTarget, ok = true, ok && valid
 		case "read_write":
 			b, valid := d.boolean(kp, scope)
-			e.readWrite, e.rwLine, ok = b, kp.key.Line, ok && valid
+			e.readWrite, ok = b, ok && valid
 		default:
 			d.errorf(kp.key.Line, scope, kp.key.Value, "unknown key")
 			ok = false
@@ -175,20 +173,12 @@ func (d *decoder) storageEntry(m *yaml.Node, key, scope string, source func(stri
 
 // mounts decodes p's value, in the profile scope, a profile's mounts
 // (STO-1), and returns them, their targets and their count. Each source must
-// be a directory (STO-5).
+// be a directory (STO-5); read_write makes a mount read-write (STO-3).
 func (d *decoder) mounts(p pair, scope string) ([]Mount, []guestPath, int, bool) {
 	entries, count, ok := d.storageList(p, scope, dirSource)
 	var ms []Mount
 	var targets []guestPath
 	for _, e := range entries {
-		if e.readWrite {
-			// SHORTCUT(#89): read-write mounts and their ownership rules
-			// aren't built; refusing the key keeps a profile from silently
-			// getting a read-only mount it asked to write.
-			d.errorf(e.rwLine, scope+": "+p.key.Value, "read_write", "read-write mounts aren't supported yet")
-			ok = false
-			continue
-		}
 		ms = append(ms, Mount{Source: e.source, Target: e.target, ReadWrite: e.readWrite})
 		targets = append(targets, e.claim)
 	}

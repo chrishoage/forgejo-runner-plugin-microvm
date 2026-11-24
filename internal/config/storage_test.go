@@ -37,9 +37,10 @@ func mounts(pairs ...string) string {
 	return b.String()
 }
 
-// A profile's mounts are host directories at guest targets, read-only:
-// each source and target cleaned, in the list's order. A profile without
-// mounts, or with an empty list, has none (STO-1, STO-2).
+// A profile's mounts are host directories at guest targets, read-only
+// unless read_write is true: each source and target cleaned, in the list's
+// order. A profile without mounts, or with an empty list, has none (STO-1,
+// STO-2, STO-3).
 func TestMounts(t *testing.T) {
 	t.Parallel()
 	src := sources(t, 3)
@@ -50,7 +51,7 @@ profiles:
       - source: %s/
         target: /opt/tools/
       - {source: %s, target: /srv//data, read_write: false}
-      - {source: %s/../src2, target: /a/./b}
+      - {source: %s/../src2, target: /a/./b, read_write: true}
   none: {}
   empty:
     mounts: []
@@ -58,7 +59,7 @@ profiles:
 	want := []Mount{
 		{Source: src[0], Target: "/opt/tools"},
 		{Source: src[1], Target: "/srv/data"},
-		{Source: src[2], Target: "/a/b"},
+		{Source: src[2], Target: "/a/b", ReadWrite: true},
 	}
 	if got := cfg.Profiles["tools"].Mounts; !reflect.DeepEqual(got, want) {
 		t.Errorf("Mounts = %+v, want %+v", got, want)
@@ -133,7 +134,6 @@ func TestInvalidMountsFail(t *testing.T) {
 		{"entry key twice", "    mounts:\n      - source: " + src[0] + "\n        source: " + src[1] + "\n        target: /srv\n", `line 6: profile "big": mounts: source: is already set on line 5`},
 		{"no source", "    mounts:\n      - {target: /srv}\n", `line 5: profile "big": mounts: an entry needs a source`},
 		{"no target", "    mounts:\n      - {source: " + src[0] + "}\n", `line 5: profile "big": mounts: an entry needs a target`},
-		{"read-write", "    mounts:\n      - {source: " + src[0] + ", target: /srv, read_write: true}\n", `line 5: profile "big": mounts: read_write: read-write mounts aren't supported yet`},
 		{"read_write not a boolean", "    mounts:\n      - {source: " + src[0] + ", target: /srv, read_write: yes}\n", `line 5: profile "big": mounts: read_write: must be true or false, not "yes"`},
 		{"source not a string", "    mounts:\n      - {source: 1, target: /srv}\n", `line 5: profile "big": mounts: source: must be a string`},
 		{"entry not a mapping", "    mounts: [/srv]\n", `line 4: profile "big": mounts: each entry must be a mapping of source, target and read_write`},
