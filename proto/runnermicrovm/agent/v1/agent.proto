@@ -183,12 +183,18 @@ message Mount {
 
 // Disk is a host file attached to the VM as a block device (STO-1).
 message Disk {
-  // The guest block device, for example /dev/vdb.
-  string device = 1;
+  // device: the agent finds a disk by its block id, never by its position
+  // as a guest device name such as /dev/vdb.
+  reserved 1;
+  reserved "device";
+  // The block id the host attaches the disk under, which the guest sees as
+  // the virtio-blk serial in /sys/block/<dev>/serial: `disk<i>`, i being
+  // its position in the profile's disks.
+  string block_id = 4;
   // The absolute guest path to mount it at.
   string target = 2;
-  // A read-write disk is mounted as ext4; a read-only disk as ext4 or EROFS
-  // (STO-4).
+  // A read-write disk is mounted as ext4; a read-only disk as ext4 or EROFS,
+  // whichever its superblock names (STO-4).
   bool read_write = 3;
 }
 

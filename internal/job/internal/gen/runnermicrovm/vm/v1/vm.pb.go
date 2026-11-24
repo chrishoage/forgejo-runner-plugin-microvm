@@ -15,8 +15,8 @@
 // (protodelim). It also inherits:
 //   - fd 3: the liveness pipe;
 //   - fd 4: the VM's end of the job network socket;
-//   - fd 5 and up: each read-write disk's locked file, in the order of the
-//     read-write entries in disks;
+//   - fd 5 and up: each disk's file, opened by the job process, in the
+//     order of disks: disks[i] is fd 5+i;
 //   - stdout and stderr: the VM log file.
 
 package vmv1
@@ -64,7 +64,7 @@ type Spec struct {
 	// the same value as the boot config's vsock_port.
 	AgentSocket string `protobuf:"bytes,8,opt,name=agent_socket,json=agentSocket,proto3" json:"agent_socket,omitempty"`
 	AgentPort   uint32 `protobuf:"varint,9,opt,name=agent_port,json=agentPort,proto3" json:"agent_port,omitempty"`
-	// The VM's mounts and disks (STO-1), disks in guest device order. Today
+	// The VM's mounts and disks (STO-1), in the profile's order. Today
 	// they come only from the label's profile, because the plugin protocol
 	// passes no workflow mounts or volumes.
 	Mounts []*Mount `protobuf:"bytes,10,rep,name=mounts,proto3" json:"mounts,omitempty"`
@@ -271,11 +271,15 @@ func (x *Mount) GetReadWrite() bool {
 // Disk is a host file attached as a block device (STO-1).
 type Disk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The host file, for messages. A read-write disk is opened through its
-	// inherited, locked descriptor (fd 5 and up), never by this path, so the
-	// lock and the open file are the same.
-	Source        string `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
-	ReadWrite     bool   `protobuf:"varint,2,opt,name=read_write,json=readWrite,proto3" json:"read_write,omitempty"`
+	// The host file, for messages. libkrun attaches the disk through its
+	// inherited descriptor (fd 5 and up), as /proc/self/fd/<n>, never by this
+	// path, so the file attached is the file the job process opened.
+	Source string `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	// The block id libkrun attaches it under, which the guest sees as its
+	// serial: 1 to 20 bytes.
+	BlockId string `protobuf:"bytes,3,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
+	// Read-only unless set, enforced by libkrun on the host side (STO-2).
+	ReadWrite     bool `protobuf:"varint,2,opt,name=read_write,json=readWrite,proto3" json:"read_write,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -317,6 +321,13 @@ func (x *Disk) GetSource() string {
 	return ""
 }
 
+func (x *Disk) GetBlockId() string {
+	if x != nil {
+		return x.BlockId
+	}
+	return ""
+}
+
 func (x *Disk) GetReadWrite() bool {
 	if x != nil {
 		return x.ReadWrite
@@ -351,9 +362,10 @@ const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x10\n" +
 	"\x03tag\x18\x02 \x01(\tR\x03tag\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x03 \x01(\bR\treadWrite\"=\n" +
+	"read_write\x18\x03 \x01(\bR\treadWrite\"X\n" +
 	"\x04Disk\x12\x16\n" +
-	"\x06source\x18\x01 \x01(\tR\x06source\x12\x1d\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x19\n" +
+	"\bblock_id\x18\x03 \x01(\tR\ablockId\x12\x1d\n" +
 	"\n" +
 	"read_write\x18\x02 \x01(\bR\treadWriteB\xf8\x01\n" +
 	"\x17com.runnermicrovm.vm.v1B\aVmProtoP\x01Zfgithub.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1;vmv1\xa2\x02\x03RVX\xaa\x02\x13Runnermicrovm.Vm.V1\xca\x02\x13Runnermicrovm\\Vm\\V1\xe2\x02\x1fRunnermicrovm\\Vm\\V1\\GPBMetadata\xea\x02\x15Runnermicrovm::Vm::V1b\x06proto3"

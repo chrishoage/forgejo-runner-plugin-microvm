@@ -269,7 +269,7 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	s.log.Info("created", "job", j.id, "name", req.GetName(), "hostname", j.hostname, "image", image, "profile", j.profileName,
 		"environment_timeout", timeout,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
-		"scratch_paths", j.profile.ScratchPaths, "mounts", mountsAttr(j.profile.Mounts), "force_pull", j.profile.ForcePull)
+		"scratch_paths", j.profile.ScratchPaths, "mounts", mountsAttr(j.profile.Mounts), "disks", disksAttr(j.profile.Disks), "force_pull", j.profile.ForcePull)
 	return &pluginv1alpha.CreateResponse{
 		EnvironmentId:       j.id,
 		RootPath:            rootPath,
@@ -318,6 +318,7 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 	// The job's own copy shares nothing with the profiles a reload swaps.
 	prof.ScratchPaths = slices.Clone(prof.ScratchPaths)
 	prof.Mounts = slices.Clone(prof.Mounts)
+	prof.Disks = slices.Clone(prof.Disks)
 	return prof, nil
 }
 

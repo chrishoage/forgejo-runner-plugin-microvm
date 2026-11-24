@@ -131,6 +131,49 @@ func TestBootRefusesABadMountTag(t *testing.T) {
 	}
 }
 
+// Each disk is added after the scratch disk, under its block id, by its
+// inherited descriptor's path, fd 5 and up in the spec's order, read-only
+// unless it is read-write (STO-1, STO-2).
+func TestBootAttachesTheDisks(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	spec := testSpec()
+	spec.Disks = []*vmv1.Disk{{Source: "/srv/store.ext4", BlockId: "disk0"}, {Source: "/srv/tools.erofs", BlockId: "disk1"}}
+	if err := boot(fakeKrun(&calls, ""), spec); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
+		"add_disk 7 disk0 /proc/self/fd/5 true",
+		"add_disk 7 disk1 /proc/self/fd/6 true",
+		"add_net_unixgram 7 true 4 02:00:c6:12:00:02 0 0",
+	}
+	i := slices.Index(calls, want[0])
+	if i < 0 || len(calls) < i+len(want) || !slices.Equal(calls[i:i+len(want)], want) {
+		t.Errorf("calls:\n%s\nwant, in a row:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A disk's block id must fit the guest's 20-byte serial, not be empty, and
+// not be the scratch disk's.
+func TestBootRefusesABadBlockID(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"", strings.Repeat("d", 21), "scratch"} {
+		var calls []string
+		spec := testSpec()
+		spec.Disks = []*vmv1.Disk{{Source: "/srv/store.ext4", BlockId: id}}
+		if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
+			t.Errorf("block id %q: err %v, calls %v", id, err, calls)
+		}
+	}
+	var calls []string
+	spec := testSpec()
+	spec.Disks = []*vmv1.Disk{{Source: "/srv/store.ext4", BlockId: strings.Repeat("d", 20)}}
+	if err := boot(fakeKrun(&calls, ""), spec); err != nil {
+		t.Errorf("a 20-byte block id: %v", err)
+	}
+}
+
 // A failed call stops the boot there, naming the call.
 func TestBootStopsAtAFailedCall(t *testing.T) {
 	t.Parallel()

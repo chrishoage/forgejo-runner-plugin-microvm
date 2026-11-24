@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 
 	"google.golang.org/protobuf/encoding/protodelim"
 
@@ -42,6 +43,15 @@ const scratchBlockID = "scratch"
 // 36-byte buffer with no length check, and panics when the VM starts on a
 // longer one.
 const maxTag = 36
+
+// maxBlockID is the longest disk block id the VM child takes: the guest
+// sees the id as the disk's virtio-blk serial, which is 20 bytes, so a
+// longer one would reach the guest cut short.
+const maxBlockID = 20
+
+// firstDiskFD is the VM child's inherited descriptor for its first disk's
+// file; disk i is firstDiskFD+i.
+const firstDiskFD = 5
 
 // libkrun's log level: warnings and errors, on the VM child's stderr.
 const krunLogWarn = 2
@@ -104,6 +114,14 @@ func boot(lib krun, spec *vmv1.Spec) error {
 			return fmt.Errorf("mount %s: tag %q: libkrun takes 1 to %d bytes", m.GetSource(), m.GetTag(), maxTag)
 		}
 	}
+	for _, d := range spec.GetDisks() {
+		switch id := d.GetBlockId(); {
+		case id == "" || len(id) > maxBlockID:
+			return fmt.Errorf("disk %s: block id %q: the guest's serial holds 1 to %d bytes", d.GetSource(), id, maxBlockID)
+		case id == scratchBlockID:
+			return fmt.Errorf("disk %s: block id %q is the scratch disk's", d.GetSource(), id)
+		}
+	}
 	mac, err := net.ParseMAC(spec.GetGuestMac())
 	if err != nil || len(mac) != 6 {
 		return fmt.Errorf("guest MAC %q: not an Ethernet address", spec.GetGuestMac())
@@ -129,6 +147,19 @@ func boot(lib krun, spec *vmv1.Spec) error {
 			return lib.addVirtiofs3(ctx, m.GetTag(), m.GetSource(), 0, !m.GetReadWrite())
 		}})
 	}
+	// Each disk is added after the scratch disk, by its inherited
+	// descriptor's path, so the file libkrun opens in krun_start_enter is
+	// the very file the job process opened, not whatever is at its source
+	// by then; read-only unless it is read-write, so the guest can't write
+	// it even after remounting it read-write (STO-2). The guest finds it by
+	// its block id, which it sees as its serial.
+	var disks []call
+	for i, d := range spec.GetDisks() {
+		fdPath := "/proc/self/fd/" + strconv.Itoa(firstDiskFD+i)
+		disks = append(disks, call{"krun_add_disk " + d.GetBlockId(), func() int32 {
+			return lib.addDisk(ctx, d.GetBlockId(), fdPath, !d.GetReadWrite())
+		}})
+	}
 	calls := []call{
 		{"krun_set_vm_config", func() int32 { return lib.setVMConfig(ctx, vcpus, spec.GetMemoryMib()) }},
 		// The boot root is the VM's root, and the layer link directory
@@ -143,6 +174,9 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		// The scratch disk is the first block device, /dev/vda,
 		// read-write (VM-5).
 		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
+	}...)
+	calls = append(calls, disks...)
+	calls = append(calls, []call{
 		// The VM's network device, on its end of the frame socket the job
 		// network serves, one Ethernet frame per datagram, with no path:
 		// the socket is already connected.

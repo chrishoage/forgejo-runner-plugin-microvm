@@ -11,8 +11,8 @@ syntax = "proto3";
 // (protodelim). It also inherits:
 //   - fd 3: the liveness pipe;
 //   - fd 4: the VM's end of the job network socket;
-//   - fd 5 and up: each read-write disk's locked file, in the order of the
-//     read-write entries in disks;
+//   - fd 5 and up: each disk's file, opened by the job process, in the
+//     order of disks: disks[i] is fd 5+i;
 //   - stdout and stderr: the VM log file.
 package runnermicrovm.vm.v1;
 
@@ -44,7 +44,7 @@ message Spec {
   // the same value as the boot config's vsock_port.
   string agent_socket = 8;
   uint32 agent_port = 9;
-  // The VM's mounts and disks (STO-1), disks in guest device order. Today
+  // The VM's mounts and disks (STO-1), in the profile's order. Today
   // they come only from the label's profile, because the plugin protocol
   // passes no workflow mounts or volumes.
   repeated Mount mounts = 10;
@@ -66,9 +66,13 @@ message Mount {
 
 // Disk is a host file attached as a block device (STO-1).
 message Disk {
-  // The host file, for messages. A read-write disk is opened through its
-  // inherited, locked descriptor (fd 5 and up), never by this path, so the
-  // lock and the open file are the same.
+  // The host file, for messages. libkrun attaches the disk through its
+  // inherited descriptor (fd 5 and up), as /proc/self/fd/<n>, never by this
+  // path, so the file attached is the file the job process opened.
   string source = 1;
+  // The block id libkrun attaches it under, which the guest sees as its
+  // serial: 1 to 20 bytes.
+  string block_id = 3;
+  // Read-only unless set, enforced by libkrun on the host side (STO-2).
   bool read_write = 2;
 }

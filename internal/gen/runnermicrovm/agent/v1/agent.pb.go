@@ -915,12 +915,14 @@ func (x *Mount) GetReadWrite() bool {
 // Disk is a host file attached to the VM as a block device (STO-1).
 type Disk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The guest block device, for example /dev/vdb.
-	Device string `protobuf:"bytes,1,opt,name=device,proto3" json:"device,omitempty"`
+	// The block id the host attaches the disk under, which the guest sees as
+	// the virtio-blk serial in /sys/block/<dev>/serial: `disk<i>`, i being
+	// its position in the profile's disks.
+	BlockId string `protobuf:"bytes,4,opt,name=block_id,json=blockId,proto3" json:"block_id,omitempty"`
 	// The absolute guest path to mount it at.
 	Target string `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
-	// A read-write disk is mounted as ext4; a read-only disk as ext4 or EROFS
-	// (STO-4).
+	// A read-write disk is mounted as ext4; a read-only disk as ext4 or EROFS,
+	// whichever its superblock names (STO-4).
 	ReadWrite     bool `protobuf:"varint,3,opt,name=read_write,json=readWrite,proto3" json:"read_write,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -956,9 +958,9 @@ func (*Disk) Descriptor() ([]byte, []int) {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
-func (x *Disk) GetDevice() string {
+func (x *Disk) GetBlockId() string {
 	if x != nil {
-		return x.Device
+		return x.BlockId
 	}
 	return ""
 }
@@ -1186,12 +1188,12 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x03 \x01(\bR\treadWrite\"U\n" +
-	"\x04Disk\x12\x16\n" +
-	"\x06device\x18\x01 \x01(\tR\x06device\x12\x16\n" +
+	"read_write\x18\x03 \x01(\bR\treadWrite\"f\n" +
+	"\x04Disk\x12\x19\n" +
+	"\bblock_id\x18\x04 \x01(\tR\ablockId\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12\x1d\n" +
 	"\n" +
-	"read_write\x18\x03 \x01(\bR\treadWrite\"d\n" +
+	"read_write\x18\x03 \x01(\bR\treadWriteJ\x04\b\x01\x10\x02R\x06device\"d\n" +
 	"\aNetwork\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x18\n" +
 	"\agateway\x18\x02 \x01(\tR\agateway\x12\x10\n" +

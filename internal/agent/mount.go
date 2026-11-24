@@ -20,6 +20,7 @@ const (
 	sysFsmount   = 432
 
 	fsopenCloexec        = 0x1
+	fsconfigSetFlag      = 0
 	fsconfigSetString    = 1
 	fsconfigCmdCreate    = 6
 	fsmountCloexec       = 0x1
@@ -121,6 +122,16 @@ func fsconfigString(fd int, key, value string) error {
 	//nolint:gosec // G103: fsconfig(2) takes C strings; both outlive the call.
 	_, _, errno := syscall.Syscall6(sysFsconfig, uintptr(fd), fsconfigSetString,
 		uintptr(unsafe.Pointer(k)), uintptr(unsafe.Pointer(v)), 0, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func fsconfigFlag(fd int, key string) error {
+	k := cString(key)
+	//nolint:gosec // G103: fsconfig(2) takes a C string; k outlives the call.
+	_, _, errno := syscall.Syscall6(sysFsconfig, uintptr(fd), fsconfigSetFlag, uintptr(unsafe.Pointer(k)), 0, 0, 0)
 	if errno != 0 {
 		return errno
 	}

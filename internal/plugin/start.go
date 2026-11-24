@@ -61,6 +61,21 @@ const scratchDevice = "/dev/vda"
 // on a longer one.
 func mountTag(i int) string { return "mount" + strconv.Itoa(i) }
 
+// diskBlockID is the block id of the disk at index i of a profile's disks,
+// which the guest sees as the disk's virtio-blk serial: up to 20 bytes, so
+// never derived from the disk's path.
+func diskBlockID(i int) string { return "disk" + strconv.Itoa(i) }
+
+// disksAttr formats a profile's disks for a log line, as source:target:ro
+// (or rw), comma-separated.
+func disksAttr(ds []config.Disk) string {
+	ms := make([]config.Mount, len(ds))
+	for i, d := range ds {
+		ms[i] = config.Mount(d)
+	}
+	return mountsAttr(ms)
+}
+
 // mountsAttr formats a profile's mounts for a log line, as
 // source:target:ro (or rw), comma-separated.
 func mountsAttr(ms []config.Mount) string {
@@ -315,6 +330,14 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
 		boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
 	}
+	// Each disk is attached under a block id only its position names, which
+	// the agent finds it by; the job process opens its source before the
+	// VM starts (STO-1, STO-4).
+	var disks []*jobv1.Disk
+	for i, d := range j.profile.Disks {
+		disks = append(disks, &jobv1.Disk{Source: d.Source, BlockId: diskBlockID(i), ReadWrite: d.ReadWrite})
+		boot.Disks = append(boot.Disks, &agentv1.Disk{BlockId: diskBlockID(i), Target: d.Target, ReadWrite: d.ReadWrite})
+	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
 		return nil, fmt.Errorf("boot root %s: %w", root, err)
@@ -333,6 +356,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		LayerDir:         img.LinkDir,
 		LayerTag:         layerTag,
 		Mounts:           mounts,
+		Disks:            disks,
 		GuestAddress:     addr.String(),
 		GuestMac:         mac.String(),
 		Boot:             boot,

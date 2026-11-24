@@ -21,13 +21,17 @@ import (
 // description contains fail. A scratch path resolves to itself, root-owned,
 // mode 0755, unless image names its target; a mount's target resolves to
 // itself unless targets names where it lands, and a guest directory lands
-// at itself unless dirs names where it lands.
+// at itself unless dirs names where it lands. A disk's block id disk<i> is
+// the device /dev/vd<b+i> unless devices names another, or "" for none, and
+// holds ext4 unless superblocks names what its device holds.
 type fakeMounter struct {
-	calls   []string
-	fail    string
-	image   map[string]scratchTarget
-	targets map[string]string
-	dirs    map[string]string
+	calls       []string
+	fail        string
+	image       map[string]scratchTarget
+	targets     map[string]string
+	dirs        map[string]string
+	devices     map[string]string
+	superblocks map[string]superblock
 }
 
 func (m *fakeMounter) do(call string) error {
@@ -79,6 +83,41 @@ func (m *fakeMounter) resolveTarget(root, guestPath string) (string, error) {
 
 func (m *fakeMounter) mountShare(root, tag, place string, readOnly bool) error {
 	return m.do(fmt.Sprintf("share %s at %s ro=%v in %s", tag, place, readOnly, root))
+}
+
+func (m *fakeMounter) findDisk(root, blockID string) (string, error) {
+	device, ok := m.devices[blockID]
+	if !ok {
+		var i int
+		if _, err := fmt.Sscanf(blockID, "disk%d", &i); err == nil {
+			device = "/dev/vd" + string(rune('b'+i))
+		}
+	}
+	if err := m.do(fmt.Sprintf("find %s in %s", blockID, root)); err != nil {
+		return "", err
+	}
+	if device == "" {
+		return "", fmt.Errorf("no block device has the serial %s", blockID)
+	}
+	return device, nil
+}
+
+func (m *fakeMounter) probeDisk(device string) (superblock, error) {
+	sb, ok := m.superblocks[device]
+	if !ok {
+		sb = superblock{fstype: fsExt4}
+	}
+	if err := m.do("probe " + device); err != nil {
+		return superblock{}, err
+	}
+	if sb.fstype == "" {
+		return superblock{}, errNotExt4OrErofs
+	}
+	return sb, nil
+}
+
+func (m *fakeMounter) mountDisk(root, device, fstype, place string, readOnly bool) error {
+	return m.do(fmt.Sprintf("disk %s %s at %s ro=%v in %s", fstype, device, place, readOnly, root))
 }
 
 func (m *fakeMounter) moveRoot(root string) error { return m.do("move root " + root) }
@@ -326,14 +365,14 @@ func TestBootRefusesAMountLandingBadly(t *testing.T) {
 		"dev":   {map[string]string{"/opt/tools": "/dev/x"}, "mount /opt/tools: lands at /dev/x, in /dev"},
 		"proc":  {map[string]string{"/opt/tools": "/proc"}, "mount /opt/tools: lands at /proc, in /proc"},
 		"root":  {map[string]string{"/opt/tools": "/"}, "mount /opt/tools: lands at /, the root"},
-		"twice": {map[string]string{"/opt/tools": "/srv"}, "mount /opt/tools: lands at /srv, as /srv does"},
+		"twice": {map[string]string{"/opt/tools": "/srv"}, "mount /opt/tools: lands at /srv, as mount /srv does"},
 		"under another": {
 			map[string]string{"/opt/tools": "/srv/x"},
-			"mount /opt/tools: lands at /srv/x, under /srv, where mount /srv lands: its mount point would be made in the host directory",
+			"mount /opt/tools: lands at /srv/x, under /srv, where mount /srv lands: its mount point would be made in what is mounted there",
 		},
 		"above another": {
 			map[string]string{"/srv": "/opt/tools/x"},
-			"mount /opt/tools: lands at /opt/tools, above /opt/tools/x, where mount /srv lands: its mount point would be made in the host directory",
+			"mount /opt/tools: lands at /opt/tools, above /opt/tools/x, where mount /srv lands: its mount point would be made in what is mounted there",
 		},
 	} {
 		cfg := testBootConfig()
@@ -403,19 +442,135 @@ func TestBootRefusesAMountHidingAScratchPathOrDirectory(t *testing.T) {
 	}
 }
 
+// The disks are made with the mounts: each is found by its serial and its
+// superblock read before any target is resolved; then every target, mounts'
+// then disks', is resolved, and each is mounted where it lands, mounts
+// before disks in the lists' order, a disk by the filesystem its superblock
+// names, read-only unless the entry is read-write (STO-4, STO-6).
+func TestBootMakesTheDisks(t *testing.T) {
+	t.Parallel()
+	cfg := testBootConfig()
+	cfg.GuestDirs = testGuestDirs()
+	cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv/tools"}}
+	// The image has /link -> /real.
+	cfg.Disks = []*agentv1.Disk{
+		{BlockId: "disk0", Target: "/link/store"},
+		{BlockId: "disk1", Target: "/opt/tools"},
+		{BlockId: "disk2", Target: "/var/lib/data", ReadWrite: true},
+	}
+	m := &fakeMounter{
+		targets:     map[string]string{"/link/store": "/srv/store"},
+		devices:     map[string]string{"disk0": "/dev/vdd", "disk2": "/dev/vdb"},
+		superblocks: map[string]superblock{"/dev/vdc": {fstype: fsErofs}},
+	}
+	if err := boot(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	const r = "/dev/.runner-microvm/root"
+	want := []string{
+		"dir /tmp 1777 in " + r,
+		"find disk0 in " + r,
+		"probe /dev/vdd",
+		"find disk1 in " + r,
+		"probe /dev/vdc",
+		"find disk2 in " + r,
+		"probe /dev/vdb",
+		"resolve target /srv/tools in " + r,
+		"resolve target /link/store in " + r,
+		"resolve target /opt/tools in " + r,
+		"resolve target /var/lib/data in " + r,
+		"share mount0 at /srv/tools ro=true in " + r,
+		"disk ext4 /dev/vdd at /srv/store ro=true in " + r,
+		"disk erofs /dev/vdc at /opt/tools ro=true in " + r,
+		"disk ext4 /dev/vdb at /var/lib/data ro=false in " + r,
+		"move root " + r,
+	}
+	if got := m.calls[len(m.calls)-len(want):]; !slices.Equal(got, want) {
+		t.Errorf("last calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A disk no device has the serial of, one that holds neither ext4 nor
+// EROFS, a read-only ext4 whose journal needs recovery, a read-write EROFS,
+// and a disk whose target lands badly, under or above a mount included,
+// fail the boot, naming the disk's target, before anything is mounted
+// (STO-4, STO-6).
+func TestBootRefusesABadDisk(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		m    *fakeMounter
+		rw   bool
+		want string
+	}{
+		"no device": {
+			&fakeMounter{devices: map[string]string{"disk1": ""}}, false,
+			"disk /opt/tools: no block device has the serial disk1",
+		},
+		"neither": {
+			&fakeMounter{superblocks: map[string]superblock{"/dev/vdc": {}}}, false,
+			"disk /opt/tools: not ext4 or EROFS",
+		},
+		"needs recovery": {
+			&fakeMounter{superblocks: map[string]superblock{"/dev/vdc": {fstype: fsExt4, needsRecovery: true}}}, false,
+			"disk /opt/tools: its ext4 journal needs recovery, which a read-only mount can't do: mount the disk read-write once to replay it",
+		},
+		"read-write EROFS": {
+			&fakeMounter{superblocks: map[string]superblock{"/dev/vdc": {fstype: fsErofs}}}, true,
+			"disk /opt/tools: /dev/vdc is erofs, and a read-write disk must be ext4",
+		},
+		"lands where a mount does": {
+			&fakeMounter{targets: map[string]string{"/opt/tools": "/srv"}}, false,
+			"disk /opt/tools: lands at /srv, as mount /srv does",
+		},
+		"lands under a mount": {
+			&fakeMounter{targets: map[string]string{"/opt/tools": "/srv/x"}}, false,
+			"disk /opt/tools: lands at /srv/x, under /srv, where mount /srv lands: its mount point would be made in what is mounted there",
+		},
+		"lands above a mount": {
+			&fakeMounter{targets: map[string]string{"/srv": "/opt/tools/x"}}, false,
+			"disk /opt/tools: lands at /opt/tools, above /opt/tools/x, where mount /srv lands: its mount point would be made in what is mounted there",
+		},
+		"lands in /dev": {
+			&fakeMounter{targets: map[string]string{"/opt/tools": "/dev/x"}}, false,
+			"disk /opt/tools: lands at /dev/x, in /dev",
+		},
+	} {
+		cfg := testBootConfig()
+		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv"}}
+		cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/data"}, {BlockId: "disk1", Target: "/opt/tools", ReadWrite: tc.rw}}
+		err := boot(tc.m, cfg)
+		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
+		}
+		if slices.ContainsFunc(tc.m.calls, func(c string) bool {
+			return strings.HasPrefix(c, "share ") || strings.HasPrefix(c, "disk ") || strings.HasPrefix(c, "move root")
+		}) {
+			t.Errorf("%s: mounted or moved: %v", name, tc.m.calls)
+		}
+	}
+	// A read-write ext4 whose journal needs recovery is mounted: the mount
+	// replays it.
+	cfg := testBootConfig()
+	cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/data", ReadWrite: true}}
+	if err := boot(&fakeMounter{superblocks: map[string]superblock{"/dev/vdb": {fstype: fsExt4, needsRecovery: true}}}, cfg); err != nil {
+		t.Errorf("a read-write disk needing recovery: %v", err)
+	}
+}
+
 // A failed step stops the boot there, naming it, and the root is never
 // moved.
 func TestBootStopsAtAFailedStep(t *testing.T) {
 	t.Parallel()
 	for _, fail := range []string{
 		"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "dir /opt/hostedtoolcache", "resolve /opt", "scratch /srv",
-		"resolve target /data", "share mount0",
+		"resolve target /data", "share mount0", "find disk0", "probe /dev/vdb", "disk ext4",
 	} {
 		m := &fakeMounter{fail: fail}
 		cfg := testBootConfig()
 		cfg.ScratchPaths = []string{"/srv", "/opt"}
 		cfg.GuestDirs = testGuestDirs()
 		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/data"}}
+		cfg.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/disk"}}
 		err := boot(m, cfg)
 		if err == nil || !errors.Is(err, syscall.EINVAL) {
 			t.Errorf("%s fails: err = %v, want EINVAL", fail, err)
@@ -449,6 +604,9 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		"relative mount":     func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "opt"}} },
 		"unclean mount":      func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/opt/"}} },
 		"root mount":         func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/"}} },
+		"no block id":        func(c *agentv1.BootConfig) { c.Disks = []*agentv1.Disk{{Target: "/data"}} },
+		"relative disk":      func(c *agentv1.BootConfig) { c.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "data"}} },
+		"root disk":          func(c *agentv1.BootConfig) { c.Disks = []*agentv1.Disk{{BlockId: "disk0", Target: "/"}} },
 	} {
 		cfg := testBootConfig()
 		edit(cfg)
