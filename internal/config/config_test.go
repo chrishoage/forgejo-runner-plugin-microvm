@@ -156,6 +156,7 @@ cache_dir: %[1]s/x/../cache
 runtime_dir: %[1]s/runtime
 max_memory_mib: 16384
 cache_max_gib: 5
+lib_dir: %[1]s/lib/
 `, base))
 	want := &Config{
 		path:         cfg.File,
@@ -167,6 +168,7 @@ cache_max_gib: 5
 		RuntimeDir:   base + "/runtime",
 		MaxMemoryMiB: 16384,
 		CacheMaxGiB:  5,
+		LibDir:       base + "/lib",
 		Profiles:     Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -229,6 +231,9 @@ func TestInvalidPluginLevelValuesFail(t *testing.T) {
 		{"cache_max_gib: 1.5\n", `line 1: cache_max_gib: must be an integer, not "1.5"`},
 		{"cache_max_gib: \"20\"\n", `line 1: cache_max_gib: must be an integer, not "20"`},
 		{"cache_max_gib:\n", `line 1: cache_max_gib: has no value`},
+		{"lib_dir: lib\n", `line 1: lib_dir: must be an absolute path, not "lib"`},
+		{"lib_dir: \"\"\n", `line 1: lib_dir: must be an absolute path, not ""`},
+		{"lib_dir:\n", `line 1: lib_dir: has no value`},
 		{"profiles: [default]\n", `line 1: profiles: must be a mapping of profile names to profiles`},
 		{"profiles:\n  big: 8\n", `line 2: profile "big": must be a mapping of profile keys`},
 		{"max_memory_mib: 1\nmax_memory_mib: 2\n", `line 2: max_memory_mib: is already set on line 1`},

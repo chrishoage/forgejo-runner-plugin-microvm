@@ -139,9 +139,8 @@ func TestSecondPluginFailsNamingTheSharedDirectory(t *testing.T) {
 // The plugin's startup takes the locks before anything else writes to the
 // directories: a second startup on directories in use fails naming the state
 // directory, and writes nothing to them.
-//
-// It is not parallel: it sets RUNNER_MICROVM_LIBDIR.
 func TestSecondStartupFailsBeforeWriting(t *testing.T) {
+	t.Parallel()
 	base := filepath.Join(t.TempDir(), "plugin")
 	dirs := testDirs(base)
 	mustLock(t, dirs)
@@ -149,7 +148,6 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 	for _, d := range []string{dirs.State, dirs.Cache, dirs.Runtime} {
 		before[d] = listDir(t, d)
 	}
-	t.Setenv(LibDirEnv, "")
 
 	err := run(t.Context(), discardLog(), configOf(dirs), nil, nil, newImageCache, joblaunch.New)
 	if err == nil {
@@ -168,10 +166,9 @@ func TestSecondStartupFailsBeforeWriting(t *testing.T) {
 // The plugin refuses to start without mkfs.ext4, naming it, before it
 // writes anything (VM-5).
 //
-// It is not parallel: it sets PATH and RUNNER_MICROVM_LIBDIR.
+// It is not parallel: it sets PATH.
 func TestStartupNeedsMkfsExt4(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "plugin")
-	t.Setenv(LibDirEnv, "")
 	t.Setenv("PATH", t.TempDir())
 
 	err := run(t.Context(), discardLog(), configOf(testDirs(base)), nil, nil, newImageCache, joblaunch.New)

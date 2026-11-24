@@ -126,8 +126,12 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	if cfg.MaxMemoryMiB == 0 {
 		maxMemory = "0 (no limit)"
 	}
+	libDir := cfg.LibDir
+	if libDir == "" {
+		libDir = "unset (by soname)"
+	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
-		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB)
+		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB, "lib_dir", libDir)
 	logProfiles(log, cfg.Profiles)
 }
 
@@ -201,17 +205,13 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 	if err := pruneDir(bin, jobBinary, agent); err != nil {
 		return err
 	}
-	libDir, err := libDirFromEnv(os.Getenv)
-	if err != nil {
-		return err
-	}
 	ready, err := parseReadyTimeout(testReadyTimeout)
 	if err != nil {
 		return err
 	}
 	srv, err := NewServer(log, Config{
 		Dirs:         dirs,
-		LibDir:       libDir,
+		LibDir:       cfg.LibDir,
 		JobBinary:    jobBinary,
 		MkfsExt4:     mkfs,
 		Agent:        agent,
@@ -237,7 +237,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 	}
 	defer closeLis()
 	log.Info("serving", "listen", dirs.Listen, "state", dirs.State, "cache", dirs.Cache, "runtime", dirs.Runtime,
-		"job_binary", jobBinary, "agent", agent, "lib_dir", libDir, "mkfs_ext4", mkfs)
+		"job_binary", jobBinary, "agent", agent, "mkfs_ext4", mkfs)
 	return serveWithReloads(ctx, log, lis, srv, hup, term, cfg, (*config.Config).Reload)
 }
 
@@ -314,27 +314,6 @@ func lookMkfs() (string, error) {
 		return "", fmt.Errorf("mkfs.ext4 is not on PATH: runner-microvm formats each VM's scratch disk with it; install e2fsprogs: %w", err)
 	}
 	return filepath.Abs(path)
-}
-
-// LibDirEnv names the directory holding libkrun and libkrunfw (VM-10).
-//
-// SHORTCUT(#11): provisional pick: RUNNER_MICROVM_LIBDIR, else the libraries
-// are loaded by soname.
-const LibDirEnv = "RUNNER_MICROVM_LIBDIR"
-
-// libDirFromEnv returns RUNNER_MICROVM_LIBDIR as an absolute path, or empty
-// when it is unset. The VM child changes its working directory before it
-// loads libkrun, so a relative path would name another directory there.
-func libDirFromEnv(getenv func(string) string) (string, error) {
-	dir := getenv(LibDirEnv)
-	if dir == "" {
-		return "", nil
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", fmt.Errorf("%s=%s: %w", LibDirEnv, dir, err)
-	}
-	return abs, nil
 }
 
 // writeJobBinary writes the embedded job binary to

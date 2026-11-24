@@ -464,14 +464,27 @@ func startPlugin(t *testing.T, bin string) *plugin {
 	return startPluginWith(t, bin, testProfiles)
 }
 
+// devLibDir is the dev shell's directory of libkrun and libkrunfw, which
+// only the tests and `just check-libs` read: the plugin reads its lib_dir
+// key, and no variable but RUNNER_MICROVM_CONFIG.
+func devLibDir(t *testing.T) string {
+	t.Helper()
+	dir := os.Getenv("RUNNER_MICROVM_LIBDIR")
+	if dir == "" {
+		t.Fatal("RUNNER_MICROVM_LIBDIR is not set: run the tests inside the dev shell")
+	}
+	return dir
+}
+
 // startPluginWith runs the plugin's serve by path, with
 // RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
-// fresh directory and holds profiles, the profiles section, and returns it
-// once its listen socket exists. On cleanup it stops the plugin with
-// SIGTERM, which drains it: the cleanups registered after this one, which
-// run before it, have removed every job, so it exits at once. A plugin
-// still running 30 s later, or at the timeout, is killed with each job
-// process's group (killWithJobs).
+// fresh directory, sets lib_dir to the dev shell's libraries (devLibDir),
+// and holds profiles, the profiles section, and returns it once its listen
+// socket exists. On cleanup it stops the plugin with SIGTERM, which drains
+// it: the cleanups registered after this one, which run before it, have
+// removed every job, so it exits at once. A plugin still running 30 s
+// later, or at the timeout, is killed with each job process's group
+// (killWithJobs).
 func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
 	return launchPlugin(t, bin, profiles, false)
@@ -479,9 +492,9 @@ func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 
 // startRootPluginWith is startPluginWith with serve run as root, under
 // `sudo -n`, which needRoot checks first. Its environment is only what the
-// plugin reads: PATH, for mkfs.ext4, HOME, RUNNER_MICROVM_LIBDIR and
-// RUNNER_MICROVM_CONFIG. The test can connect to its socket, and on cleanup
-// the plugin, its jobs and its directories go through sudo too.
+// plugin reads: PATH, for mkfs.ext4, HOME and RUNNER_MICROVM_CONFIG. The
+// test can connect to its socket, and on cleanup the plugin, its jobs and
+// its directories go through sudo too.
 func startRootPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
 	needRoot(t)
@@ -576,8 +589,8 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 	runtime := filepath.Join(base, "runtime")
 	sock := filepath.Join(runtime, "runner-microvm.sock")
 	cfg := filepath.Join(base, "config.yaml")
-	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
-		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), runtime)
+	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\nlib_dir: %s\n",
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), runtime, devLibDir(t))
 	if err := os.WriteFile(cfg, []byte(dirs+profiles), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)
@@ -596,7 +609,7 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 			t.Fatal(err)
 		}
 		cmd = exec.CommandContext(ctx, "sudo", "-n", "env", "-i", "PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME"),
-			"RUNNER_MICROVM_LIBDIR="+os.Getenv("RUNNER_MICROVM_LIBDIR"), "RUNNER_MICROVM_CONFIG="+cfg, bin, "serve")
+			"RUNNER_MICROVM_CONFIG="+cfg, bin, "serve")
 		// A session of its own has no terminal, so sudo starts no pty
 		// and runs the plugin in its own process group, the one sudo
 		// leads, rather than in a new session.

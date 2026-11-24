@@ -544,31 +544,6 @@ func TestEnvMapDropsEntriesWithoutEquals(t *testing.T) {
 	}
 }
 
-// A relative library directory is made absolute, because the VM child
-// changes its working directory before it loads libkrun.
-func TestLibDirFromEnv(t *testing.T) {
-	t.Parallel()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for env, want := range map[string]string{
-		"":         "",
-		"/opt/lib": "/opt/lib",
-		"lib/krun": filepath.Join(wd, "lib/krun"),
-	} {
-		got, err := libDirFromEnv(func(k string) string {
-			if k == LibDirEnv {
-				return env
-			}
-			return ""
-		})
-		if err != nil || got != want {
-			t.Errorf("%s=%q: %q, %v; want %q", LibDirEnv, env, got, err, want)
-		}
-	}
-}
-
 // Startup deletes everything in <state>/bin/ but the job binary and agent it
 // just wrote: stale hashes and a crashed write's temp files.
 func TestPruneDirKeepsOnlyTheCurrentFiles(t *testing.T) {

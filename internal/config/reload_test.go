@@ -73,7 +73,7 @@ func TestReloadKeepsPluginLevelValues(t *testing.T) {
 	}
 	running := *c
 	rewrite(t, path, dirsConfig(base, "run/other.sock", "state2", "cache", "run/jobs")+
-		"max_memory_mib: 8192\ncache_max_gib: 0\nprofiles:\n  big: {cpus: 4}\n")
+		"max_memory_mib: 8192\ncache_max_gib: 0\nlib_dir: /opt/libkrun\nprofiles:\n  big: {cpus: 4}\n")
 
 	next, changes := mustReload(t, c)
 	want := []Change{
@@ -81,13 +81,14 @@ func TestReloadKeepsPluginLevelValues(t *testing.T) {
 		{Key: "state_dir", Running: base + "/state", File: base + "/state2"},
 		{Key: "max_memory_mib", Running: "4096", File: "8192"},
 		{Key: "cache_max_gib", Running: "20", File: "0"},
+		{Key: "lib_dir", Running: "", File: "/opt/libkrun"},
 	}
 	if !reflect.DeepEqual(changes, want) {
 		t.Errorf("changes %+v, want %+v", changes, want)
 	}
 	if next.Listen != running.Listen || next.StateDir != running.StateDir || next.CacheDir != running.CacheDir ||
 		next.RuntimeDir != running.RuntimeDir || next.MaxMemoryMiB != running.MaxMemoryMiB ||
-		next.CacheMaxGiB != running.CacheMaxGiB {
+		next.CacheMaxGiB != running.CacheMaxGiB || next.LibDir != running.LibDir {
 		t.Errorf("a plugin-level value changed: %+v, running %+v", next, running)
 	}
 	if next.Profiles["big"].CPUs != 4 {
