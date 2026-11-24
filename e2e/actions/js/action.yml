@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The JavaScript action e2e/workflows/actions.yml uses: the runner fetches it,
+# copies it into the VM and runs it with the image's node. index.js checks its
+# input and runs its own executable script, which works only if its mode came
+# through the copy, then sets an output, an environment variable and a state;
+# post.js checks the state (docs/development.md, The workflows).
+name: js
+description: Checks that it was copied into the VM intact, on the image's node.
+inputs:
+  who:
+    description: Whom the greeting is for.
+    required: true
+outputs:
+  greeting:
+    description: The greeting, for a later step to check.
+runs:
+  using: node24
+  main: index.js
+  post: post.js

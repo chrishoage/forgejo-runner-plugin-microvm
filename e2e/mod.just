@@ -194,10 +194,24 @@ run workflow="echo":
     # Private, so a job reading it proves the job's token works.
     curl -sS --max-time 30 -o /dev/null -u '{{ admin }}':"$password" -X DELETE "$repo"
     call -X POST '{{ api }}/user/repos' \
-        -d '{"name": "{{ workflow }}", "auto_init": true, "default_branch": "main", "private": true}' >/dev/null
-    jq -n --arg content "$(base64 -w0 "$file")" \
-        '{content: $content, branch: "main", message: "ci: add the {{ workflow }} workflow"}' |
-        call -X POST "$repo/contents/.forgejo/workflows/{{ workflow }}.yml" -d @- >/dev/null
+        -d '{"name": "{{ workflow }}", "default_branch": "main", "private": true}' >/dev/null
+    # One commit on main: the workflow, and e2e/actions/ at actions/, which
+    # a workflow's uses: names at its own commit. Pushed with git, since
+    # Forgejo's contents API can't set the executable bits the actions'
+    # scripts need. The password goes in git's environment, not its
+    # command line.
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    mkdir -p "$work/.forgejo/workflows"
+    cp "$file" "$work/.forgejo/workflows/{{ workflow }}.yml"
+    cp -R actions "$work/actions"
+    git -C "$work" init -q -b main
+    git -C "$work" add -A
+    git -C "$work" -c user.name='{{ admin }}' -c user.email='{{ admin }}@example.invalid' \
+        commit -q --no-gpg-sign -m "ci: add the {{ workflow }} workflow"
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+        GIT_CONFIG_VALUE_0="Authorization: Basic $(printf '%s:%s' '{{ admin }}' "$password" | base64 -w0)" \
+        timeout 60 git -C "$work" push -q "http://127.0.0.1:3000/{{ admin }}/{{ workflow }}.git" main
 
     run_id=$(call -X POST "$repo/actions/workflows/{{ workflow }}.yml/dispatches" \
         -d '{"ref": "main", "return_run_info": true}' | jq -er .id)

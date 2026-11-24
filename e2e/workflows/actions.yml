@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# A JavaScript action and a composite action, both fetched by the runner and
+# copied into the VM (GST-10, GST-11). Each action checks its own
+# expectation and exits non-zero otherwise, and the last step checks their
+# outputs, so the workflow's success is the check. The actions are in
+# e2e/actions/, which the job's own repository holds at actions/, at the
+# workflow's commit: `uses:` builds their address from the github context,
+# so the harness's runner fetches them from Forgejo and the protocol test's
+# from its work directory, served on loopback (docs/development.md, The
+# workflows).
+name: actions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  actions:
+    runs-on: microvm
+    # A JavaScript action needs node in the VM; e2e/image stays the small
+    # alpine the other workflows boot. Renovate updates the tag and digest.
+    container:
+      image: docker.io/library/node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - name: a JavaScript action, on the image's node
+        id: js
+        uses: ${{ github.server_url }}/${{ github.repository }}/actions/js@${{ github.sha }}
+        with:
+          who: microvm
+      - name: a composite action
+        id: composite
+        uses: ${{ github.server_url }}/${{ github.repository }}/actions/composite@${{ github.sha }}
+        with:
+          who: microvm
+      - name: both actions' outputs
+        env:
+          JS: ${{ steps.js.outputs.greeting }}
+          COMPOSITE: ${{ steps.composite.outputs.greeting }}
+        run: |
+          set -eu
+          echo "js: $JS; composite: $COMPOSITE"
+          test "$JS" = "hello, microvm"
+          test "$COMPOSITE" = "hi, microvm"
+          test "$FROM_JS" = yes

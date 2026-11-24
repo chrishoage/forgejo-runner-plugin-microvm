@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The composite action e2e/workflows/actions.yml uses: the runner fetches it
+# and copies it into the VM. Its step runs its own executable script,
+# check.sh, which works only if its mode came through the copy. The image has
+# no bash, so the step says `shell: sh` (docs/development.md, The workflows).
+name: composite
+description: Checks that it was copied into the VM intact.
+inputs:
+  who:
+    description: Whom the greeting is for.
+    required: true
+outputs:
+  greeting:
+    description: The greeting, for a later step to check.
+    value: ${{ steps.check.outputs.greeting }}
+runs:
+  using: composite
+  steps:
+    - name: its own script, by its path
+      id: check
+      shell: sh
+      env:
+        WHO: ${{ inputs.who }}
+      run: '"$GITHUB_ACTION_PATH/check.sh" "$WHO"'

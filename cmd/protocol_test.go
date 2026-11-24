@@ -8,7 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http/cgi"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,6 +112,20 @@ var workflowChecks = map[string]func(t *testing.T, log, image string){
 			at + `VM \S+ \(2 CPUs, 1024 MiB\) ready in \d+\.\d\ds.*` + at + `started in \d+\.\d\ds`)
 		if !progress.MatchString(log) {
 			t.Errorf("the job log does not show Start's three progress lines, in order:\n%s", log)
+		}
+	},
+	// The runner fetched the actions from the job's repository, not from
+	// the work directory, and ran the JavaScript one on the image's node.
+	"actions": func(t *testing.T, log, _ string) {
+		for _, want := range []*regexp.Regexp{
+			regexp.MustCompile(`git clone 'http://127\.0\.0\.1:\d+/` + repoOwner + `/actions'`),
+			regexp.MustCompile(`js action: hello, microvm, from node v24\.`),
+			regexp.MustCompile(`composite action: hello, microvm`),
+			regexp.MustCompile(`js action post: the state came back`),
+		} {
+			if !want.MatchString(log) {
+				t.Errorf("the job log does not match %s", want)
+			}
 		}
 	},
 	"big":  func(t *testing.T, log, _ string) { wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB) },
@@ -241,25 +258,46 @@ func planExecutor(t *testing.T, p *plugin, workflow string, images map[string]st
 	for label, image := range images {
 		platforms[label] = "runner-microvm://" + image
 	}
-	// The runner reads a dispatch's inputs from the event's JSON.
-	event := "{}"
-	if inputs := workflowInputs[strings.TrimSuffix(filepath.Base(workflow), ".yml")]; inputs != nil {
-		b, err := json.Marshal(map[string]any{"inputs": inputs})
-		if err != nil {
-			t.Fatal(err)
-		}
-		event = string(b)
+	name := strings.TrimSuffix(filepath.Base(workflow), ".yml")
+	repo := jobRepo(t, name)
+	event := map[string]any{}
+	if inputs := workflowInputs[name]; inputs != nil {
+		event["inputs"] = inputs
+	}
+	// The same event, in the expression context and in event.json.
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
 	}
 	level := logrus.InfoLevel
 	r, err := runner.New(&runner.Config{
 		JobLoggerLevel:       &level,
-		EventJSON:            event,
-		Workdir:              gitRepo(t),
+		EventJSON:            string(eventJSON),
+		Workdir:              repo.dir,
 		EventName:            "workflow_dispatch",
 		LogOutput:            true,
 		ContainerMaxLifetime: 10 * time.Minute,
 		Platforms:            platforms,
 		Plugins:              map[string]runner.PluginConfig{"runner-microvm": {Address: "unix://" + p.sock}},
+		// As the runner daemon passes a task's: the job's repository at its
+		// commit, on the instance at GitHubInstance, which github.server_url
+		// becomes.
+		GitHubInstance: repo.serverURL,
+		PresetGitHubContext: &model.GithubContext{
+			Event:           event,
+			EventName:       "workflow_dispatch",
+			RunID:           "1",
+			RunNumber:       "1",
+			RunAttempt:      "1",
+			Actor:           repoOwner,
+			Repository:      repo.name,
+			RepositoryOwner: repoOwner,
+			Sha:             repo.sha,
+			Ref:             "refs/heads/main",
+			RefName:         "main",
+			RefType:         "branch",
+		},
+		ActionCacheDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -438,18 +476,78 @@ func removeAll(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-// gitRepo returns a fresh, empty git repository, so act/runner's git
-// lookups in its work directory don't fail noisily.
-func gitRepo(t *testing.T) string {
+// actionsDir is the actions the workflows use, which the job's repository
+// holds at actions/.
+const actionsDir = "../e2e/actions"
+
+// repoOwner owns each job's repository, as the harness's admin user does.
+const repoOwner = "e2e"
+
+// repository is a job's repository, served over HTTP on loopback.
+type repository struct {
+	// dir is its work tree, act/runner's work directory.
+	dir string
+	// serverURL is the HTTP server's root, and name the repository's path
+	// under it, owner/name, so serverURL/name is its clone URL.
+	serverURL, name string
+	// sha is its one commit.
+	sha string
+}
+
+// jobRepo returns a fresh git repository named for the workflow, as the
+// harness's run creates one on Forgejo: one commit on main holding
+// e2e/actions/ at actions/. It is served over HTTP on loopback by git
+// http-backend, so the runner fetches an action from it as it does from
+// Forgejo, with no network, and the repository is act/runner's work
+// directory too, whose git lookups then find a commit.
+func jobRepo(t *testing.T, workflow string) repository {
 	t.Helper()
-	dir := t.TempDir()
+	top := t.TempDir()
+	name := repoOwner + "/" + workflow
+	dir := filepath.Join(top, filepath.FromSlash(name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// CopyFS keeps the executable bits, which git records.
+	if err := os.CopyFS(filepath.Join(dir, "actions"), os.DirFS(actionsDir)); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "init", "-q", dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
+	gitCmd := func(args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid"}, args...)...)
+		out, err := cmd.Output()
+		if err != nil {
+			var stderr []byte
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+				stderr = ee.Stderr
+			}
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, stderr)
+		}
+		return strings.TrimSpace(string(out))
 	}
-	return dir
+	gitCmd("init", "-q", "-b", "main")
+	gitCmd("add", "-A")
+	gitCmd("commit", "-q", "--no-gpg-sign", "-m", "test: the actions")
+	sha := gitCmd("rev-parse", "HEAD")
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(&cgi.Handler{
+		Path: git,
+		Args: []string{"http-backend"},
+		// Fetching a commit by its id, as the runner fetches an action at a
+		// sha, asks for an object no ref advertises.
+		Env: []string{
+			"GIT_PROJECT_ROOT=" + top, "GIT_HTTP_EXPORT_ALL=1",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=uploadpack.allowAnySHA1InWant", "GIT_CONFIG_VALUE_0=true",
+		},
+		InheritEnv: []string{"PATH", "HOME"},
+	})
+	t.Cleanup(srv.Close)
+	return repository{dir: dir, serverURL: srv.URL, name: name, sha: sha}
 }
 
 // jobLogger gives act/runner a job logger writing to a buffer.
