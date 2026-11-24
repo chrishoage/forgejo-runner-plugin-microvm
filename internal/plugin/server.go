@@ -34,9 +34,9 @@ const Name = "runner-microvm"
 // nothing asks for them to change.
 const (
 	rootPath      = "/"
-	actPath       = "/var/run/act"
-	toolCachePath = "/opt/hostedtoolcache"
-	tempPath      = "/tmp"
+	actPath       = config.ActPath
+	toolCachePath = config.ToolCachePath
+	tempPath      = config.TempPath
 	platformOS    = "Linux"
 )
 
