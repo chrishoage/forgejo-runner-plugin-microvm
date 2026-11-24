@@ -8,7 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
+	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 )
 
 // loggedServer returns a client of a server on cache and launcher whose
@@ -95,4 +99,102 @@ func TestStartFailedCarriesEnv(t *testing.T) {
 	if lines := linesOf(log.String(), "started"); len(lines) != 0 {
 		t.Errorf("a failed Start logged started:\n%s", log.String())
 	}
+}
+
+// At debug, each Exec, CopyIn and CopyOut logs one line carrying env=,
+// argv[0] for an Exec, never another argument or any environment, and the
+// path for a copy, each with its exit code or bytes copied and its time.
+func TestCallsLogAtDebug(t *testing.T) {
+	t.Parallel()
+	c, log := loggedServer(t, &fakeCache{}, &fakeLauncher{}, slog.LevelDebug)
+	id := create(t, c)
+	if _, err := start(testContext(t), c, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execAll(t, c, &pluginv1alpha.ExecRequest{
+		EnvironmentId: id, Command: []string{"sh", "--the-flag", "echo the-argument"},
+		Env: map[string]string{"A": "the-env-value", "PATH": "/the/path"}, Workdir: "/the-workdir",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execAll(t, c, &pluginv1alpha.ExecRequest{EnvironmentId: id, Command: []string{"start-error"}}); err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.CopyIn(testContext(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Send(&pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: new("/dest"), Data: []byte("o")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Send(&pluginv1alpha.CopyInChunk{Data: []byte("k")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.CloseAndRecv(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := c.CopyOut(testContext(t), &pluginv1alpha.CopyOutRequest{EnvironmentId: id, SrcPath: "/src/dir"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := out.Recv(); err != nil {
+			break
+		}
+	}
+	got := log.String()
+	env := regexp.QuoteMeta("env=" + id + " ")
+	execs := linesOf(got, "exec")
+	if len(execs) != 2 {
+		t.Fatalf("%d exec lines, want 2:\n%s", len(execs), got)
+	}
+	for i, want := range []string{`argv0=sh exit_code=3 took=\d`, `argv0=start-error start_failed=true took=\d`} {
+		if !regexp.MustCompile(`^time=\S+ level=DEBUG msg=exec ` + env + want).MatchString(execs[i]) {
+			t.Errorf("exec line %d does not match %s:\n%s", i, want, execs[i])
+		}
+	}
+	for _, secret := range []string{"the-argument", "--the-flag", "the-env-value", "/the/path", "the-workdir"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("the log holds %q:\n%s", secret, got)
+		}
+	}
+	wantLine(t, got, "copy in", `^time=\S+ level=DEBUG `, env, ` path=/dest bytes=2 took=\d`)
+	wantLine(t, got, "copy out", `^time=\S+ level=DEBUG `, env, ` path=/src/dir bytes=8 took=\d`)
+}
+
+// stopsCopyInAgent fails a CopyIn once it has read the first message, and
+// reads no more.
+type stopsCopyInAgent struct{ fakeAgent }
+
+func (*stopsCopyInAgent) CopyIn(stream agentv1.AgentService_CopyInServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	return status.Error(codes.Internal, "the agent stopped")
+}
+
+// A CopyIn's debug line counts only the bytes sent to the agent: a chunk
+// whose send failed mid-copy is not among them.
+func TestCopyInCountsOnlyWhatItSent(t *testing.T) {
+	t.Parallel()
+	c, log := loggedServer(t, &fakeCache{}, &fakeLauncher{agent: &stopsCopyInAgent{}}, slog.LevelDebug)
+	id := create(t, c)
+	if _, err := start(testContext(t), c, id); err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.CopyIn(testContext(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Send(&pluginv1alpha.CopyInChunk{EnvironmentId: &id, DestPath: new("/dest"), Data: []byte("a")}); err != nil {
+		t.Fatal(err)
+	}
+	// Far more than the stream's flow-control window: the agent, which
+	// reads no more, ends its stream before the plugin can send it all.
+	// The runner's send may fail too, once the plugin has given up.
+	_ = in.Send(&pluginv1alpha.CopyInChunk{Data: make([]byte, 16<<20)})
+	if _, err := in.CloseAndRecv(); err == nil {
+		t.Fatal("CopyIn succeeded with the agent stopped")
+	}
+	wantLine(t, log.String(), "copy in", `^time=\S+ level=DEBUG `, regexp.QuoteMeta("env="+id+" "), ` path=/dest bytes=1 `)
 }
