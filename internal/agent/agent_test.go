@@ -70,10 +70,17 @@ func startAgent(t *testing.T) agentv1.AgentServiceClient {
 }
 
 // startServer serves s on a unix socket on the host and returns a client
-// for it.
+// for it. The socket is in a short directory of its own, not t.TempDir: a
+// unix socket's path holds at most 107 bytes, which a long test name under
+// CI's temp directory passes.
 func startServer(t *testing.T, s *server) agentv1.AgentServiceClient {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "agent.sock")
+	dir, err := os.MkdirTemp("", "ag-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "agent.sock")
 	lis, err := new(net.ListenConfig).Listen(t.Context(), "unix", sock)
 	if err != nil {
 		t.Fatal(err)
