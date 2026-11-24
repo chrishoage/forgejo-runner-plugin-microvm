@@ -186,9 +186,10 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 	}
 }
 
-// Start shares each of the job's profile's mounts read-only: in the job
-// spec its source and the tag mount<i>, i its position in the list, and in
-// the boot config that tag and its target (STO-1, STO-2). The job's copy,
+// Start shares each of the job's profile's mounts, read-only unless it is
+// read-write: in the job spec its source, the tag mount<i>, i its position
+// in the list, and its read-write flag, and in the boot config that tag,
+// its target and the flag (STO-1, STO-2, STO-3). The job's copy,
 // taken at Create, shares nothing with the profiles a reload swaps. Only the
 // operator chooses them: backend options naming volumes or mounts add none,
 // and a workflow's services, which could carry their own, fail Create
@@ -197,7 +198,7 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 	t.Parallel()
 	launcher := &fakeLauncher{}
 	srv := newTestServer(t, &fakeCache{}, launcher)
-	ms := []config.Mount{{Source: "/srv/tools", Target: "/opt/tools"}, {Source: "/srv/data", Target: "/var/lib/docker/data"}}
+	ms := []config.Mount{{Source: "/srv/tools", Target: "/opt/tools"}, {Source: "/srv/data", Target: "/var/lib/docker/data", ReadWrite: true}}
 	srv.SetProfiles(config.Profiles{"tools": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1, Mounts: ms}})
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
 	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
@@ -219,10 +220,10 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 	for _, m := range vm.GetBoot().GetMounts() {
 		mounted = append(mounted, fmt.Sprintf("%s %s rw=%v", m.GetTag(), m.GetTarget(), m.GetReadWrite()))
 	}
-	if want := []string{"/srv/tools mount0 rw=false", "/srv/data mount1 rw=false"}; !slices.Equal(shares, want) {
+	if want := []string{"/srv/tools mount0 rw=false", "/srv/data mount1 rw=true"}; !slices.Equal(shares, want) {
 		t.Errorf("job spec mounts %q, want %q", shares, want)
 	}
-	if want := []string{"mount0 /opt/tools rw=false", "mount1 /var/lib/docker/data rw=false"}; !slices.Equal(mounted, want) {
+	if want := []string{"mount0 /opt/tools rw=false", "mount1 /var/lib/docker/data rw=true"}; !slices.Equal(mounted, want) {
 		t.Errorf("boot config mounts %q, want %q", mounted, want)
 	}
 	// A job with services fails Create, so no service brings storage of its
