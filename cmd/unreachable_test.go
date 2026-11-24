@@ -183,8 +183,16 @@ func TestGuestCantReach(t *testing.T) {
 	probe := buildProbe(t)
 	v := bootVM(t, startPlugin(t, buildPlugin(t)), "unreachable")
 	v.copyIn(t, probe, probeDir)
+	// The host loopback subtest sends it datagrams; the last subtest
+	// checks that none arrived.
+	loUDP := listenHostUDP(t, netip.MustParseAddrPort("127.0.0.1:0"))
+	var (
+		loRan     bool
+		controlAt time.Time
+	)
 
-	t.Run("host loopback", func(t *testing.T) {
+	loOK := t.Run("host loopback", func(t *testing.T) {
+		loRan = true
 		lo, out := listenPair(t, host)
 		port := strconv.Itoa(int(lo.addr().Port()))
 		probeIn(t, v, "connect", out.addr().String())
@@ -200,24 +208,14 @@ func TestGuestCantReach(t *testing.T) {
 		// MAC as a root guest can, since the guest's own routing would
 		// keep it, reaches no UDP socket on the host's loopback; the same
 		// to the host's non-loopback address arrives.
-		loUDP := listenHostUDP(t, netip.MustParseAddrPort("127.0.0.1:0"))
 		outUDP := listenHostUDP(t, netip.AddrPortFrom(host, 0))
 		loPort := strconv.Itoa(int(loUDP.addr().Port()))
 		probeIn(t, v, "udp", "0.0.0.0:"+loPort, "127.0.0.1:"+loPort, outUDP.addr().String())
 		select {
 		case <-outUDP.seen:
+			controlAt = time.Now()
 		case <-time.After(10 * time.Second):
 			t.Fatalf("the UDP socket on %s received nothing", outUDP.addr())
-		}
-		// The gateway sends each datagram on from a goroutine of its own,
-		// so the control arriving doesn't mean an earlier one has been
-		// sent; one to the host's loopback would arrive well within this.
-		select {
-		case <-loUDP.seen:
-		case <-time.After(2 * time.Second):
-		}
-		if from := loUDP.received(); len(from) != 0 {
-			t.Errorf("the UDP socket on the host's loopback received from %v", from)
 		}
 	})
 
@@ -266,6 +264,33 @@ func TestGuestCantReach(t *testing.T) {
 		// Refused at once, by the library; as for the gateway, only a
 		// failing run waits out the bound.
 		probeIn(t, v, "refuses", "-timeout", "5s", "169.254.169.254", "80")
+	})
+
+	// The gateway sends each datagram on from a goroutine of its own, one
+	// for each destination, so the control arriving doesn't mean an
+	// earlier datagram has been sent, and nothing in the gateway orders
+	// them. One to the host's loopback would arrive well within 2 s of the
+	// control. The subtests since then took longer than that, so this
+	// waits for whatever is left of it, if anything.
+	t.Run("host loopback, late UDP", func(t *testing.T) {
+		// Without the host loopback subtest's datagrams there is nothing
+		// to wait for, and a failure before its control arrived is
+		// already reported there.
+		switch {
+		case !loRan:
+			t.Skip("the host loopback subtest, which sends the datagrams, didn't run")
+		case controlAt.IsZero() && !loOK:
+			t.Skip("the host loopback subtest failed before its control datagram arrived")
+		case controlAt.IsZero():
+			t.Fatal("the host loopback subtest passed with no control datagram")
+		}
+		select {
+		case <-loUDP.seen:
+		case <-time.After(time.Until(controlAt.Add(2 * time.Second))):
+		}
+		if from := loUDP.received(); len(from) != 0 {
+			t.Errorf("the UDP socket on the host's loopback received from %v", from)
+		}
 	})
 }
 
