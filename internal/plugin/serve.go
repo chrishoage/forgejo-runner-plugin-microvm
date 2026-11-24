@@ -210,9 +210,10 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 	if err != nil {
 		return err
 	}
-	// SHORTCUT(#11): no cleanup at startup of what a crashed plugin left,
-	// beyond the stale files in <state>/bin/ and the image cache's own
-	// (imagecache.New).
+	// The rest of startup cleanup, before anything can create a job.
+	if err := cleanStartup(log, dirs); err != nil {
+		return err
+	}
 	if err := joblaunch.SetSubreaper(); err != nil {
 		return err
 	}
@@ -578,7 +579,7 @@ func listen(ctx context.Context, path string) (net.Listener, func(), error) {
 	}
 	name := filepath.Base(path)
 	// A crashed plugin may also have left its temporary socket.
-	tmp := "." + name + ".new"
+	tmp := tempSocketName(name)
 	for _, n := range []string{name, tmp} {
 		if err := removeLeftoverSocket(dir, n, filepath.Join(filepath.Dir(path), n)); err != nil {
 			_ = dir.Close()
@@ -598,6 +599,10 @@ func listen(ctx context.Context, path string) (net.Listener, func(), error) {
 		_ = dir.Close()
 	}, nil
 }
+
+// tempSocketName is the temporary name listen binds the socket name under,
+// in the same directory.
+func tempSocketName(name string) string { return "." + name + ".new" }
 
 // bindSocket binds a unix socket at tmp in dir, sets its mode, and renames
 // it to name. The listener never unlinks its socket on Close: tmp is gone
