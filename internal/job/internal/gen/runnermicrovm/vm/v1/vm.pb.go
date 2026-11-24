@@ -78,8 +78,12 @@ type Spec struct {
 	// "trace". Any other value, the empty one included, fails the VM before
 	// libkrun is called.
 	LibkrunLogLevel string `protobuf:"bytes,15,opt,name=libkrun_log_level,json=libkrunLogLevel,proto3" json:"libkrun_log_level,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The VM child's log level, from the job spec: "debug", "info", "warn" or
+	// "error". Any other value, the empty one included, fails the VM before
+	// libkrun is loaded.
+	LogLevel      string `protobuf:"bytes,16,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Spec) Reset() {
@@ -217,6 +221,13 @@ func (x *Spec) GetLibkrunLogLevel() string {
 	return ""
 }
 
+func (x *Spec) GetLogLevel() string {
+	if x != nil {
+		return x.LogLevel
+	}
+	return ""
+}
+
 // Mount is a host directory shared into the VM (STO-1).
 type Mount struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -350,7 +361,7 @@ var File_runnermicrovm_vm_v1_vm_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"\n" +
-	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\x8c\x04\n" +
+	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xa9\x04\n" +
 	"\x04Spec\x12\x17\n" +
 	"\alib_dir\x18\x01 \x01(\tR\x06libDir\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +
@@ -369,7 +380,8 @@ const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"\x05disks\x18\v \x03(\v2\x19.runnermicrovm.vm.v1.DiskR\x05disks\x12\x1b\n" +
 	"\tguest_mac\x18\f \x01(\tR\bguestMac\x126\n" +
 	"\x04boot\x18\r \x01(\v2\".runnermicrovm.agent.v1.BootConfigR\x04boot\x12*\n" +
-	"\x11libkrun_log_level\x18\x0f \x01(\tR\x0flibkrunLogLevel\"P\n" +
+	"\x11libkrun_log_level\x18\x0f \x01(\tR\x0flibkrunLogLevel\x12\x1b\n" +
+	"\tlog_level\x18\x10 \x01(\tR\blogLevel\"P\n" +
 	"\x05Mount\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x10\n" +
 	"\x03tag\x18\x02 \x01(\tR\x03tag\x12\x1d\n" +

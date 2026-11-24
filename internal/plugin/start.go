@@ -318,6 +318,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		Image:         &agentv1.Image{Env: img.Env, User: img.User, WorkingDir: img.WorkingDir, DefaultPath: defaultPath},
 		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
 		VsockPort:     agentPort,
+		LogLevel:      s.cfg.LogLevel,
 	}
 	for _, d := range guestDirs {
 		boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
@@ -367,6 +368,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		JobBinary:       s.cfg.JobBinary,
 		LibDir:          s.cfg.LibDir,
 		LibkrunLogLevel: s.cfg.LibkrunLogLevel,
+		LogLevel:        s.cfg.LogLevel,
 		MkfsExt4:        s.cfg.MkfsExt4,
 		Network:         jobNetwork(),
 		Vms:             []*jobv1.VM{vm},
@@ -472,7 +474,7 @@ func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCaus
 		// Remove kills the job process; only a VM that died on its own
 		// is news.
 		if j.ctx.Err() == nil {
-			s.log.Warn("the job's VM died; its calls fail until the runner removes it", "job", j.id, "err", err)
+			s.log.Error("the job's VM died; its calls fail until the runner removes it", "job", j.id, "err", err)
 		}
 	}
 	events, exited := p.Events, p.Exited

@@ -92,13 +92,13 @@ func (c *Cache) evict(always bool) {
 	deleted, err := c.evictLRU()
 	c.storeMu.Unlock()
 	if err != nil {
-		c.log.Error("eviction", "err", err)
+		c.log.Warn("eviction", "err", err)
 	}
 	if !deleted && !always {
 		return
 	}
 	if err := c.prune(); err != nil {
-		c.log.Error("pruning", "err", err)
+		c.log.Warn("pruning", "err", err)
 	}
 }
 

@@ -25,6 +25,7 @@ func wantBuiltin(path, file string) *Config {
 		RuntimeDir:      "/run/runner-microvm/jobs",
 		CacheMaxGiB:     20,
 		LibkrunLogLevel: "warn",
+		LogLevel:        "info",
 		Profiles:        Profiles{},
 	}
 }
@@ -82,6 +83,22 @@ func TestLibkrunLogLevel(t *testing.T) {
 		"libkrun_log_level: trace\n": "trace",
 	} {
 		if got := mustLoad(t, content).LibkrunLogLevel; got != want {
+			t.Errorf("%q: %q, want %q", content, got, want)
+		}
+	}
+}
+
+// log_level takes exactly its four values; left out, it is info.
+func TestLogLevel(t *testing.T) {
+	t.Parallel()
+	for content, want := range map[string]string{
+		"":                   "info",
+		"log_level: debug\n": "debug",
+		"log_level: info\n":  "info",
+		"log_level: warn\n":  "warn",
+		"log_level: error\n": "error",
+	} {
+		if got := mustLoad(t, content).LogLevel; got != want {
 			t.Errorf("%q: %q, want %q", content, got, want)
 		}
 	}
@@ -175,6 +192,7 @@ max_memory_mib: 16384
 cache_max_gib: 5
 lib_dir: %[1]s/lib/
 libkrun_log_level: debug
+log_level: warn
 `, base))
 	want := &Config{
 		path:            cfg.File,
@@ -188,6 +206,7 @@ libkrun_log_level: debug
 		CacheMaxGiB:     5,
 		LibDir:          base + "/lib",
 		LibkrunLogLevel: "debug",
+		LogLevel:        "warn",
 		Profiles:        Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -258,6 +277,11 @@ func TestInvalidPluginLevelValuesFail(t *testing.T) {
 		{"libkrun_log_level: DEBUG\n", `line 1: libkrun_log_level: must be warn, info, debug or trace, not "DEBUG"`},
 		{"libkrun_log_level: 4\n", `line 1: libkrun_log_level: must be a string`},
 		{"libkrun_log_level:\n", `line 1: libkrun_log_level: has no value`},
+		{"\nlog_level: trace\n", `line 2: log_level: must be debug, info, warn or error, not "trace"`},
+		{"log_level: warning\n", `line 1: log_level: must be debug, info, warn or error, not "warning"`},
+		{"log_level: INFO\n", `line 1: log_level: must be debug, info, warn or error, not "INFO"`},
+		{"log_level: 0\n", `line 1: log_level: must be a string`},
+		{"log_level:\n", `line 1: log_level: has no value`},
 		{"profiles: [default]\n", `line 1: profiles: must be a mapping of profile names to profiles`},
 		{"profiles:\n  big: 8\n", `line 2: profile "big": must be a mapping of profile keys`},
 		{"max_memory_mib: 1\nmax_memory_mib: 2\n", `line 2: max_memory_mib: is already set on line 1`},

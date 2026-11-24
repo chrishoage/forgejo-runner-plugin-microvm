@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -104,7 +105,7 @@ func TestStartBootsTheVM(t *testing.T) {
 	if fi, err := os.Stat(bootFile); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("the boot config at %s: %v, %v", guestagent.BootConfigPath, fi, err)
 	}
-	boot, err := guestagent.ReadBootConfig(bootFile)
+	boot, err := guestagent.ReadBootConfig(bootFile, &slog.LevelVar{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +123,8 @@ func TestStartBootsTheVM(t *testing.T) {
 			DefaultPath: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		},
 		VsockPort: 1024,
+		// The plugin's own log level.
+		LogLevel: "warn",
 		GuestDirs: []*agentv1.GuestDir{
 			{Path: "/var/run/act", Mode: 0o777}, {Path: "/opt/hostedtoolcache", Mode: 0o777}, {Path: "/tmp", Mode: 0o1777},
 		},
@@ -131,7 +134,8 @@ func TestStartBootsTheVM(t *testing.T) {
 	}
 	spec := launcher.specs[0]
 	if spec.GetJob() != id || spec.GetJobBinary() != "/fake/runner-microvm-job" || spec.GetMkfsExt4() != "/fake/mkfs.ext4" ||
-		spec.GetLibDir() != "/fake/lib" || spec.GetLibkrunLogLevel() != "debug" || len(spec.GetVms()) != 1 {
+		spec.GetLibDir() != "/fake/lib" || spec.GetLibkrunLogLevel() != "debug" || spec.GetLogLevel() != "warn" ||
+		len(spec.GetVms()) != 1 {
 		t.Fatalf("job spec = %v", spec)
 	}
 	wantNet := &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500}

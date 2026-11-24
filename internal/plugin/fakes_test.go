@@ -59,8 +59,9 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 		JobBinary: "/fake/runner-microvm-job",
 		MkfsExt4:  "/fake/mkfs.ext4",
 		LibDir:    "/fake/lib",
-		// Not the built-in, so the test sees it passed on.
+		// Not the built-ins, so the test sees them passed on.
 		LibkrunLogLevel: "debug",
+		LogLevel:        "warn",
 		Agent:           agent,
 		Cache:           cache,
 		Launcher:        launcher,

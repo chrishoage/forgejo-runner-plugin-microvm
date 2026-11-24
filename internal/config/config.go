@@ -41,7 +41,12 @@ const (
 	builtinRuntimeDir  = "/run/runner-microvm/jobs"
 	builtinCacheMaxGiB = 20
 	builtinLibkrunLog  = "warn"
+	builtinLogLevel    = "info"
 )
+
+// logLevels are log_level's values, most verbose first: the level of the
+// plugin, every job process, every VM child and every agent.
+var logLevels = []string{"debug", "info", "warn", "error"}
 
 // libkrunLogLevels are libkrun_log_level's values, least verbose first. None
 // is below warn, so libkrun's errors always reach the VM log.
@@ -76,6 +81,9 @@ type Config struct {
 	// libkrunLogLevels: separate from the plugin's own, since libkrun's
 	// debug is a flood of virtio traffic.
 	LibkrunLogLevel string
+	// LogLevel is the log level of the plugin, every job process, every
+	// VM child and every agent, one of logLevels.
+	LogLevel string
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
 
@@ -216,6 +224,7 @@ func (c *Config) Reload() (*Config, []Change, error) {
 		{"cache_max_gib", strconv.FormatUint(c.CacheMaxGiB, 10), strconv.FormatUint(f.CacheMaxGiB, 10)},
 		{"lib_dir", c.LibDir, f.LibDir},
 		{"libkrun_log_level", c.LibkrunLogLevel, f.LibkrunLogLevel},
+		{"log_level", c.LogLevel, f.LogLevel},
 	} {
 		if k.running != k.file {
 			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
@@ -316,6 +325,7 @@ func builtin() *Config {
 		RuntimeDir:      builtinRuntimeDir,
 		CacheMaxGiB:     builtinCacheMaxGiB,
 		LibkrunLogLevel: builtinLibkrunLog,
+		LogLevel:        builtinLogLevel,
 		Profiles:        Profiles{},
 	}
 }
@@ -466,6 +476,8 @@ func (d *decoder) top(c *Config, root *yaml.Node) {
 			ok = d.absPath(p, &c.LibDir)
 		case "libkrun_log_level":
 			ok = d.oneOf(p, libkrunLogLevels, &c.LibkrunLogLevel)
+		case "log_level":
+			ok = d.oneOf(p, logLevels, &c.LogLevel)
 		case "profiles":
 			d.profiles(c, p)
 		default:

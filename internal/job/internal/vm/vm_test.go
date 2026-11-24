@@ -3,8 +3,10 @@
 package vm
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -12,7 +14,10 @@ import (
 	"testing"
 	"unsafe"
 
+	"google.golang.org/protobuf/encoding/protodelim"
+
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 )
 
 // fakeKrun records libkrun's calls, and fails the one named in fail.
@@ -259,5 +264,33 @@ func TestCStrings(t *testing.T) {
 	}
 	if got := cStrings(nil); len(got) != 1 || got[0] != nil {
 		t.Errorf("empty = %v", got)
+	}
+}
+
+// Main sets the VM log's level to the spec's before anything else, and
+// fails on any other level before it loads libkrun.
+func TestMainSetsTheLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		level, want string
+		wantLevel   slog.Level
+	}{
+		// testSpec's agent socket directory doesn't exist: Main fails
+		// there once the level is set, before it loads libkrun.
+		{"warn", "agent socket directory", slog.LevelWarn},
+		{"debug", "agent socket directory", slog.LevelDebug},
+		{"", "not debug, info, warn or error", slog.LevelInfo},
+		{"trace", "not debug, info, warn or error", slog.LevelInfo},
+	} {
+		spec := testSpec()
+		spec.LogLevel = tc.level
+		var in, log bytes.Buffer
+		if _, err := protodelim.MarshalTo(&in, spec); err != nil {
+			t.Fatal(err)
+		}
+		var v slog.LevelVar
+		if code := Main(&in, logging.New(&log, "test", &v), &v); code != 1 || !strings.Contains(log.String(), tc.want) || v.Level() != tc.wantLevel {
+			t.Errorf("%q: exit %d, level %v, log:\n%s\nwant 1, %v and %q", tc.level, code, v.Level(), log.String(), tc.wantLevel, tc.want)
+		}
 	}
 }

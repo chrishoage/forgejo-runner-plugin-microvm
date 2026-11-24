@@ -44,7 +44,7 @@ func reloadOnSignal(ctx context.Context, log *slog.Logger, hup <-chan os.Signal,
 func reloadConfig(log *slog.Logger, srv *Server, cur *config.Config, read readConfig) *config.Config {
 	next, changes, err := read(cur)
 	if err != nil {
-		log.Error("reload failed: kept the running config", "err", err)
+		log.Warn("reload failed: kept the running config", "err", err)
 		return cur
 	}
 	for _, ch := range changes {

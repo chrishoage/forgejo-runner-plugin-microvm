@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/encoding/protodelim"
 
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 )
 
 // AgentPath is where the agent is in the VM's boot root, and what libkrun's
@@ -72,11 +73,16 @@ const (
 
 // Main reads the VM child spec from in and boots the VM. It returns only on
 // failure: libkrun ends the process with the guest's exit code when the VM
-// stops.
-func Main(in io.Reader, log *slog.Logger) int {
+// stops. log writes the VM log, at level, which Main sets to the spec's log
+// level before it logs anything else.
+func Main(in io.Reader, log *slog.Logger, level *slog.LevelVar) int {
 	spec := &vmv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: 1 << 20}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
 		log.Error("read the VM child spec", "err", err)
+		return 1
+	}
+	if err := logging.SetLevel(level, spec.GetLogLevel()); err != nil {
+		log.Error("the VM child spec", "err", err)
 		return 1
 	}
 	// The agent socket's path can outgrow bind's 107 bytes, so libkrun
@@ -85,11 +91,13 @@ func Main(in io.Reader, log *slog.Logger) int {
 		log.Error("agent socket directory", "err", err)
 		return 1
 	}
-	lib, _, err := load(spec.GetLibDir())
+	lib, files, err := load(spec.GetLibDir())
 	if err != nil {
 		log.Error("load libkrun", "err", err)
 		return 1
 	}
+	log.Debug("loaded libkrun and libkrunfw", "libkrun", files.Libkrun, "libkrunfw", files.Libkrunfw,
+		"libkrun_log_level", spec.GetLibkrunLogLevel())
 	// libkrun's calls are made from one thread, which krun_start_enter
 	// never returns from.
 	runtime.LockOSThread()

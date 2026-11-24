@@ -69,6 +69,9 @@ type Config struct {
 	// LibkrunLogLevel is libkrun's log level in every VM: warn, info,
 	// debug or trace.
 	LibkrunLogLevel string
+	// LogLevel is the log level every job process, VM child and agent
+	// follows, the plugin's own: debug, info, warn or error.
+	LogLevel string
 	// JobBinary is the extracted job binary's path.
 	JobBinary string
 	// MkfsExt4 is the host's mkfs.ext4, which formats each scratch disk.
