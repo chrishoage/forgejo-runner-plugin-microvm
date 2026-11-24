@@ -290,6 +290,29 @@ func TestCloseFlushes(t *testing.T) {
 	}
 }
 
+// Close, as at shutdown, flushes every job's VM at once, so one whose flush
+// hangs costs its own flush timeout, not every job's: both flushes are in
+// flight together.
+func TestCloseFlushesEveryJobAtOnce(t *testing.T) {
+	t.Parallel()
+	agent := &flushAgent{hang: true, release: make(chan struct{}), entered: make(chan struct{}, 2)}
+	srv, launcher, _ := flushServer(t, agent, 20*time.Second)
+	startedOn(t, srv, "rw-disk")
+	startedOn(t, srv, "rw-mount")
+	closed := make(chan error, 1)
+	ctx := testContext(t)
+	go func() { closed <- srv.Close(ctx) }()
+	within(t, agent.entered, "the first flush")
+	within(t, agent.entered, "the second flush, while the first is in flight")
+	close(agent.release)
+	if err := within(t, closed, "Close"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if launcher.alive() != 0 {
+		t.Error("a job process outlived Close")
+	}
+}
+
 // A Remove whose flush is in flight when the plugin stops, its call
 // cancelled as the gRPC server's stop cancels every call, still finishes
 // its flush and its kill, and Close waits for them: the plugin's liveness
