@@ -208,3 +208,172 @@ func TestReloadChecksMountSources(t *testing.T) {
 		t.Errorf("the running config's mounts changed to %+v", got)
 	}
 }
+
+// diskFiles makes n host files for disk sources, and returns their paths.
+func diskFiles(t *testing.T, n int) []string {
+	t.Helper()
+	dir := t.TempDir()
+	var paths []string
+	for i := range n {
+		p := filepath.Join(dir, fmt.Sprintf("disk%d.img", i))
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+// disks is a profile's disks key, each entry a source and a target.
+func disks(pairs ...string) string {
+	return strings.Replace(mounts(pairs...), "    mounts:\n", "    disks:\n", 1)
+}
+
+// blockDevice returns a block device in /dev, or skips t when there is
+// none, saying so, unless CI is set.
+func blockDevice(t *testing.T) string {
+	t.Helper()
+	entries, err := os.ReadDir("/dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Type()&os.ModeDevice != 0 && e.Type()&os.ModeCharDevice == 0 {
+			return filepath.Join("/dev", e.Name())
+		}
+	}
+	if os.Getenv("CI") != "" {
+		t.Fatal("CI is set, and /dev holds no block device")
+	}
+	t.Skip("SKIPPED: /dev holds no block device")
+	return ""
+}
+
+// A profile's disks are host files at guest targets, read-only: each source
+// and target cleaned, in the list's order, a symlink to a file included. A
+// profile without disks, or with an empty list, has none (STO-1, STO-4).
+func TestDisks(t *testing.T) {
+	t.Parallel()
+	src := diskFiles(t, 2)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(src[1], link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, fmt.Sprintf(`
+profiles:
+  data:
+    disks:
+      - source: %s
+        target: /srv/data/
+      - {source: %s, target: /a/./b, read_write: false}
+  none: {}
+  empty:
+    disks: []
+`, src[0], link))
+	want := []Disk{{Source: src[0], Target: "/srv/data"}, {Source: link, Target: "/a/b"}}
+	if got := cfg.Profiles["data"].Disks; !reflect.DeepEqual(got, want) {
+		t.Errorf("Disks = %+v, want %+v", got, want)
+	}
+	for _, name := range []string{"none", "empty"} {
+		if got := cfg.Profiles[name].Disks; len(got) != 0 {
+			t.Errorf("profile %s: Disks = %+v, want []", name, got)
+		}
+	}
+	if got := BuiltinProfile().Disks; len(got) != 0 {
+		t.Errorf("the built-in disks = %+v, want []", got)
+	}
+}
+
+// A disk under a scratch path, or beside a mount, loads (STO-6).
+func TestDisksBesideMountsLoad(t *testing.T) {
+	t.Parallel()
+	src, dirs := diskFiles(t, 2), sources(t, 1)
+	cfg := mustLoad(t, "profiles:\n  docker:\n    scratch_paths: [/var/lib/docker]\n"+
+		mounts(dirs[0], "/opt/tools")+disks(src[0], "/var/lib/docker/store", src[1], "/srv/data"))
+	if got := cfg.Profiles["docker"]; len(got.Disks) != 2 || len(got.Mounts) != 1 {
+		t.Errorf("%d disks and %d mounts, want 2 and 1", len(got.Disks), len(got.Mounts))
+	}
+}
+
+// Each invalid disk fails at load, naming its line, the key and the
+// profile, and so does a disk whose target a mount uses, or that a mount's
+// target is under, whichever list comes first (STO-5, STO-6, CFG-2).
+func TestInvalidDisksFail(t *testing.T) {
+	t.Parallel()
+	src, dirs := diskFiles(t, 2), sources(t, 2)
+	missing := filepath.Join(t.TempDir(), "missing")
+	dev := blockDevice(t)
+	for _, tc := range []struct {
+		name, keys, want string
+	}{
+		{"relative source", disks("srv/disk.img", "/srv"), `line 5: profile "big": disks: source: "srv/disk.img" is not an absolute path`},
+		{"missing source", disks(missing, "/srv"), fmt.Sprintf(`line 5: profile "big": disks: source: %q does not exist`, missing)},
+		{"directory source", disks(dirs[0], "/srv"), fmt.Sprintf(`line 5: profile "big": disks: source: %q is not a regular file`, dirs[0])},
+		{"block device source", disks(dev, "/srv"), fmt.Sprintf(`line 5: profile "big": disks: source: %q is a block device: a disk's source must be a regular file`, dev)},
+		{"character device source", disks("/dev/null", "/srv"), `line 5: profile "big": disks: source: "/dev/null" is not a regular file`},
+		{"read-write", "    disks:\n      - {source: " + src[0] + ", target: /srv, read_write: true}\n", `line 5: profile "big": disks: read_write: read-write disks are not supported yet`},
+		{"root target", disks(src[0], "/"), `line 5: profile "big": disks: target: "/" is the root`},
+		{"proc target", disks(src[0], "/proc/x"), `line 5: profile "big": disks: target: "/proc/x" is under /proc`},
+		{"target twice", disks(src[0], "/srv", src[1], "/srv/"), `line 6: profile "big": disks: target: "/srv/" is already a target on line 5`},
+		{"target a mount's", mounts(dirs[0], "/srv") + disks(src[0], "/srv"), `line 7: profile "big": disks: target: "/srv" is already a target on line 5`},
+		{"target a disk's", disks(src[0], "/srv") + mounts(dirs[0], "/srv"), `line 7: profile "big": mounts: target: "/srv" is already a target on line 5`},
+		{"target under a mount's", mounts(dirs[0], "/srv") + disks(src[0], "/srv/data"), `line 7: profile "big": disks: target: "/srv/data" is under the target "/srv" on line 5`},
+		{"mount under a disk's", disks(src[0], "/srv") + mounts(dirs[0], "/srv/tools"), `line 7: profile "big": mounts: target: "/srv/tools" is under the target "/srv" on line 5`},
+		{"target a scratch path", "    scratch_paths: [/srv]\n" + disks(src[0], "/srv"), `line 6: profile "big": disks: target: "/srv" is the scratch path on line 4: one would hide the other`},
+		{"target above the tool cache", disks(src[0], "/opt"), `line 5: profile "big": disks: target: "/opt" is above the guest's tool cache, /opt/hostedtoolcache: it would hide it`},
+		{"unknown entry key", "    disks:\n      - {source: " + src[0] + ", target: /srv, fs: ext4}\n", `line 5: profile "big": disks: fs: unknown key`},
+		{"no source", "    disks:\n      - {target: /srv}\n", `line 5: profile "big": disks: an entry needs a source`},
+		{"entry not a mapping", "    disks: [/srv]\n", `line 4: profile "big": disks: each entry must be a mapping of source, target and read_write`},
+		{"no value", "    disks:\n", `line 4: profile "big": disks: has no value`},
+	} {
+		path, msg := loadErr(t, "profiles:\n  ok: {}\n  big:\n"+tc.keys)
+		wantErr(t, path, msg, tc.want)
+		if n := strings.Count(msg, "\n") + 1; n != 1 {
+			t.Errorf("%s: %d errors, want 1:\n%s", tc.name, n, msg)
+		}
+	}
+}
+
+// Mounts and disks share the amd64 limit: 2 mounts plus 2 disks stop
+// startup at the disks' line, and 2 plus 1 load (CFG-10).
+func TestMountsAndDisksShareTheLimit(t *testing.T) {
+	t.Parallel()
+	src, dirs := diskFiles(t, 2), sources(t, 2)
+	ms := mounts(dirs[0], "/a", dirs[1], "/b")
+	three := "profiles:\n  three:\n" + ms + disks(src[0], "/c")
+	if _, err := loadOn(writeConfig(t, three), true, nil, "amd64"); err != nil {
+		t.Errorf("amd64, 2 mounts and 1 disk: %v", err)
+	}
+	four := "profiles:\n  four:\n" + ms + disks(src[0], "/c", src[1], "/d")
+	if _, err := loadOn(writeConfig(t, four), true, nil, "arm64"); err != nil {
+		t.Errorf("arm64, 2 mounts and 2 disks: %v", err)
+	}
+	path := writeConfig(t, four)
+	_, err := loadOn(path, true, nil, "amd64")
+	if err == nil {
+		t.Fatal("amd64: 2 mounts and 2 disks loaded")
+	}
+	wantErr(t, path, err.Error(), `line 6: profile "four": disks: 4 mounts and disks, more than 3, the most a VM can have on amd64: `+
+		`libkrun's x86_64 VMs have 11 virtio-mmio interrupt lines, and every VM already uses 8`)
+}
+
+// A reload fails on a disk source that is gone, and the old config stays
+// (CFG-8).
+func TestReloadChecksDiskSources(t *testing.T) {
+	t.Parallel()
+	src := diskFiles(t, 1)
+	path := writeConfig(t, "profiles:\n  data:\n"+disks(src[0], "/srv/data"))
+	c, err := load(path, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(src[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Reload(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf(`disks: source: %q does not exist`, src[0])) {
+		t.Errorf("Reload with the source gone: %v", err)
+	}
+	if got := c.Profiles["data"].Disks; len(got) != 1 || got[0].Source != src[0] {
+		t.Errorf("the running config's disks changed to %+v", got)
+	}
+}

@@ -98,6 +98,11 @@ type Profile struct {
 	// none, the built-in value. Never changed once loaded, like
 	// ScratchPaths.
 	Mounts []Mount
+	// Disks are the host files attached to the job's container as block
+	// devices, read-only, in the file's order (STO-1, STO-4). Nil when there
+	// are none, the built-in value. Never changed once loaded, like
+	// ScratchPaths.
+	Disks []Disk
 	// ForcePull looks the job's tag up in the registry at every Start,
 	// even when the image cache holds it (IMG-6). False by default.
 	ForcePull bool
@@ -493,7 +498,8 @@ func (d *decoder) profiles(c *Config, p pair) {
 func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int) bool {
 	scope, ok := inProfile(name), true
 	// The guest paths the profile sets, and how many mounts and disks it
-	// has, for the checks across its keys (checkTargets).
+	// has, for the checks across its keys (checkTargets), and the key and
+	// line of the last of the two lists, where the limit's error goes.
 	var scratch, targets []guestPath
 	count, listLine, listKey := 0, 0, ""
 	for _, kp := range d.pairs(m, scope, false, nil) {
@@ -514,6 +520,11 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 		case "mounts":
 			ms, claims, n, valid := d.mounts(kp, scope)
 			prof.Mounts, ok = ms, ok && valid
+			targets, count = append(targets, claims...), count+n
+			listLine, listKey = kp.key.Line, kp.key.Value
+		case "disks":
+			ds, claims, n, valid := d.disks(kp, scope)
+			prof.Disks, ok = ds, ok && valid
 			targets, count = append(targets, claims...), count+n
 			listLine, listKey = kp.key.Line, kp.key.Value
 		case "force_pull":
