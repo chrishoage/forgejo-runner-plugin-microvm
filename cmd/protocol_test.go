@@ -286,8 +286,8 @@ func runWorkflowOn(t *testing.T, p *plugin, workflow string, images map[string]s
 	run := planExecutor(t, p, workflow, images, log)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
+	t.Cleanup(func() { logIfFailed(t, "job log", log) })
 	err := run(ctx)
-	t.Logf("job log:\n%s", log.String())
 	return log.String(), err
 }
 
@@ -745,10 +745,10 @@ func spawnPluginIn(t *testing.T, base, bin string, setup pluginSetup, root bool)
 			t.Logf("the plugin exited: %v", err)
 		}
 		cancel()
-		t.Logf("plugin log:\n%s", log.String())
 		if err := remove(); err != nil {
 			t.Error(err)
 		}
+		logIfFailed(t, "plugin log", log)
 	})
 	return &plugin{
 		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
@@ -927,6 +927,17 @@ func (l jobLogger) WithJobLogger() *logrus.Logger {
 	log.SetOutput(l.w)
 	log.SetFormatter(&logrus.TextFormatter{DisableColors: true})
 	return log
+}
+
+// logIfFailed logs the named log, all of it, if t has failed by now. A
+// passing test's logs stay out of -v's output, which would otherwise bury
+// each test's result under every job and plugin log. Call it from a
+// cleanup, after the cleanup's own checks.
+func logIfFailed(t *testing.T, name string, log *syncBuffer) {
+	t.Helper()
+	if t.Failed() {
+		t.Logf("%s:\n%s", name, log.String())
+	}
 }
 
 // syncBuffer is a buffer several goroutines may write.

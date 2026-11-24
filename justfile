@@ -64,9 +64,10 @@ test:
     go test -race ./...
 
 # Run every test, those that boot VMs (`kvm` tag) included, against the
-# embedded payload. Needs /dev/kvm and the dev shell's libraries.
-test-kvm: payload
-    go test -race -tags kvm,payload ./...
+# embedded payload, passing FLAGS on to go test (CI passes -v). Needs
+# /dev/kvm and the dev shell's libraries.
+test-kvm *flags: payload
+    go test -race -tags kvm,payload {{ flags }} ./...
 
 # Fail on any dependency whose license is not on the allow-list.
 licenses:
