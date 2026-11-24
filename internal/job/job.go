@@ -44,12 +44,18 @@ import (
 const Version = "runner-microvm-job"
 
 // Main runs the job binary: with no arguments the job process, with `vm` a
-// VM child, with `version` its version. It returns the exit code.
+// VM child, with `version` its version, and with `libs [<dir>]` the check of
+// libkrun and libkrunfw that the plugin runs at startup (vm.Libs). It
+// returns the exit code.
 func Main(args []string) int {
 	switch {
 	case len(args) == 1 && args[0] == "version":
 		fmt.Println(Version)
 		return 0
+	case len(args) == 1 && args[0] == "libs":
+		return vm.Libs("", os.Stdout, os.Stderr)
+	case len(args) == 2 && args[0] == "libs":
+		return vm.Libs(args[1], os.Stdout, os.Stderr)
 	case len(args) == 1 && args[0] == "vm":
 		log := logging.Setup("runner-microvm-vm")
 		live, err := liveness()
@@ -73,7 +79,7 @@ func Main(args []string) int {
 		}
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "usage: runner-microvm-job [vm | version]\n")
+		fmt.Fprintf(os.Stderr, "usage: runner-microvm-job [vm | version | libs [<dir>]]\n")
 		return 2
 	}
 }

@@ -3,6 +3,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -106,11 +108,19 @@ func serveCmd(getenv func(string) string) int {
 		return 1
 	}
 	logConfig(log, cfg)
-	if err := run(context.Background(), log, cfg, hup, term, newImageCache, joblaunch.New); err != nil {
+	if err := run(context.Background(), log, cfg, hup, term, embeddedPayload, newImageCache, joblaunch.New); err != nil {
 		log.Error("stopped", "err", err)
 		return 1
 	}
 	return 0
+}
+
+// libDirSetting is lib_dir as the log shows it.
+func libDirSetting(dir string) string {
+	if dir == "" {
+		return "unset (by soname)"
+	}
+	return dir
 }
 
 // logConfig logs the config file read, or that there was none, every
@@ -126,12 +136,9 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	if cfg.MaxMemoryMiB == 0 {
 		maxMemory = "0 (no limit)"
 	}
-	libDir := cfg.LibDir
-	if libDir == "" {
-		libDir = "unset (by soname)"
-	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
-		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB, "lib_dir", libDir)
+		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB,
+		"lib_dir", libDirSetting(cfg.LibDir))
 	logProfiles(log, cfg.Profiles)
 }
 
@@ -148,13 +155,31 @@ func newImageCache(log *slog.Logger, dir string, maxSize int64) (ImageCache, err
 // run closes the launcher it made.
 type newLauncherFunc func(log *slog.Logger) (*joblaunch.Launcher, error)
 
+// payloadFunc returns the job binary and the agent that run writes to
+// <state>/bin/. run takes it so tests can give it a fake job binary.
+type payloadFunc func() (jobBinary, agent []byte, err error)
+
+// embeddedPayload is the payloadFunc serve uses: the job binary and the
+// agent embedded in runner-microvm.
+func embeddedPayload() (jobBinary, agent []byte, err error) {
+	if jobBinary, err = payload.JobBinary(); err != nil {
+		return nil, nil, err
+	}
+	if agent, err = payload.Agent(); err != nil {
+		return nil, nil, err
+	}
+	return jobBinary, agent, nil
+}
+
 // run runs the plugin with cfg until ctx ends or its drain has ended,
 // reloading the config file on each signal from hup; the first signal from
 // term drains it, and a second stops it at once (serveWithReloads). A signal
-// from term during startup stops it before it serves. It opens the image
-// cache with newCache, and makes the job launcher with newLauncher, which it
-// closes on every return.
-func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-chan os.Signal, newCache newCacheFunc, newLauncher newLauncherFunc) error {
+// from term during startup stops it before it serves. It writes the job
+// binary and the agent pay returns, opens the image cache with newCache, and
+// makes the job launcher with newLauncher, which it closes on every return.
+func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-chan os.Signal, pay payloadFunc,
+	newCache newCacheFunc, newLauncher newLauncherFunc,
+) error {
 	// An architecture libkrun doesn't support, or a missing host tool,
 	// stops startup before anything is written.
 	arch, err := runnerArch(runtime.GOARCH)
@@ -191,12 +216,16 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 	if err := joblaunch.SetSubreaper(); err != nil {
 		return err
 	}
-	bin := filepath.Join(dirs.State, "bin")
-	jobBinary, err := writeJobBinary(ctx, bin)
+	jobPayload, agentPayload, err := pay()
 	if err != nil {
 		return err
 	}
-	agent, err := writeAgent(bin)
+	bin := filepath.Join(dirs.State, "bin")
+	jobBinary, err := writeJobBinary(ctx, bin, jobPayload)
+	if err != nil {
+		return err
+	}
+	agent, err := writeAgent(bin, agentPayload)
 	if err != nil {
 		return err
 	}
@@ -205,6 +234,19 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 	if err := pruneDir(bin, jobBinary, agent); err != nil {
 		return err
 	}
+	// Only the VM child loads libkrun, so the job binary checks the
+	// libraries, exactly as a VM child loads them, before the plugin
+	// serves: a plugin that fails every Start is worse than one that won't
+	// start.
+	libs, sig, err := checkLibsUntilSignal(ctx, term, jobBinary, cfg.LibDir)
+	if err != nil {
+		return err
+	}
+	if sig != nil {
+		log.Info("stopped before serving", "signal", sig)
+		return nil
+	}
+	log.Info("the job binary loaded libkrun and libkrunfw", "libkrun", libs.libkrun, "libkrunfw", libs.libkrunfw, "lib_dir", libDirSetting(cfg.LibDir))
 	ready, err := parseReadyTimeout(testReadyTimeout)
 	if err != nil {
 		return err
@@ -316,15 +358,11 @@ func lookMkfs() (string, error) {
 	return filepath.Abs(path)
 }
 
-// writeJobBinary writes the embedded job binary to
+// writeJobBinary writes the job binary bin to
 // <dir>/runner-microvm-job-<first 12 hex of its sha256>, always afresh: a
 // temp file, fsync, rename, then fsync of dir. It then runs it once with
 // `version`, so a directory that can't execute fails startup.
-func writeJobBinary(ctx context.Context, dir string) (string, error) {
-	bin, err := payload.JobBinary()
-	if err != nil {
-		return "", err
-	}
+func writeJobBinary(ctx context.Context, dir string, bin []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -334,23 +372,131 @@ func writeJobBinary(ctx context.Context, dir string) (string, error) {
 	}
 	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(vctx, path, "version") //nolint:gosec // G204: the job binary the plugin just wrote
-	cmd.WaitDelay = time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out := &cappedBuffer{max: maxJobBinaryOutput}
+	if err := runJobBinary(vctx, path, out, out, "version"); err != nil {
 		return "", fmt.Errorf("run the job binary %s in %s, the state directory: %w: %s", path, dir, err, out)
 	}
 	return path, nil
 }
 
-// writeAgent writes the embedded agent to
+// runJobBinary runs the job binary at path with args until it exits, its
+// outputs on stdout and stderr, or kills it when ctx ends. It leads a process
+// group of its own, so a SIGINT a terminal sends the plugin's group doesn't
+// reach it, and ctx's end kills the whole group, whatever it started. It
+// gets Pdeathsig SIGKILL, so it dies with the plugin: this goroutine's OS
+// thread forks it and stays locked until it is reaped, since Pdeathsig fires
+// when the forking thread exits, not the process.
+func runJobBinary(ctx context.Context, path string, stdout, stderr io.Writer, args ...string) error {
+	cmd := exec.CommandContext(ctx, path, args...) //nolint:gosec // G204: the job binary the plugin just wrote
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// What the group started may hold the output pipes past the kill.
+	cmd.WaitDelay = time.Second
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return cmd.Run()
+}
+
+// libsTimeout bounds the job binary's check of the libraries: loading two
+// libraries takes milliseconds, but one on a stalled network mount must not
+// hang startup.
+const libsTimeout = 30 * time.Second
+
+// libFiles are the files the dynamic loader picked for libkrun and
+// libkrunfw.
+type libFiles struct {
+	libkrun, libkrunfw string
+}
+
+// The sonames the job binary's libs reports the files of.
+const (
+	libkrunSoname   = "libkrun.so.1"
+	libkrunfwSoname = "libkrunfw.so.5"
+)
+
+// maxJobBinaryOutput bounds what the plugin keeps of each of the job
+// binary's outputs at startup: a version, two lines of paths, or an error.
+const maxJobBinaryOutput = 64 << 10
+
+// checkLibsUntilSignal runs checkLibs, and ends it early at a signal from
+// term, which it then returns, with no error: a SIGINT or SIGTERM during the
+// check stops the plugin before it serves, as at any other point of startup.
+func checkLibsUntilSignal(ctx context.Context, term <-chan os.Signal, jobBinary, libDir string) (libFiles, os.Signal, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	got := make(chan os.Signal, 1)
+	var watch sync.WaitGroup
+	watch.Go(func() {
+		select {
+		case sig := <-term:
+			got <- sig
+			cancel()
+		case <-ctx.Done():
+		}
+	})
+	libs, err := checkLibs(ctx, jobBinary, libDir)
+	cancel()
+	watch.Wait()
+	select {
+	case sig := <-got:
+		return libFiles{}, sig, nil
+	default:
+		return libs, nil, err
+	}
+}
+
+// checkLibs runs the job binary jobBinary with `libs`, which loads libkrun
+// and libkrunfw as a VM child does, from libDir or, when it is empty, by
+// soname, and requires every function the VM child calls. It returns the
+// files the loader picked, or the job binary's error.
+func checkLibs(ctx context.Context, jobBinary, libDir string) (libFiles, error) {
+	where, args := "by soname", []string{"libs"}
+	if libDir != "" {
+		where, args = "from lib_dir "+libDir, append(args, libDir)
+	}
+	ctx, cancel := context.WithTimeout(ctx, libsTimeout)
+	defer cancel()
+	stdout, stderr := &cappedBuffer{max: maxJobBinaryOutput}, &cappedBuffer{max: maxJobBinaryOutput}
+	if err := runJobBinary(ctx, jobBinary, stdout, stderr, args...); err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w after %s", ctx.Err(), libsTimeout)
+		}
+		return libFiles{}, fmt.Errorf("load libkrun and libkrunfw %s: %w: %s", where, err, strings.TrimSpace(stderr.String()))
+	}
+	files := map[string]string{}
+	for line := range strings.Lines(stdout.String()) {
+		if name, file, ok := strings.Cut(strings.TrimSuffix(line, "\n"), "="); ok {
+			files[name] = file
+		}
+	}
+	libs := libFiles{libkrun: files[libkrunSoname], libkrunfw: files[libkrunfwSoname]}
+	if libs.libkrun == "" || libs.libkrunfw == "" {
+		return libFiles{}, fmt.Errorf("load libkrun and libkrunfw %s: the job binary's libs did not name both files: %q", where, stdout.String())
+	}
+	return libs, nil
+}
+
+// cappedBuffer keeps the first max bytes written to it, and drops the rest.
+type cappedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.buf.Len(); room > 0 {
+		b.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
+
+// writeAgent writes the agent to
 // <dir>/runner-microvm-agent-<first 12 hex of its sha256>, always afresh, the
 // same way as the job binary. Each VM's boot root holds a hard link to it, so
 // it is written once per plugin, not once per VM.
-func writeAgent(dir string) (string, error) {
-	agent, err := payload.Agent()
-	if err != nil {
-		return "", err
-	}
+func writeAgent(dir string, agent []byte) (string, error) {
 	path := hashedPath(dir, "runner-microvm-agent", agent)
 	// Executable by the guest's root, which runs it from the boot root.
 	if err := writeFileAtomic(dir, path, agent, 0o755); err != nil {

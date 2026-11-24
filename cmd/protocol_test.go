@@ -76,6 +76,9 @@ func TestWorkflows(t *testing.T) {
 		t.Fatalf("no workflows in %s", workflows)
 	}
 	p := startPlugin(t, buildPlugin(t))
+	// lib_dir names the dev shell's directory, and the libraries load from
+	// there.
+	wantLibsLoaded(t, p, devLibDir(t))
 	for _, file := range files {
 		name := strings.TrimSuffix(filepath.Base(file), ".yml")
 		t.Run(name, func(t *testing.T) {
@@ -410,15 +413,18 @@ type plugin struct {
 	// sock is its listen socket.
 	sock string
 	// config is its config file, and dirs the config file's directory
-	// keys, which every version of the file keeps.
+	// keys and other plugin-level keys, which every version of the file
+	// keeps.
 	config, dirs string
 	// state is its state directory.
 	state string
 	pid   int
 	log   *syncBuffer
 	// base holds its config file and directories, bin is its binary, and
-	// profiles its config file's profiles, for restart.
-	base, bin, profiles string
+	// setup its config file's settings and profiles and its environment,
+	// for restart.
+	base, bin string
+	setup     pluginSetup
 	// exited closes once its process has exited; the process is reaped
 	// only at cleanup, so exitStatus can read its zombie's status.
 	exited <-chan struct{}
@@ -480,14 +486,37 @@ func devLibDir(t *testing.T) string {
 // RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
 // fresh directory, sets lib_dir to the dev shell's libraries (devLibDir),
 // and holds profiles, the profiles section, and returns it once its listen
-// socket exists. On cleanup it stops the plugin with SIGTERM, which drains
-// it: the cleanups registered after this one, which run before it, have
-// removed every job, so it exits at once. A plugin still running 30 s
-// later, or at the timeout, is killed with each job process's group
-// (killWithJobs).
+// socket exists: startPluginSetup with that setup.
 func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
-	return launchPlugin(t, bin, profiles, false)
+	return startPluginSetup(t, bin, libDirSetup(t, profiles))
+}
+
+// libDirSetup is the setup of a plugin with lib_dir set to the dev shell's
+// libraries (devLibDir) and profiles, the profiles section.
+func libDirSetup(t *testing.T, profiles string) pluginSetup {
+	t.Helper()
+	return pluginSetup{settings: "lib_dir: " + devLibDir(t) + "\n", profiles: profiles}
+}
+
+// pluginSetup is the config file and environment a test's plugin starts
+// with.
+type pluginSetup struct {
+	// settings are the plugin-level keys besides the directories, and
+	// profiles the profiles section; every version of the file keeps
+	// settings.
+	settings, profiles string
+	// env is added to the test's environment.
+	env []string
+}
+
+// startPluginSetup runs the plugin's serve by path, as spawnPlugin does,
+// and returns it once its listen socket exists.
+func startPluginSetup(t *testing.T, bin string, setup pluginSetup) *plugin {
+	t.Helper()
+	p := spawnPlugin(t, bin, setup, false)
+	p.waitForSocket(t, false)
+	return p
 }
 
 // startRootPluginWith is startPluginWith with serve run as root, under
@@ -498,7 +527,9 @@ func startPluginWith(t *testing.T, bin, profiles string) *plugin {
 func startRootPluginWith(t *testing.T, bin, profiles string) *plugin {
 	t.Helper()
 	needRoot(t)
-	return launchPlugin(t, bin, profiles, true)
+	p := spawnPlugin(t, bin, libDirSetup(t, profiles), true)
+	p.waitForSocket(t, true)
+	return p
 }
 
 // needRoot skips t, saying why, when `sudo -n` can't run a command as
@@ -544,8 +575,14 @@ func killAsRoot(pid int) {
 	_ = asRoot(args...)
 }
 
-// launchPlugin runs the plugin's serve as startPluginWith says, as root
-// when root.
+// spawnPlugin runs the plugin's serve by path, as root when root, with
+// RUNNER_MICROVM_CONFIG naming a config file that puts its directories in a
+// fresh directory and holds setup's settings and profiles, and setup's env,
+// and returns at once. On cleanup it stops the plugin with SIGTERM, which
+// drains it: the cleanups registered after this one, which run before it,
+// have removed every job, so it exits at once. A plugin still running 30 s
+// later, or at the timeout, is killed with each job process's group
+// (killWithJobs).
 //
 // Its cleanup kills only processes it can name for sure: it never reaps
 // the plugin's process (or sudo's) before it is done killing. It waits for
@@ -555,27 +592,30 @@ func killAsRoot(pid int) {
 // while it is alive and they are still its own. Once it has exited, its
 // group, which a root plugin shares with sudo, is killed too, which reaches
 // a root plugin that outlived sudo; only then is it reaped.
-func launchPlugin(t *testing.T, bin, profiles string, root bool) *plugin {
+func spawnPlugin(t *testing.T, bin string, setup pluginSetup, root bool) *plugin {
 	t.Helper()
 	// Short, so the runner's client can connect to the socket by its path.
 	base, err := os.MkdirTemp("", "rm-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return launchPluginIn(t, base, bin, profiles, root)
+	return spawnPluginIn(t, base, bin, setup, root)
 }
 
 // restart runs the plugin p ran again, unprivileged, on the same config
-// file and directories, once p's own process has died: launchPluginIn on
-// p's base. The plugin binds its socket over the one p left.
+// file and directories, once p's own process has died: spawnPluginIn on
+// p's base, returning once its listen socket exists. The plugin binds its
+// socket over the one p left.
 func (p *plugin) restart(t *testing.T) *plugin {
 	t.Helper()
-	return launchPluginIn(t, p.base, p.bin, p.profiles, false)
+	q := spawnPluginIn(t, p.base, p.bin, p.setup, false)
+	q.waitForSocket(t, false)
+	return q
 }
 
-// launchPluginIn is launchPlugin with its config file and directories in
+// spawnPluginIn is spawnPlugin with its config file and directories in
 // base, which its cleanup deletes.
-func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin {
+func spawnPluginIn(t *testing.T, base, bin string, setup pluginSetup, root bool) *plugin {
 	t.Helper()
 	remove := func() error { return removeAll(base) }
 	kill := killWithJobs
@@ -589,16 +629,16 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 	runtime := filepath.Join(base, "runtime")
 	sock := filepath.Join(runtime, "runner-microvm.sock")
 	cfg := filepath.Join(base, "config.yaml")
-	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\nlib_dir: %s\n",
-		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), runtime, devLibDir(t))
-	if err := os.WriteFile(cfg, []byte(dirs+profiles), 0o600); err != nil {
+	dirs := fmt.Sprintf("listen: unix://%s\nstate_dir: %s\ncache_dir: %s\nruntime_dir: %s\n",
+		sock, filepath.Join(base, "state"), filepath.Join(base, "cache"), runtime) + setup.settings
+	if err := os.WriteFile(cfg, []byte(dirs+setup.profiles), 0o600); err != nil {
 		_ = os.RemoveAll(base)
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	log := &syncBuffer{}
 	cmd := exec.CommandContext(ctx, bin, "serve")
-	cmd.Env = append(os.Environ(), "RUNNER_MICROVM_CONFIG="+cfg)
+	cmd.Env = append(append(os.Environ(), setup.env...), "RUNNER_MICROVM_CONFIG="+cfg)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if root {
 		// The test's own runtime directory, so it can reach the socket
@@ -608,8 +648,8 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 			_ = os.RemoveAll(base)
 			t.Fatal(err)
 		}
-		cmd = exec.CommandContext(ctx, "sudo", "-n", "env", "-i", "PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME"),
-			"RUNNER_MICROVM_CONFIG="+cfg, bin, "serve")
+		argv := append([]string{"-n", "env", "-i", "PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, setup.env...)
+		cmd = exec.CommandContext(ctx, "sudo", append(argv, "RUNNER_MICROVM_CONFIG="+cfg, bin, "serve")...)
 		// A session of its own has no terminal, so sudo starts no pty
 		// and runs the plugin in its own process group, the one sudo
 		// leads, rather than in a new session.
@@ -670,40 +710,46 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 			t.Error(err)
 		}
 	})
-	// A socket a dead plugin left may be at sock, which the new one binds
-	// over, and the new one can have the inode number the deleted one had,
-	// so the wait is for health to answer SERVING, which only a live plugin
-	// does. A root plugin's base is fresh: its socket is the new one, which
-	// the test makes its own to connect.
+	return &plugin{
+		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
+		base: base, bin: bin, setup: setup, exited: exited,
+	}
+}
+
+// waitForSocket waits until the plugin p listens on its socket, failing t
+// if p exits first or 30 s pass. A root plugin's socket is made 0666 first.
+//
+// A socket a dead plugin left may be at p.sock, which p binds over, and p's
+// can get the inode number of the one deleted, so the wait is for health to
+// answer SERVING, which only a live plugin does. A root plugin's base is
+// fresh: the first socket there is its own.
+func (p *plugin) waitForSocket(t *testing.T, root bool) {
+	t.Helper()
 	chmodded := !root
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if fi, err := os.Lstat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		if fi, err := os.Lstat(p.sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
 			if !chmodded {
 				// It is root's, mode 0660 (internal/plugin's listen),
 				// and the test isn't root.
-				if err := asRoot("chmod", "0666", sock); err != nil {
+				if err := asRoot("chmod", "0666", p.sock); err != nil {
 					t.Fatal(err)
 				}
 				chmodded = true
 			}
-			if serving(sock) {
+			if serving(p.sock) {
 				break
 			}
 		}
 		select {
-		case <-exited:
-			t.Fatalf("the plugin exited at startup:\n%s", log.String())
+		case <-p.exited:
+			t.Fatalf("the plugin exited at startup (%v):\n%s", p.exitStatus(t), p.log.String())
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no plugin serving at %s\n%s", sock, log.String())
+			t.Fatalf("no plugin serving at %s\n%s", p.sock, p.log.String())
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	return &plugin{
-		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
-		base: base, bin: bin, profiles: profiles, exited: exited,
 	}
 }
 

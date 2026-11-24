@@ -3,13 +3,18 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"syscall"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	"golang.org/x/sys/unix"
 )
 
 // The libraries' names: the sonames of the minimum versions, libkrun's 1.x
@@ -37,24 +42,64 @@ type krun struct {
 	startEnter           func(ctx uint32) int32
 }
 
-// load opens libkrun from dir, or by soname when dir is empty. libkrun
-// opens libkrunfw by its soname, so from dir libkrunfw is opened first:
-// libkrun's own lookup then finds it already loaded.
-func load(dir string) (krun, error) {
-	name := libkrun
+// Files are the files the dynamic loader picked for libkrun and libkrunfw,
+// as it names them: from lib_dir, the directory's own entries, symlinks
+// unresolved.
+type Files struct {
+	Libkrun, Libkrunfw string
+}
+
+// fwSymbol is the libkrunfw function libkrun calls for the guest kernel: a
+// file without it is not libkrunfw.
+const fwSymbol = "krunfw_get_kernel"
+
+// load opens libkrunfw and libkrun from dir, and only from there, or by
+// soname through the system's dynamic loader when dir is empty, and
+// requires every libkrun function the VM child calls. It returns the
+// libraries' files too.
+//
+// libkrun needs libkrunfw by its soname, so from dir libkrunfw is opened
+// first: libkrun's own need is then met by the one already loaded, never
+// by a search of the system. By soname, libkrun is opened first, so that
+// libkrunfw is the one libkrun's need picked, which a search from libkrun
+// finds through libkrun's own run path; opening libkrunfw by soname then
+// returns that one.
+func load(dir string) (krun, Files, error) {
+	var hk, hfw uintptr
+	var err error
 	if dir != "" {
-		if _, err := purego.Dlopen(filepath.Join(dir, libkrunfw), purego.RTLD_NOW|purego.RTLD_GLOBAL); err != nil {
-			return krun{}, fmt.Errorf("%s: %w", filepath.Join(dir, libkrunfw), err)
+		if hfw, err = open(filepath.Join(dir, libkrunfw)); err != nil {
+			return krun{}, Files{}, fmt.Errorf("%s in lib_dir %s: %w", libkrunfw, dir, err)
 		}
-		name = filepath.Join(dir, libkrun)
+		if hk, err = open(filepath.Join(dir, libkrun)); err != nil {
+			return krun{}, Files{}, fmt.Errorf("%s in lib_dir %s: %w", libkrun, dir, err)
+		}
+		// libkrun's libkrunfw is the one loaded by soname: it must be
+		// dir's, or libkrun took another from the system.
+		if h, err := purego.Dlopen(libkrunfw, purego.RTLD_NOW|rtldNoload); err != nil || h != hfw {
+			return krun{}, Files{}, fmt.Errorf("%s in lib_dir %s is not the %s that %s loads: is its soname %s?", libkrunfw, dir, libkrunfw, libkrun, libkrunfw)
+		}
+	} else {
+		if hk, err = open(libkrun); err != nil {
+			return krun{}, Files{}, fmt.Errorf("%s by soname: %w", libkrun, err)
+		}
+		if hfw, err = open(libkrunfw); err != nil {
+			return krun{}, Files{}, fmt.Errorf("%s by soname: %w", libkrunfw, err)
+		}
 	}
-	h, err := purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_GLOBAL)
-	if err != nil {
-		return krun{}, fmt.Errorf("%s: %w", name, err)
+	var files Files
+	if files.Libkrun, err = loadedFile(hk); err != nil {
+		return krun{}, Files{}, fmt.Errorf("%s: %w", libkrun, err)
+	}
+	if files.Libkrunfw, err = loadedFile(hfw); err != nil {
+		return krun{}, Files{}, fmt.Errorf("%s: %w", libkrunfw, err)
+	}
+	if _, err := purego.Dlsym(hfw, fwSymbol); err != nil {
+		return krun{}, Files{}, fmt.Errorf("%s (%s) is not libkrunfw: it lacks %s: %w", libkrunfw, files.Libkrunfw, fwSymbol, err)
 	}
 	var k krun
 	var setExec func(ctx uint32, path string, argv, envp unsafe.Pointer) int32
-	for sym, fn := range map[string]any{
+	funcs := map[string]any{
 		"krun_set_log_level":          &k.setLogLevel,
 		"krun_create_ctx":             &k.createCtx,
 		"krun_set_vm_config":          &k.setVMConfig,
@@ -67,11 +112,20 @@ func load(dir string) (krun, error) {
 		"krun_set_console_output":     &k.setConsoleOutput,
 		"krun_set_exec":               &setExec,
 		"krun_start_enter":            &k.startEnter,
-	} {
-		if _, err := purego.Dlsym(h, sym); err != nil {
-			return krun{}, fmt.Errorf("%s: %w", name, err)
+	}
+	// Every missing function is named, in order, not only the first.
+	var missing []string
+	for _, sym := range slices.Sorted(maps.Keys(funcs)) {
+		if _, err := purego.Dlsym(hk, sym); err != nil {
+			missing = append(missing, sym)
 		}
-		purego.RegisterLibFunc(fn, h, sym)
+	}
+	if len(missing) > 0 {
+		return krun{}, Files{}, fmt.Errorf("%s (%s) lacks %s: runner-microvm needs libkrun's 1.x API, built with block and network support",
+			libkrun, files.Libkrun, strings.Join(missing, ", "))
+	}
+	for sym, fn := range funcs {
+		purego.RegisterLibFunc(fn, hk, sym)
 	}
 	k.setExec = func(ctx uint32, path string, argv, envp []string) int32 {
 		a, e := cStrings(argv), cStrings(envp)
@@ -79,7 +133,44 @@ func load(dir string) (krun, error) {
 		defer runtime.KeepAlive(e)
 		return setExec(ctx, path, unsafe.Pointer(&a[0]), unsafe.Pointer(&e[0])) //nolint:gosec // G103: a NULL-terminated char*[] for C; kept alive for the call
 	}
-	return k, nil
+	return k, files, nil
+}
+
+// rtldNoload makes dlopen return a library already loaded, and load none
+// (RTLD_NOLOAD, <dlfcn.h>).
+const rtldNoload = 0x4
+
+// open opens the library name, a path or a soname, binding every symbol at
+// once, so a library that can't be linked fails here, not at a call.
+func open(name string) (uintptr, error) {
+	return purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+}
+
+// rtldDILinkmap is dlinfo's request for the library's struct link_map
+// (RTLD_DI_LINKMAP, <dlfcn.h>).
+const rtldDILinkmap = 2
+
+// linkMap is the start of glibc's and musl's struct link_map, whose layout
+// <link.h> makes public: the load address, then the file's name.
+type linkMap struct {
+	_    uintptr
+	name *byte
+}
+
+// loadedFile returns the file the dynamic loader loaded for the library
+// handle h, as the loader names it (dlinfo's link map).
+func loadedFile(h uintptr) (string, error) {
+	sym, err := purego.Dlsym(purego.RTLD_DEFAULT, "dlinfo")
+	if err != nil {
+		return "", fmt.Errorf("find dlinfo: %w", err)
+	}
+	var dlinfo func(handle uintptr, request int32, info unsafe.Pointer) int32
+	purego.RegisterFunc(&dlinfo, sym)
+	var lm *linkMap
+	if dlinfo(h, rtldDILinkmap, unsafe.Pointer(&lm)) != 0 || lm == nil || lm.name == nil { //nolint:gosec // G103: dlinfo's out parameter, a struct link_map *
+		return "", errors.New("dlinfo found no link map")
+	}
+	return unix.BytePtrToString(lm.name), nil
 }
 
 // cStrings returns ss as a NULL-terminated array of NUL-terminated strings.
