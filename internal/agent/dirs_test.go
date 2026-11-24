@@ -31,7 +31,7 @@ func TestMakeDirCreatesWhatTheImageLacks(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	for _, d := range testGuestDirs() {
-		if err := (kernel{}).makeDir(root, d.GetPath(), d.GetMode()); err != nil {
+		if _, err := (kernel{}).makeDir(root, d.GetPath(), d.GetMode()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -43,8 +43,8 @@ func TestMakeDirCreatesWhatTheImageLacks(t *testing.T) {
 	}
 }
 
-// What the image has there is left as it is: a directory of another mode
-// and a file.
+// What the image has there is left as it is: a directory of another mode,
+// whose place is returned, and a file, for which none is.
 func TestMakeDirLeavesWhatTheImageHas(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -54,9 +54,9 @@ func TestMakeDirLeavesWhatTheImageHas(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("image"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"/tmp", "/file"} {
-		if err := (kernel{}).makeDir(root, p, 0o1777); err != nil {
-			t.Errorf("%s: %v", p, err)
+	for p, want := range map[string]string{"/tmp": "/tmp", "/file": ""} {
+		if place, err := (kernel{}).makeDir(root, p, 0o1777); err != nil || place != want {
+			t.Errorf("%s: %q, %v; want %q", p, place, err, want)
 		}
 	}
 	wantDir(t, filepath.Join(root, "tmp"), 0o700)
@@ -70,6 +70,7 @@ func TestMakeDirLeavesWhatTheImageHas(t *testing.T) {
 // without /run puts the act path at /run/act. A relative target is taken
 // from where the link's directory really is, a chain of links is followed
 // to its end, and neither an absolute host path nor `..` leaves the root.
+// Each returns where it landed.
 func TestMakeDirFollowsASymlinkToNothing(t *testing.T) {
 	t.Parallel()
 	outside := t.TempDir()
@@ -90,9 +91,21 @@ func TestMakeDirFollowsASymlinkToNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for p, mode := range map[string]uint32{"/var/run/act": 0o777, "/opt/hostedtoolcache": 0o777, "/host": 0o1777, "/up/x": 0o777} {
-		if err := (kernel{}).makeDir(root, p, mode); err != nil {
+	for p, tc := range map[string]struct {
+		mode  uint32
+		place string
+	}{
+		"/var/run/act":         {0o777, "/run/act"},
+		"/opt/hostedtoolcache": {0o777, "/srv/opt/hostedtoolcache"},
+		"/host":                {0o1777, outside + "/new"},
+		"/up/x":                {0o777, "/escape/x"},
+	} {
+		place, err := (kernel{}).makeDir(root, p, tc.mode)
+		if err != nil {
 			t.Fatalf("%s: %v", p, err)
+		}
+		if place != tc.place {
+			t.Errorf("%s lands at %s, want %s", p, place, tc.place)
 		}
 	}
 	wantDir(t, filepath.Join(root, "run"), 0o755)
@@ -124,7 +137,7 @@ func TestMakeDirRefusesASymlinkLoop(t *testing.T) {
 	if err := os.Symlink("/a", filepath.Join(root, "b")); err != nil {
 		t.Fatal(err)
 	}
-	err := (kernel{}).makeDir(root, "/a/x", 0o777)
+	_, err := (kernel{}).makeDir(root, "/a/x", 0o777)
 	if err == nil || !strings.Contains(err.Error(), "directory /a/x") {
 		t.Errorf("err = %v, want one naming /a/x", err)
 	}
@@ -154,7 +167,7 @@ func TestMakeDirRefusesTheAPIMounts(t *testing.T) {
 		if err := os.Symlink(tc.target, filepath.Join(root, tc.link)); err != nil {
 			t.Fatal(err)
 		}
-		err := (kernel{}).makeDir(root, tc.guestPath, 0o777)
+		_, err := (kernel{}).makeDir(root, tc.guestPath, 0o777)
 		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
 		}
@@ -168,7 +181,7 @@ func TestMakeDirRefusesTheAPIMounts(t *testing.T) {
 	if err := os.Symlink("/devices", filepath.Join(root, "tmp")); err != nil {
 		t.Fatal(err)
 	}
-	if err := (kernel{}).makeDir(root, "/tmp", 0o1777); err != nil {
+	if _, err := (kernel{}).makeDir(root, "/tmp", 0o1777); err != nil {
 		t.Errorf("/devices: %v", err)
 	}
 	wantDir(t, filepath.Join(root, "devices"), 0o777|fs.ModeSticky)
@@ -194,7 +207,7 @@ func TestMakeDirStaysInTheRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"/var/run/act", "/abs/x"} {
-		if err := (kernel{}).makeDir(root, p, 0o777); err != nil {
+		if _, err := (kernel{}).makeDir(root, p, 0o777); err != nil {
 			t.Fatalf("%s: %v", p, err)
 		}
 	}
@@ -216,7 +229,7 @@ func TestMakeDirRefusesAFileAbove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "opt"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := (kernel{}).makeDir(root, "/opt/hostedtoolcache", 0o777)
+	_, err := (kernel{}).makeDir(root, "/opt/hostedtoolcache", 0o777)
 	if err == nil || !strings.Contains(err.Error(), "/opt/hostedtoolcache") || !strings.Contains(err.Error(), "/opt is not a directory") {
 		t.Errorf("err = %v, want one naming /opt/hostedtoolcache and /opt", err)
 	}

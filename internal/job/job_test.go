@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/protobuf/encoding/protodelim"
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
 )
 
 // fakeJobBinary writes a shell script standing in for the job binary: run
@@ -246,6 +248,84 @@ func TestRunFailsOnTheScratchDisk(t *testing.T) {
 			}
 			if !tt.leftAlone && !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("a failed scratch disk is left behind: %v", err)
+			}
+		})
+	}
+}
+
+// The VM child's spec carries each mount's source, tag and read-write flag,
+// in the job spec's order (STO-1, STO-2).
+func TestRunPassesTheMounts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	saved := filepath.Join(dir, "vm-child-spec")
+	bin := filepath.Join(dir, "runner-microvm-job")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat > "+saved+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools, data := filepath.Join(dir, "tools"), filepath.Join(dir, "data")
+	for _, d := range []string{tools, data} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := testJobSpec(t, bin)
+	spec.Vms[0].Mounts = []*jobv1.Mount{{Source: tools, Tag: "mount0"}, {Source: data, Tag: "mount1"}}
+	if _, err := runJob(t, spec); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	child := &vmv1.Spec{}
+	if err := protodelim.UnmarshalFrom(bufio.NewReader(f), child); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range child.GetMounts() {
+		got = append(got, fmt.Sprintf("%s %s rw=%v", m.GetSource(), m.GetTag(), m.GetReadWrite()))
+	}
+	if want := []string{tools + " mount0 rw=false", data + " mount1 rw=false"}; !slices.Equal(got, want) {
+		t.Errorf("the VM child's mounts are %q, want %q", got, want)
+	}
+}
+
+// A mount source that is gone, or is no longer a directory, by Start fails
+// the job before the scratch disk is made and the VM child starts, naming
+// the source (PROTO-10).
+func TestRunFailsOnAMountSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		source, want string
+	}{
+		"missing":         {filepath.Join(dir, "missing"), "does not exist"},
+		"not a directory": {file, "is not a directory"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			started := filepath.Join(t.TempDir(), "started")
+			spec := testJobSpec(t, fakeJobBinary(t, "touch "+started))
+			spec.Vms[0].Mounts = []*jobv1.Mount{{Source: dir, Tag: "mount0"}, {Source: tt.source, Tag: "mount1"}}
+			events, err := runJob(t, spec)
+			prefix := "mount " + tt.source + ": " + tt.want
+			if err == nil || !strings.Contains(err.Error(), prefix) {
+				t.Fatalf("err = %v, want one beginning %q", err, prefix)
+			}
+			events = afterNetworkUp(t, events)
+			if len(events) != 1 || !strings.HasPrefix(events[0].GetFailed().GetReason(), prefix) || events[0].GetFailed().GetBug() {
+				t.Fatalf("events = %v, want one Failed beginning %q", events, prefix)
+			}
+			for _, p := range []string{started, spec.GetVms()[0].GetScratchDisk()} {
+				if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s: %v, want nothing there", p, err)
+				}
 			}
 		})
 	}

@@ -16,31 +16,49 @@ const maxLinks = 40
 
 // makeDir creates guestPath in the job's root at root, root-owned, with
 // mode, when the image has nothing there, and leaves whatever the image has
-// as it is: a directory of its own mode, a file. Its missing parents are
+// as it is: a directory of its own mode, a file. It returns where the
+// directory lands, or "" when the image has something else there. Its missing parents are
 // created 0755. It resolves inside root, as a scratch path does, so a
 // symlink in the image, such as /var/run -> /run, lands at its target in
 // the job's root, never on the agent's own filesystem; a symlink to nothing
 // is followed, and its target created, with its missing parents. A
 // directory that lands in /proc, /sys or /dev, or would be created there,
 // fails, naming where.
-func (kernel) makeDir(root, guestPath string, mode uint32) error {
+func (kernel) makeDir(root, guestPath string, mode uint32) (string, error) {
 	rootFd, err := syscall.Open(root, oPath|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return fmt.Errorf("directory %s: open the root %s: %w", guestPath, root, err)
+		return "", fmt.Errorf("directory %s: open the root %s: %w", guestPath, root, err)
 	}
 	defer func() { _ = syscall.Close(rootFd) }()
-	if err := makeDirIn(rootFd, guestPath, mode); err != nil {
-		return fmt.Errorf("directory %s: %w", guestPath, err)
+	place, err := makeDirIn(rootFd, guestPath, mode)
+	if err != nil {
+		return "", fmt.Errorf("directory %s: %w", guestPath, err)
 	}
-	return nil
+	return place, nil
 }
 
-// makeDirIn is makeDir in the directory rootFd. It walks p a part at a
-// time, each looked up from rootFd inside it, so every symlink resolves
-// inside the root. A missing part is created; a symlink to nothing starts
-// the walk again at its target, which, when relative, is taken from where
-// the link's directory really is.
-func makeDirIn(rootFd int, p string, mode uint32) error {
+// makeDirIn is makeDir in the directory rootFd.
+func makeDirIn(rootFd int, p string, mode uint32) (string, error) {
+	fd, place, err := walkDir(rootFd, p, mode, false)
+	if fd >= 0 {
+		_ = syscall.Close(fd)
+	}
+	return place, err
+}
+
+// walkDir finds the directory p in the directory rootFd, creating it when
+// it is missing, root-owned, with mode, and any missing parent with 0755,
+// and returns an O_PATH descriptor of it and where it lands in rootFd. It
+// walks p a part at a time, each looked up from rootFd inside it, so every
+// symlink resolves inside the root. A missing part is created; a symlink to
+// nothing starts the walk again at its target, which, when relative, is
+// taken from where the link's directory really is. It crosses mounts, so it
+// reaches a directory under a scratch path. Something that is not a
+// directory above the last part is an error naming it; at the last part it
+// is an error too when strict, and otherwise left alone, with no
+// descriptor (-1) and no error. A directory that lands in /proc, /sys or
+// /dev, or would be created there, is an error naming where.
+func walkDir(rootFd int, p string, mode uint32, strict bool) (int, string, error) {
 	parts := pathParts(p)
 	parent := rootFd
 	closeParent := func() {
@@ -57,16 +75,16 @@ func makeDirIn(rootFd int, p string, mode uint32) error {
 		if errors.Is(err, syscall.ENOENT) {
 			target, isLink, err := readlinkIn(parent, parts[i])
 			if err != nil {
-				return fmt.Errorf("%s: %w", prefix, err)
+				return -1, "", fmt.Errorf("%s: %w", prefix, err)
 			}
 			if isLink {
 				if links++; links > maxLinks {
-					return fmt.Errorf("%s: %w", prefix, syscall.ELOOP)
+					return -1, "", fmt.Errorf("%s: %w", prefix, syscall.ELOOP)
 				}
 				if !strings.HasPrefix(target, "/") {
 					dir, err := placeOf(rootFd, parent)
 					if err != nil {
-						return fmt.Errorf("%s: %w", prefix, err)
+						return -1, "", fmt.Errorf("%s: %w", prefix, err)
 					}
 					target = dir + "/" + target
 				}
@@ -76,26 +94,26 @@ func makeDirIn(rootFd int, p string, mode uint32) error {
 				continue
 			}
 			if err := createIn(rootFd, parent, parts[i], last, mode); err != nil {
-				return err
+				return -1, "", err
 			}
 			// Open what was just made on the next turn.
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("%s: %w", prefix, err)
+			return -1, "", fmt.Errorf("%s: %w", prefix, err)
 		}
 		var st syscall.Stat_t
 		if err := syscall.Fstat(fd, &st); err != nil {
 			_ = syscall.Close(fd)
-			return fmt.Errorf("%s: %w", prefix, err)
+			return -1, "", fmt.Errorf("%s: %w", prefix, err)
 		}
 		if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
 			_ = syscall.Close(fd)
-			if last {
+			if last && !strict {
 				// The image has something else there.
-				return nil
+				return -1, "", nil
 			}
-			return fmt.Errorf("%s is not a directory in the image", prefix)
+			return -1, "", fmt.Errorf("%s is not a directory in the image", prefix)
 		}
 		closeParent()
 		parent = fd
@@ -105,12 +123,24 @@ func makeDirIn(rootFd int, p string, mode uint32) error {
 	// decides.
 	at, err := placeOf(rootFd, parent)
 	if err != nil {
-		return err
+		return -1, "", err
 	}
 	if api, ok := inAPIMount(at); ok {
-		return fmt.Errorf("lands at %s, in %s", at, api)
+		return -1, "", fmt.Errorf("lands at %s, in %s", at, api)
 	}
-	return nil
+	if parent == rootFd {
+		// p names the root itself: a descriptor of its own, since the
+		// caller closes it.
+		fd, err := syscall.Dup(rootFd)
+		if err != nil {
+			return -1, "", err
+		}
+		syscall.CloseOnExec(fd)
+		return fd, at, nil
+	}
+	fd := parent
+	parent = rootFd // the deferred close leaves fd open
+	return fd, at, nil
 }
 
 // createIn creates name in the directory parent, root-owned: with mode when

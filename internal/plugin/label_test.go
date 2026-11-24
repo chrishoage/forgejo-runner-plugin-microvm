@@ -3,6 +3,7 @@
 package plugin
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -182,6 +183,65 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 		if req := acquiredBy(t, cache, tc.id); req.ForcePull != tc.want.ForcePull {
 			t.Errorf("job %s: Acquire(%+v); want ForcePull %v", tc.id, req, tc.want.ForcePull)
 		}
+	}
+}
+
+// Start shares each of the job's profile's mounts read-only: in the job
+// spec its source and the tag mount<i>, i its position in the list, and in
+// the boot config that tag and its target (STO-1, STO-2). The job's copy,
+// taken at Create, shares nothing with the profiles a reload swaps. Only the
+// operator chooses them: backend options naming volumes or mounts add none,
+// and a workflow's services, which could carry their own, fail Create
+// (STO-11).
+func TestStartSharesTheProfilesMounts(t *testing.T) {
+	t.Parallel()
+	launcher := &fakeLauncher{}
+	srv := newTestServer(t, &fakeCache{}, launcher)
+	ms := []config.Mount{{Source: "/srv/tools", Target: "/opt/tools"}, {Source: "/srv/data", Target: "/var/lib/docker/data"}}
+	srv.SetProfiles(config.Profiles{"tools": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1, Mounts: ms}})
+	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
+	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
+		LabelArg:       testImage + ";profile=tools",
+		BackendOptions: map[string]string{"volumes": "/etc:/host-etc", "mounts": "/:/host", "binds": "/root:/root:rw"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms[0].Target = "/changed"
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	vm := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()[0]
+	var shares, mounted []string
+	for _, m := range vm.GetMounts() {
+		shares = append(shares, fmt.Sprintf("%s %s rw=%v", m.GetSource(), m.GetTag(), m.GetReadWrite()))
+	}
+	for _, m := range vm.GetBoot().GetMounts() {
+		mounted = append(mounted, fmt.Sprintf("%s %s rw=%v", m.GetTag(), m.GetTarget(), m.GetReadWrite()))
+	}
+	if want := []string{"/srv/tools mount0 rw=false", "/srv/data mount1 rw=false"}; !slices.Equal(shares, want) {
+		t.Errorf("job spec mounts %q, want %q", shares, want)
+	}
+	if want := []string{"mount0 /opt/tools rw=false", "mount1 /var/lib/docker/data rw=false"}; !slices.Equal(mounted, want) {
+		t.Errorf("boot config mounts %q, want %q", mounted, want)
+	}
+	// A job with services fails Create, so no service brings storage of its
+	// own (STO-11).
+	if _, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
+		LabelArg: testImage + ";profile=tools", Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}},
+	}); status.Code(err) != codes.Unimplemented {
+		t.Errorf("Create with services = %v; want Unimplemented", err)
+	}
+	// A profile without mounts shares none.
+	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	if vm := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()[0]; len(vm.GetMounts()) != 0 || len(vm.GetBoot().GetMounts()) != 0 {
+		t.Errorf("no mounts: job spec %v, boot config %v", vm.GetMounts(), vm.GetBoot().GetMounts())
 	}
 }
 

@@ -38,6 +38,11 @@ const rootTag = "/dev/root"
 // scratchBlockID is the scratch disk's block id in libkrun.
 const scratchBlockID = "scratch"
 
+// maxTag is the longest virtiofs tag libkrun takes: it copies a tag into a
+// 36-byte buffer with no length check, and panics when the VM starts on a
+// longer one.
+const maxTag = 36
+
 // libkrun's log level: warnings and errors, on the VM child's stderr.
 const krunLogWarn = 2
 
@@ -94,6 +99,11 @@ func boot(lib krun, spec *vmv1.Spec) error {
 	if spec.GetLayerTag() == "" {
 		return fmt.Errorf("no layer tag")
 	}
+	for _, m := range spec.GetMounts() {
+		if m.GetTag() == "" || len(m.GetTag()) > maxTag {
+			return fmt.Errorf("mount %s: tag %q: libkrun takes 1 to %d bytes", m.GetSource(), m.GetTag(), maxTag)
+		}
+	}
 	mac, err := net.ParseMAC(spec.GetGuestMac())
 	if err != nil || len(mac) != 6 {
 		return fmt.Errorf("guest MAC %q: not an Ethernet address", spec.GetGuestMac())
@@ -106,10 +116,20 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		return err
 	}
 	ctx := uint32(r) //nolint:gosec // G115: checked non-negative above
-	for _, s := range []struct {
+	type call struct {
 		name string
 		call func() int32
-	}{
+	}
+	// Each mount is a share of its own, read-only on the host's side
+	// unless it is read-write, so the guest can't write a read-only one
+	// even after remounting it read-write (STO-2). No DAX window.
+	var mounts []call
+	for _, m := range spec.GetMounts() {
+		mounts = append(mounts, call{"krun_add_virtiofs3 " + m.GetTag(), func() int32 {
+			return lib.addVirtiofs3(ctx, m.GetTag(), m.GetSource(), 0, !m.GetReadWrite())
+		}})
+	}
+	calls := []call{
 		{"krun_set_vm_config", func() int32 { return lib.setVMConfig(ctx, vcpus, spec.GetMemoryMib()) }},
 		// The boot root is the VM's root, and the layer link directory
 		// a share of its own, both read-only on the host's side, so the
@@ -117,6 +137,9 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		// (IMG-9). No DAX window.
 		{"krun_add_virtiofs3 " + rootTag, func() int32 { return lib.addVirtiofs3(ctx, rootTag, spec.GetRootDir(), 0, true) }},
 		{"krun_add_virtiofs3 " + spec.GetLayerTag(), func() int32 { return lib.addVirtiofs3(ctx, spec.GetLayerTag(), spec.GetLayerDir(), 0, true) }},
+	}
+	calls = append(calls, mounts...)
+	calls = append(calls, []call{
 		// The scratch disk is the first block device, /dev/vda,
 		// read-write (VM-5).
 		{"krun_add_disk", func() int32 { return lib.addDisk(ctx, scratchBlockID, spec.GetScratchDisk(), false) }},
@@ -138,7 +161,8 @@ func boot(lib krun, spec *vmv1.Spec) error {
 		{"krun_set_console_output", func() int32 { return lib.setConsoleOutput(ctx, spec.GetConsole()) }},
 		{"krun_set_exec", func() int32 { return lib.setExec(ctx, AgentPath, nil, agentEnv) }},
 		{"krun_start_enter", func() int32 { return lib.startEnter(ctx) }},
-	} {
+	}...)
+	for _, s := range calls {
 		if err := check(s.name, s.call()); err != nil {
 			return err
 		}

@@ -19,11 +19,15 @@ import (
 
 // fakeMounter records the boot's calls, and fails the first whose
 // description contains fail. A scratch path resolves to itself, root-owned,
-// mode 0755, unless image names its target.
+// mode 0755, unless image names its target; a mount's target resolves to
+// itself unless targets names where it lands, and a guest directory lands
+// at itself unless dirs names where it lands.
 type fakeMounter struct {
-	calls []string
-	fail  string
-	image map[string]scratchTarget
+	calls   []string
+	fail    string
+	image   map[string]scratchTarget
+	targets map[string]string
+	dirs    map[string]string
 }
 
 func (m *fakeMounter) do(call string) error {
@@ -57,8 +61,24 @@ func (m *fakeMounter) bindScratch(root, dir string, t scratchTarget) error {
 	return m.do(fmt.Sprintf("scratch %s at %s %d:%d:%o from %s in %s", t.guestPath, t.resolved, t.uid, t.gid, t.mode, dir, root))
 }
 
-func (m *fakeMounter) makeDir(root, guestPath string, mode uint32) error {
-	return m.do(fmt.Sprintf("dir %s %o in %s", guestPath, mode, root))
+func (m *fakeMounter) makeDir(root, guestPath string, mode uint32) (string, error) {
+	place, ok := m.dirs[guestPath]
+	if !ok {
+		place = guestPath
+	}
+	return place, m.do(fmt.Sprintf("dir %s %o in %s", guestPath, mode, root))
+}
+
+func (m *fakeMounter) resolveTarget(root, guestPath string) (string, error) {
+	place, ok := m.targets[guestPath]
+	if !ok {
+		place = guestPath
+	}
+	return place, m.do(fmt.Sprintf("resolve target %s in %s", guestPath, root))
+}
+
+func (m *fakeMounter) mountShare(root, tag, place string, readOnly bool) error {
+	return m.do(fmt.Sprintf("share %s at %s ro=%v in %s", tag, place, readOnly, root))
 }
 
 func (m *fakeMounter) moveRoot(root string) error { return m.do("move root " + root) }
@@ -237,15 +257,165 @@ func TestBootRefusesAScratchPathLandingBadly(t *testing.T) {
 	}
 }
 
+// The mounts are made after the scratch paths and the second pass of the
+// act path, tool cache and temp directory, just before the root moves:
+// every target is resolved first, then each is mounted by its tag, at
+// where it lands, in the list's order, read-only unless the entry is
+// read-write (STO-2, STO-6).
+func TestBootMakesTheMounts(t *testing.T) {
+	t.Parallel()
+	cfg := testBootConfig()
+	cfg.ScratchPaths = []string{"/var/lib/docker"}
+	cfg.GuestDirs = testGuestDirs()
+	// The image has /link -> /real.
+	cfg.Mounts = []*agentv1.Mount{
+		{Tag: "mount0", Target: "/real/x"},
+		{Tag: "mount1", Target: "/var/lib/docker/tools"},
+		{Tag: "mount2", Target: "/link/sub", ReadWrite: true},
+	}
+	m := &fakeMounter{targets: map[string]string{"/link/sub": "/real/sub"}}
+	if err := boot(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	const r = "/dev/.runner-microvm/root"
+	want := []string{
+		"scratch /var/lib/docker at /var/lib/docker 0:0:755 from /dev/.runner-microvm/scratch/paths/0 in " + r,
+		"dir /var/run/act 777 in " + r,
+		"dir /opt/hostedtoolcache 777 in " + r,
+		"dir /tmp 1777 in " + r,
+		"resolve target /real/x in " + r,
+		"resolve target /var/lib/docker/tools in " + r,
+		"resolve target /link/sub in " + r,
+		"share mount0 at /real/x ro=true in " + r,
+		"share mount1 at /var/lib/docker/tools ro=true in " + r,
+		"share mount2 at /real/sub ro=false in " + r,
+		"move root " + r,
+	}
+	if got := m.calls[len(m.calls)-len(want):]; !slices.Equal(got, want) {
+		t.Errorf("last calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Without scratch paths, the mounts still come after the directories.
+	cfg = testBootConfig()
+	cfg.GuestDirs = testGuestDirs()
+	cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/opt/tools"}}
+	m = &fakeMounter{}
+	if err := boot(m, cfg); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{
+		"dir /tmp 1777 in " + r,
+		"resolve target /opt/tools in " + r,
+		"share mount0 at /opt/tools ro=true in " + r,
+		"move root " + r,
+	}
+	if got := m.calls[len(m.calls)-len(want):]; !slices.Equal(got, want) {
+		t.Errorf("last calls without scratch paths:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A mount whose target lands in /proc, /sys or /dev, at the root, or at,
+// under or above where another one lands, through an image symlink, fails
+// the boot, naming it, before any is mounted: under another, its mount point
+// would be made in the host directory mounted there (STO-6).
+func TestBootRefusesAMountLandingBadly(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		targets map[string]string
+		want    string
+	}{
+		"dev":   {map[string]string{"/opt/tools": "/dev/x"}, "mount /opt/tools: lands at /dev/x, in /dev"},
+		"proc":  {map[string]string{"/opt/tools": "/proc"}, "mount /opt/tools: lands at /proc, in /proc"},
+		"root":  {map[string]string{"/opt/tools": "/"}, "mount /opt/tools: lands at /, the root"},
+		"twice": {map[string]string{"/opt/tools": "/srv"}, "mount /opt/tools: lands at /srv, as /srv does"},
+		"under another": {
+			map[string]string{"/opt/tools": "/srv/x"},
+			"mount /opt/tools: lands at /srv/x, under /srv, where mount /srv lands: its mount point would be made in the host directory",
+		},
+		"above another": {
+			map[string]string{"/srv": "/opt/tools/x"},
+			"mount /opt/tools: lands at /opt/tools, above /opt/tools/x, where mount /srv lands: its mount point would be made in the host directory",
+		},
+	} {
+		cfg := testBootConfig()
+		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv"}, {Tag: "mount1", Target: "/opt/tools"}}
+		m := &fakeMounter{targets: tc.targets}
+		err := boot(m, cfg)
+		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
+		}
+		if slices.ContainsFunc(m.calls, func(c string) bool { return strings.HasPrefix(c, "share ") || strings.HasPrefix(c, "move root") }) {
+			t.Errorf("%s: mounted or moved: %v", name, m.calls)
+		}
+	}
+}
+
+// A mount whose target lands at or above where a scratch path or a guest
+// directory landed, through an image symlink, fails the boot, naming both,
+// before any is mounted: it would hide what is there (STO-6). One under
+// them is mounted.
+func TestBootRefusesAMountHidingAScratchPathOrDirectory(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		targets, dirs map[string]string
+		want          string
+	}{
+		"at a scratch path": {
+			map[string]string{"/opt/tools": "/srv"},
+			nil,
+			"mount /opt/tools: lands at /srv, at or above /srv, where scratch path /srv lands: it would hide it",
+		},
+		"above a scratch path": {
+			map[string]string{"/opt/tools": "/var/lib"},
+			nil,
+			"mount /opt/tools: lands at /var/lib, at or above /var/lib/docker, where scratch path /var/lib/docker lands: it would hide it",
+		},
+		"at a directory": {
+			map[string]string{"/opt/tools": "/tmp"},
+			nil,
+			"mount /opt/tools: lands at /tmp, at or above /tmp, where directory /tmp lands: it would hide it",
+		},
+		"above a directory": {
+			map[string]string{"/opt/tools": "/run"},
+			map[string]string{"/var/run/act": "/run/act"},
+			"mount /opt/tools: lands at /run, at or above /run/act, where directory /var/run/act lands: it would hide it",
+		},
+	} {
+		cfg := testBootConfig()
+		cfg.ScratchPaths = []string{"/srv", "/var/lib/docker"}
+		cfg.GuestDirs = testGuestDirs()
+		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/data"}, {Tag: "mount1", Target: "/opt/tools"}}
+		m := &fakeMounter{targets: tc.targets, dirs: tc.dirs}
+		err := boot(m, cfg)
+		if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %s", name, err, tc.want)
+		}
+		if slices.ContainsFunc(m.calls, func(c string) bool { return strings.HasPrefix(c, "share ") || strings.HasPrefix(c, "move root") }) {
+			t.Errorf("%s: mounted or moved: %v", name, m.calls)
+		}
+	}
+	// Under them, and beside them sharing a prefix, is fine.
+	cfg := testBootConfig()
+	cfg.ScratchPaths = []string{"/srv"}
+	cfg.GuestDirs = testGuestDirs()
+	cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/srv/tools"}, {Tag: "mount1", Target: "/tmp/x"}, {Tag: "mount2", Target: "/srvx"}}
+	if err := boot(&fakeMounter{}, cfg); err != nil {
+		t.Errorf("under: %v", err)
+	}
+}
+
 // A failed step stops the boot there, naming it, and the root is never
 // moved.
 func TestBootStopsAtAFailedStep(t *testing.T) {
 	t.Parallel()
-	for _, fail := range []string{"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "dir /opt/hostedtoolcache", "resolve /opt", "scratch /srv"} {
+	for _, fail := range []string{
+		"ext4", "virtiofs", "1.erofs", "overlay", "cgroup2", "dir /opt/hostedtoolcache", "resolve /opt", "scratch /srv",
+		"resolve target /data", "share mount0",
+	} {
 		m := &fakeMounter{fail: fail}
 		cfg := testBootConfig()
 		cfg.ScratchPaths = []string{"/srv", "/opt"}
 		cfg.GuestDirs = testGuestDirs()
+		cfg.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/data"}}
 		err := boot(m, cfg)
 		if err == nil || !errors.Is(err, syscall.EINVAL) {
 			t.Errorf("%s fails: err = %v, want EINVAL", fail, err)
@@ -275,6 +445,10 @@ func TestBootRefusesABadConfig(t *testing.T) {
 		"unclean dir":        func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/tmp/", Mode: 0o1777}} },
 		"root dir":           func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/", Mode: 0o755}} },
 		"dir mode":           func(c *agentv1.BootConfig) { c.GuestDirs = []*agentv1.GuestDir{{Path: "/tmp", Mode: 0o10777}} },
+		"no mount tag":       func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Target: "/opt"}} },
+		"relative mount":     func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "opt"}} },
+		"unclean mount":      func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/opt/"}} },
+		"root mount":         func(c *agentv1.BootConfig) { c.Mounts = []*agentv1.Mount{{Tag: "mount0", Target: "/"}} },
 	} {
 		cfg := testBootConfig()
 		edit(cfg)

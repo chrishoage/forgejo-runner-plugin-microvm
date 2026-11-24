@@ -88,6 +88,49 @@ func TestBootConfiguresTheVM(t *testing.T) {
 	}
 }
 
+// Each mount is a virtiofs share of its own, after the layer share, under
+// its tag, read-only unless it is read-write, with no DAX window (STO-1,
+// STO-2).
+func TestBootSharesTheMounts(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	spec := testSpec()
+	spec.Mounts = []*vmv1.Mount{{Source: "/srv/tools", Tag: "mount0"}, {Source: "/srv/data", Tag: "mount1", ReadWrite: true}}
+	if err := boot(fakeKrun(&calls, ""), spec); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"add_virtiofs3 7 the-layers /cache/jobs/j/0 0 true",
+		"add_virtiofs3 7 mount0 /srv/tools 0 true",
+		"add_virtiofs3 7 mount1 /srv/data 0 false",
+		"add_disk 7 scratch /state/jobs/j/0/scratch.ext4 false",
+	}
+	i := slices.Index(calls, want[0])
+	if i < 0 || len(calls) < i+len(want) || !slices.Equal(calls[i:i+len(want)], want) {
+		t.Errorf("calls:\n%s\nwant, in a row:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A mount's tag must be one libkrun takes: not empty, and at most 36 bytes,
+// the buffer libkrun copies it into without a length check.
+func TestBootRefusesABadMountTag(t *testing.T) {
+	t.Parallel()
+	for _, tag := range []string{"", strings.Repeat("t", 37)} {
+		var calls []string
+		spec := testSpec()
+		spec.Mounts = []*vmv1.Mount{{Source: "/srv/tools", Tag: tag}}
+		if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
+			t.Errorf("tag %q: err %v, calls %v", tag, err, calls)
+		}
+	}
+	var calls []string
+	spec := testSpec()
+	spec.Mounts = []*vmv1.Mount{{Source: "/srv/tools", Tag: strings.Repeat("t", 36)}}
+	if err := boot(fakeKrun(&calls, ""), spec); err != nil {
+		t.Errorf("a 36-byte tag: %v", err)
+	}
+}
+
 // A failed call stops the boot there, naming the call.
 func TestBootStopsAtAFailedCall(t *testing.T) {
 	t.Parallel()
