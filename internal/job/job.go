@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math"
 	"net"
@@ -241,9 +242,13 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 // VMStarted, and waits for it to exit. It returns the VM child's exit code,
 // 128+n when signal n ended it.
 //
-// Its error names the cause first, as Start's error shows it (PROTO-10):
-// the scratch disk, whose path names its VM's directory, or the VM.
+// Its error names the cause first, as Start's error shows it (PROTO-10): a
+// mount, by its source, the scratch disk, whose path names its VM's
+// directory, or the VM.
 func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
+	if err := checkMounts(v.GetMounts()); err != nil {
+		return 0, err
+	}
 	if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
 		return 0, fmt.Errorf("scratch disk: %s: %w", v.GetScratchDisk(), err)
 	}
@@ -264,6 +269,7 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 		ScratchDisk: v.GetScratchDisk(),
 		LayerDir:    v.GetLayerDir(),
 		LayerTag:    v.GetLayerTag(),
+		Mounts:      childMounts(v.GetMounts()),
 		Console:     v.GetConsole(),
 		AgentSocket: v.GetAgentSocket(),
 		AgentPort:   v.GetAgentPort(),
@@ -317,6 +323,38 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 		return 128 + int32(ws.Signal()), nil //nolint:gosec // G115: a signal number is below 65
 	}
 	return int32(ws.ExitStatus()), nil //nolint:gosec // G115: an exit status is 0 to 255
+}
+
+// checkMounts checks each mount's source again, before the VM child starts:
+// the config checked it when it was read, but a source can disappear since,
+// and libkrun would report one missing only as -EINVAL at boot. A source
+// that is gone or no longer a directory is an error naming it (STO-5,
+// PROTO-10).
+func checkMounts(mounts []*jobv1.Mount) error {
+	for _, m := range mounts {
+		fi, err := os.Stat(m.GetSource())
+		var pe *fs.PathError
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("mount %s: does not exist", m.GetSource())
+		case errors.As(err, &pe):
+			return fmt.Errorf("mount %s: %w", m.GetSource(), pe.Err)
+		case err != nil:
+			return fmt.Errorf("mount %s: %w", m.GetSource(), err)
+		case !fi.IsDir():
+			return fmt.Errorf("mount %s: is not a directory", m.GetSource())
+		}
+	}
+	return nil
+}
+
+// childMounts are the VM child's copies of the job spec's mounts.
+func childMounts(mounts []*jobv1.Mount) []*vmv1.Mount {
+	var out []*vmv1.Mount
+	for _, m := range mounts {
+		out = append(out, &vmv1.Mount{Source: m.GetSource(), Tag: m.GetTag(), ReadWrite: m.GetReadWrite()})
+	}
+	return out
 }
 
 // mkfsArgs format a scratch disk quickly: the inode tables and journal are

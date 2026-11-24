@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
@@ -52,6 +54,26 @@ const (
 
 // The scratch disk is the VM's first block device.
 const scratchDevice = "/dev/vda"
+
+// mountTag is the virtiofs tag of the mount at index i of a profile's
+// mounts. It is never derived from the mount's path: libkrun copies a tag
+// into a 36-byte buffer with no length check, and panics when the VM starts
+// on a longer one.
+func mountTag(i int) string { return "mount" + strconv.Itoa(i) }
+
+// mountsAttr formats a profile's mounts for a log line, as
+// source:target:ro (or rw), comma-separated.
+func mountsAttr(ms []config.Mount) string {
+	parts := make([]string, len(ms))
+	for i, m := range ms {
+		mode := "ro"
+		if m.ReadWrite {
+			mode = "rw"
+		}
+		parts[i] = m.Source + ":" + m.Target + ":" + mode
+	}
+	return strings.Join(parts, ",")
+}
 
 // guestDirs are the directories steps expect, Create's act path, tool cache
 // and temp directory (PROTO-7), with the mode the agent gives each one the
@@ -285,6 +307,14 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 	for _, d := range guestDirs {
 		boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
 	}
+	// Each mount is a share of its own, under a tag only its position
+	// names; the job process checks its source again before the VM starts
+	// (STO-1, STO-2, STO-5).
+	var mounts []*jobv1.Mount
+	for i, m := range j.profile.Mounts {
+		mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
+		boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
+	}
 	root := filepath.Join(vmState, "root")
 	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
 		return nil, fmt.Errorf("boot root %s: %w", root, err)
@@ -302,6 +332,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 		RootDir:          root,
 		LayerDir:         img.LinkDir,
 		LayerTag:         layerTag,
+		Mounts:           mounts,
 		GuestAddress:     addr.String(),
 		GuestMac:         mac.String(),
 		Boot:             boot,

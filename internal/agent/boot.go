@@ -41,8 +41,16 @@ type mounter interface {
 	// and bind-mounts it over t's place in the job's root at root.
 	bindScratch(root, dir string, t scratchTarget) error
 	// makeDir creates guestPath in the job's root at root, with mode, unless
-	// the image has something there.
-	makeDir(root, guestPath string, mode uint32) error
+	// the image has something there, and returns where the directory lands,
+	// or "" when the image has something else there.
+	makeDir(root, guestPath string, mode uint32) (string, error)
+	// resolveTarget finds where the mount or disk target guestPath lands
+	// in the job's root at root, creating it if the image lacks it
+	// (STO-5, STO-6).
+	resolveTarget(root, guestPath string) (string, error)
+	// mountShare mounts the virtiofs share tag at place, where a target
+	// landed, in the job's root at root, read-only when readOnly.
+	mountShare(root, tag, place string, readOnly bool) error
 	// moveRoot moves the mount at root to / and chroots into it.
 	moveRoot(root string) error
 }
@@ -95,10 +103,13 @@ func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
 //  8. it creates the act path, tool cache and temp directory again, so one
 //     at or below a scratch path, hidden by its fresh directory, is made on
 //     the scratch disk; elsewhere they are there now, and left alone;
-//  9. it moves it to / and chroots.
+//  9. it resolves every mount's target in it, then mounts each share, in
+//     the list's order, none landing under another (STO-6);
+//  10. it moves it to / and chroots.
 //
 // The host enforces read-only on both shares, so the guest can't write a
-// layer even after remounting one read-write (IMG-9).
+// layer even after remounting one read-write (IMG-9), and on each read-only
+// mount (STO-2).
 func boot(m mounter, cfg *agentv1.BootConfig) error {
 	if err := checkBootConfig(cfg); err != nil {
 		return err
@@ -136,10 +147,18 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 			func() error { return m.mount(a.source, target, a.fstype, a.flags, a.data) },
 		)
 	}
+	// Where each scratch path and guest directory lands, which no mount
+	// may hide.
+	var scratchHeld, dirsHeld []landing
 	guestDirs := func() error {
+		dirsHeld = dirsHeld[:0]
 		for _, d := range cfg.GetGuestDirs() {
-			if err := m.makeDir(root, d.GetPath(), d.GetMode()); err != nil {
+			place, err := m.makeDir(root, d.GetPath(), d.GetMode())
+			if err != nil {
 				return err
+			}
+			if place != "" {
+				dirsHeld = append(dirsHeld, landing{"directory " + d.GetPath(), place})
 			}
 		}
 		return nil
@@ -149,9 +168,20 @@ func boot(m mounter, cfg *agentv1.BootConfig) error {
 		dirs := scratch + "/paths"
 		steps = append(steps,
 			func() error { return m.mkdirAll(dirs) },
-			func() error { return makeScratchPaths(m, root, dirs, paths) },
+			func() error {
+				targets, err := makeScratchPaths(m, root, dirs, paths)
+				for _, t := range targets {
+					scratchHeld = append(scratchHeld, landing{"scratch path " + t.guestPath, t.resolved})
+				}
+				return err
+			},
 			guestDirs,
 		)
+	}
+	if mounts := cfg.GetMounts(); len(mounts) > 0 {
+		steps = append(steps, func() error {
+			return makeMounts(m, root, mounts, append(append([]landing(nil), scratchHeld...), dirsHeld...))
+		})
 	}
 	steps = append(steps, func() error { return m.moveRoot(root) })
 	for _, step := range steps {
@@ -178,55 +208,128 @@ type scratchTarget struct {
 // fresh directory over them, or under them, would hide the kernel's files.
 var apiMountRoots = []string{"/proc", "/sys", "/dev"}
 
+// landing is where a scratch path or a guest directory, what, landed in the
+// job's root: a place no mount may be at or above.
+type landing struct{ what, place string }
+
 // makeScratchPaths makes the scratch paths paths in the job's root at root,
-// each from dirs/<i>, i its position in paths. It resolves every path before
-// it binds any, so each one keeps the image's owner and mode even below
-// another scratch path, whose fresh directory would hide the image's copy.
-// Then it binds them parents first, by where they land.
-func makeScratchPaths(m mounter, root, dirs string, paths []string) error {
+// each from dirs/<i>, i its position in paths, and returns where each lands.
+// It resolves every path before it binds any, so each one keeps the image's
+// owner and mode even below another scratch path, whose fresh directory
+// would hide the image's copy. Then it binds them parents first, by where
+// they land.
+func makeScratchPaths(m mounter, root, dirs string, paths []string) ([]scratchTarget, error) {
 	targets := make([]scratchTarget, len(paths))
 	for i, p := range paths {
 		t, err := m.resolveScratch(root, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if api, ok := inAPIMount(t.resolved); ok {
-			return fmt.Errorf("scratch path %s: lands at %s, in %s", p, t.resolved, api)
+			return nil, fmt.Errorf("scratch path %s: lands at %s, in %s", p, t.resolved, api)
 		}
 		for _, prev := range targets[:i] {
 			if prev.resolved == t.resolved {
-				return fmt.Errorf("scratch path %s: lands at %s, as %s does", p, t.resolved, prev.guestPath)
+				return nil, fmt.Errorf("scratch path %s: lands at %s, as %s does", p, t.resolved, prev.guestPath)
 			}
 		}
 		targets[i] = t
 	}
-	for _, i := range parentsFirst(targets) {
+	places := make([]string, len(targets))
+	for i, t := range targets {
+		places[i] = t.resolved
+	}
+	for _, i := range parentsFirst(places) {
 		if err := m.bindScratch(root, dirs+"/"+strconv.Itoa(i), targets[i]); err != nil {
-			return err
+			return nil, err
+		}
+	}
+	return targets, nil
+}
+
+// makeMounts mounts each of mounts, the profile's mounts, in the job's root
+// at root, after the scratch paths (STO-6). It resolves every target before
+// it mounts any, each inside the root, creating one the image lacks, so a
+// target under a scratch path lands on the scratch path's fresh directory;
+// then it mounts them in the list's order. A target that lands in /proc,
+// /sys or /dev, at the root, at or above a place in held, where a scratch
+// path or a guest directory landed, or at, under or above where another
+// target lands, fails, naming both: the mount would hide what is there, or
+// its mount point would be made in the host directory mounted above it
+// (STO-6).
+func makeMounts(m mounter, root string, mounts []*agentv1.Mount, held []landing) error {
+	places := make([]string, len(mounts))
+	for i, mt := range mounts {
+		place, err := m.resolveTarget(root, mt.GetTarget())
+		if err != nil {
+			return fmt.Errorf("mount %s: %w", mt.GetTarget(), err)
+		}
+		if api, ok := inAPIMount(place); ok {
+			return fmt.Errorf("mount %s: lands at %s, in %s", mt.GetTarget(), place, api)
+		}
+		if place == "/" {
+			return fmt.Errorf("mount %s: lands at /, the root", mt.GetTarget())
+		}
+		for _, h := range held {
+			if h.place == place || strings.HasPrefix(h.place, place+"/") {
+				return fmt.Errorf("mount %s: lands at %s, at or above %s, where %s lands: it would hide it",
+					mt.GetTarget(), place, h.place, h.what)
+			}
+		}
+		for j, prev := range places[:i] {
+			if prev == place {
+				return fmt.Errorf("mount %s: lands at %s, as %s does", mt.GetTarget(), place, mounts[j].GetTarget())
+			}
+			if rel := nested(place, prev); rel != "" {
+				return fmt.Errorf("mount %s: lands at %s, %s %s, where mount %s lands: "+
+					"its mount point would be made in the host directory", mt.GetTarget(), place, rel, prev, mounts[j].GetTarget())
+			}
+		}
+		places[i] = place
+	}
+	for i, mt := range mounts {
+		if err := m.mountShare(root, mt.GetTag(), places[i], !mt.GetReadWrite()); err != nil {
+			return fmt.Errorf("mount %s: at %s: %w", mt.GetTarget(), places[i], err)
 		}
 	}
 	return nil
 }
 
-// parentsFirst returns the indexes of targets, ordered so that a target
-// comes after every target whose place is above its own, and otherwise in
-// the list's order.
-func parentsFirst(targets []scratchTarget) []int {
-	order := make([]int, 0, len(targets))
-	placed := make([]bool, len(targets))
-	// waits reports whether i has an unplaced target above it.
+// nested names how place relates to other, two places where targets land in
+// the job's root, when one is strictly under the other: "under" or "above".
+// It is "" otherwise. The config refuses such targets as written; only an
+// image's symlinks, such as /data -> /srv/x with targets /srv and /data, can
+// make two land nested, and then the inner one's mount point would be made
+// in the host directory mounted at the outer one (STO-6).
+func nested(place, other string) string {
+	switch {
+	case strings.HasPrefix(place, other+"/"):
+		return "under"
+	case strings.HasPrefix(other, place+"/"):
+		return "above"
+	}
+	return ""
+}
+
+// parentsFirst returns the indexes of places, each where a path lands in
+// the job's root, ordered so that a place comes after every place above
+// it, and otherwise in the list's order.
+func parentsFirst(places []string) []int {
+	order := make([]int, 0, len(places))
+	placed := make([]bool, len(places))
+	// waits reports whether i has an unplaced place above it.
 	waits := func(i int) bool {
-		for j, u := range targets {
-			if !placed[j] && strings.HasPrefix(targets[i].resolved, u.resolved+"/") {
+		for j, u := range places {
+			if !placed[j] && strings.HasPrefix(places[i], u+"/") {
 				return true
 			}
 		}
 		return false
 	}
-	for len(order) < len(targets) {
-		// The first unplaced target with nothing unplaced above it: one
+	for len(order) < len(places) {
+		// The first unplaced place with nothing unplaced above it: one
 		// always exists, since being above is a strict order.
-		for i := range targets {
+		for i := range places {
 			if !placed[i] && !waits(i) {
 				order, placed[i] = append(order, i), true
 				break
@@ -237,9 +340,10 @@ func parentsFirst(targets []scratchTarget) []int {
 }
 
 // checkBootConfig refuses a config whose layer names would leave the layer
-// share, that names no scratch device, vsock port or layer tag, whose scratch paths or
-// guest directories aren't absolute, clean paths below /, or whose guest
-// directory's mode isn't permission bits.
+// share, that names no scratch device, vsock port or layer tag, whose scratch
+// paths, mount targets or guest directories aren't absolute, clean paths
+// below /, with a mount that names no tag, or whose guest directory's mode
+// isn't permission bits.
 func checkBootConfig(cfg *agentv1.BootConfig) error {
 	if cfg.GetVsockPort() == 0 {
 		return fmt.Errorf("boot config: no vsock port")
@@ -261,6 +365,14 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 	for _, p := range cfg.GetScratchPaths() {
 		if !belowRoot(p) {
 			return fmt.Errorf("boot config: scratch path %q is not an absolute, clean path below /", p)
+		}
+	}
+	for _, mt := range cfg.GetMounts() {
+		if mt.GetTag() == "" {
+			return fmt.Errorf("boot config: mount %s has no tag", mt.GetTarget())
+		}
+		if !belowRoot(mt.GetTarget()) {
+			return fmt.Errorf("boot config: mount target %q is not an absolute, clean path below /", mt.GetTarget())
 		}
 	}
 	for _, d := range cfg.GetGuestDirs() {
