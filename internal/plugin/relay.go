@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -91,15 +92,37 @@ func workingDir(req *pluginv1alpha.ExecRequest) string {
 	return path.Join(workspace, dir)
 }
 
+// logCall logs a call on j that began at begin and ended with err, with
+// attrs, as one debug line: Exec's, CopyIn's and CopyOut's.
+func (s *Server) logCall(ctx context.Context, msg string, j *job, begin time.Time, err error, attrs ...any) {
+	attrs = append([]any{"env", j.id}, attrs...)
+	if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	attrs = append(attrs, "took", time.Since(begin).Round(time.Millisecond))
+	s.log.DebugContext(ctx, msg, attrs...)
+}
+
 // Exec runs the command through the job's container's agent and relays its
 // output, then its exit code or why it could not start. The env values are
-// secrets: they are never logged (LOG-2).
+// secrets: they are never logged (LOG-2). Its debug line names only the
+// command's argv[0]: the rest of a step's argv can carry what the workflow
+// put there.
 func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.BackendPlugin_ExecServer) (err error) {
+	begin := time.Now()
 	j, ctx, done, err := s.started(stream.Context(), req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
 	defer done()
+	var outcome []any
+	defer func() {
+		argv0 := ""
+		if argv := req.GetCommand(); len(argv) > 0 {
+			argv0 = argv[0]
+		}
+		s.logCall(ctx, "exec", j, begin, err, append([]any{"argv0", argv0}, outcome...)...)
+	}()
 	defer func() { err = callError(ctx, j, err) }()
 	out, err := j.agent.Exec(ctx, &agentv1.ExecRequest{
 		Argv:       req.GetCommand(),
@@ -126,12 +149,17 @@ func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.Backe
 		case *agentv1.ExecResponse_Stderr:
 			o = execData(pluginv1alpha.DataChunk_STDERR, ev.Stderr)
 		case *agentv1.ExecResponse_ExitCode:
+			outcome = []any{"exit_code", ev.ExitCode}
 			return await(ctx, func() error {
 				return stream.Send(&pluginv1alpha.ExecOutput{Output: &pluginv1alpha.ExecOutput_ExecComplete{
 					ExecComplete: &pluginv1alpha.ExecComplete{ExitCode: ev.ExitCode},
 				}})
 			})
 		case *agentv1.ExecResponse_StartError:
+			// Not its text: the agent's reason can quote the request's
+			// PATH, an env value (LOG-2). The runner shows it in the
+			// job's log.
+			outcome = []any{"start_failed", true}
 			return await(ctx, func() error {
 				return stream.Send(&pluginv1alpha.ExecOutput{Output: &pluginv1alpha.ExecOutput_ExecFailed{
 					ExecFailed: &pluginv1alpha.ExecFailed{ErrorMessage: ev.StartError},
@@ -154,6 +182,7 @@ func execData(s pluginv1alpha.DataChunk_Stream, b []byte) *pluginv1alpha.ExecOut
 // CopyIn relays a tar to the agent, which extracts it at the destination
 // the first chunk names, re-chunked to at most agentChunk.
 func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err error) {
+	begin := time.Now()
 	first, err := stream.Recv()
 	if err != nil {
 		return err
@@ -166,6 +195,10 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err er
 		return err
 	}
 	defer done()
+	// copied counts what was sent to the agent: a chunk whose send failed
+	// is not.
+	copied := 0
+	defer func() { s.logCall(ctx, "copy in", j, begin, err, "path", first.GetDestPath(), "bytes", copied) }()
 	defer func() { err = callError(ctx, j, err) }()
 	in, err := j.agent.CopyIn(ctx)
 	if err != nil {
@@ -173,6 +206,9 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err er
 	}
 	// Send's own errors surface in CloseAndRecv.
 	sendErr := sendChunks(in, first.GetDestPath(), first.GetData())
+	if sendErr == nil {
+		copied += len(first.GetData())
+	}
 	for sendErr == nil {
 		// A runner that stops sending can't keep the job held (await).
 		var chunk *pluginv1alpha.CopyInChunk
@@ -190,7 +226,9 @@ func (s *Server) CopyIn(stream pluginv1alpha.BackendPlugin_CopyInServer) (err er
 		if chunk.EnvironmentId != nil || chunk.DestPath != nil {
 			return status.Error(codes.InvalidArgument, "only the first chunk may set environment_id or dest_path")
 		}
-		sendErr = sendChunks(in, "", chunk.GetData())
+		if sendErr = sendChunks(in, "", chunk.GetData()); sendErr == nil {
+			copied += len(chunk.GetData())
+		}
 	}
 	if _, err := in.CloseAndRecv(); err != nil {
 		return s.agentError(ctx, j, err)
@@ -218,11 +256,14 @@ func sendChunks(in agentv1.AgentService_CopyInClient, dest string, data []byte) 
 
 // CopyOut relays the agent's tar of a guest path.
 func (s *Server) CopyOut(req *pluginv1alpha.CopyOutRequest, stream pluginv1alpha.BackendPlugin_CopyOutServer) (err error) {
+	begin := time.Now()
 	j, ctx, done, err := s.started(stream.Context(), req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
 	defer done()
+	copied := 0
+	defer func() { s.logCall(ctx, "copy out", j, begin, err, "path", req.GetSrcPath(), "bytes", copied) }()
 	defer func() { err = callError(ctx, j, err) }()
 	out, err := j.agent.CopyOut(ctx, &agentv1.CopyOutRequest{Path: req.GetSrcPath()})
 	if err != nil {
@@ -240,5 +281,6 @@ func (s *Server) CopyOut(req *pluginv1alpha.CopyOutRequest, stream pluginv1alpha
 		if err := await(ctx, func() error { return stream.Send(&pluginv1alpha.CopyOutChunk{Data: resp.GetChunk()}) }); err != nil {
 			return err
 		}
+		copied += len(resp.GetChunk())
 	}
 }
