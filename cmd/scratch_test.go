@@ -72,6 +72,7 @@ func scratchImage(t *testing.T) (v1.Image, string) {
 // job's root; and a file written to one in a job isn't there in the next
 // (GST-13).
 func TestScratchPaths(t *testing.T) {
+	t.Parallel()
 	img, host := scratchImage(t)
 	p := startPluginWith(t, buildPlugin(t), scratchProfiles)
 	run := func(job, script string) string {
@@ -114,6 +115,7 @@ echo "scratch ok: $((6 * 7))"
 // A scratch path that is a file in the image, or under a symlink to /dev,
 // fails Start, and the error names the path.
 func TestScratchPathOnAFileFailsStart(t *testing.T) {
+	t.Parallel()
 	img, host := scratchImage(t)
 	p := startPluginWith(t, buildPlugin(t), scratchProfiles)
 	ref := pushImage(t, host, "scratch-file", img)

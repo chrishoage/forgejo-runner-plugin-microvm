@@ -44,6 +44,7 @@ func rwStorageProfile(disk, dir string) string {
 // disk's ext4 with no needs_recovery flag on the host, and the next job on
 // the same profile reads both files.
 func TestFlushKeepsTheWrites(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disk := ext4Disk(t, "store")
 	dir := hostDirs(t, "share")[0]

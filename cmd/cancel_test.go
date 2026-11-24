@@ -28,6 +28,7 @@ var jobStarted = regexp.MustCompile(`msg="job process started" .*\bpid=(\d+)`)
 // the job's job process has been reaped. The test fails at that bound, and
 // has an overall timeout of its own, so it never waits on the sleep.
 func TestCancelledStep(t *testing.T) {
+	t.Parallel()
 	wf := writeWorkflow(t, step("sleep", `echo "sleep-$((6 * 100))-started"; sleep 600`))
 	p := startPlugin(t, buildPlugin(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)

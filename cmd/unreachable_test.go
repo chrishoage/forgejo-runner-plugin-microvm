@@ -189,6 +189,7 @@ func probeIn(t *testing.T, v *vm, args ...string) string {
 // positive control from the same guest, so a guest with no network can't
 // pass.
 func TestGuestCantReach(t *testing.T) {
+	t.Parallel()
 	host := hostAddr(t)
 	probe := buildProbe(t)
 	v := bootVM(t, startPlugin(t, buildPlugin(t)), "unreachable")
@@ -325,6 +326,7 @@ func TestGuestCantReach(t *testing.T) {
 // frames reach its guest in order, so on a shared switch A's sniffer would
 // see bMarker before the gateway's reply to aMarker.
 func TestJobsCantReachEachOther(t *testing.T) {
+	t.Parallel()
 	const (
 		port    = "7777"
 		aMarker = "198.18.0.250"

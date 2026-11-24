@@ -72,6 +72,7 @@ func onLabel(job, label string) string {
 // root, and one under a scratch path sits on the scratch path's fresh
 // directory (STO-1, STO-2, STO-5, STO-6).
 func TestReadOnlyMounts(t *testing.T) {
+	t.Parallel()
 	img, host := mountImage(t)
 	src := hostDirs(t, "tools", "linked", "nested")
 	p := startPluginWith(t, buildPlugin(t), fmt.Sprintf(`profiles:
@@ -131,6 +132,7 @@ echo "mounts ok: $((6 * 7))"
 // target; so does one whose source is deleted after the config was read,
 // naming the source (PROTO-10).
 func TestMountFailsStart(t *testing.T) {
+	t.Parallel()
 	img, host := mountImage(t)
 	src := hostDirs(t, "tools", "gone")
 	p := startPluginWith(t, buildPlugin(t), fmt.Sprintf(`profiles:
@@ -251,6 +253,7 @@ const suidMode = 0o755 | fs.ModeSetuid | fs.ModeSetgid
 // A read-only mount in the same profile still can't be written (STO-2,
 // STO-3).
 func TestReadWriteMounts(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	src := hostDirs(t, "data", "open", "tools")
 	writableDir(t, src[1])
@@ -316,6 +319,7 @@ echo root > /data/by-root`); code != 0 {
 // The plugin runs under `sudo -n`; without it the test skips, saying so,
 // unless CI is set.
 func TestReadWriteMountsAsRoot(t *testing.T) {
+	t.Parallel()
 	needRoot(t)
 	img, host := baseImage(t)
 	src := hostDirs(t, "data", "open", "tools")

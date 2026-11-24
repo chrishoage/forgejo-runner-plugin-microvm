@@ -85,6 +85,7 @@ func descendants(pid int) []proc {
 // plugin SIGKILL, and checks that every one is gone, not even a zombie,
 // within 5 s.
 func TestPluginKilled(t *testing.T) {
+	t.Parallel()
 	wf := writeWorkflow(t, step("sleep", `echo "sleep-$((6 * 100))-started"; sleep 600`))
 	p := startPlugin(t, buildPlugin(t))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)

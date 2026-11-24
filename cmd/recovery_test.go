@@ -79,6 +79,7 @@ func waitGone(t *testing.T, procs []proc, bound time.Duration, after string) {
 // next job on that disk mounts it read-write and boots: no disk lock is
 // left held, and the mount replays the journal the kill left.
 func TestRecoveryAfterAKilledVM(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disk := ext4Disk(t, "killed-vm")
 	p := startPluginWith(t, buildPlugin(t), rwDiskProfile(disk))
@@ -118,6 +119,7 @@ func TestRecoveryAfterAKilledVM(t *testing.T) {
 // gone, and starts it again on the same directories. The next job on that
 // disk mounts it read-write and boots.
 func TestRecoveryAfterAKilledPlugin(t *testing.T) {
+	t.Parallel()
 	img, host := baseImage(t)
 	disk := ext4Disk(t, "killed-plugin")
 	p := startPluginWith(t, buildPlugin(t), rwDiskProfile(disk))

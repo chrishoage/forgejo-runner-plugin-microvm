@@ -26,6 +26,7 @@ import (
 // shell, no libc and no /proc, /sys or /dev, boots, and an Exec of that
 // program succeeds (GST-1).
 func TestStaticProgramImageBoots(t *testing.T) {
+	t.Parallel()
 	_, host := baseImage(t)
 	probe, err := os.ReadFile(buildProbe(t))
 	if err != nil {
@@ -87,7 +88,9 @@ func parseMountinfo(t *testing.T, listing string) map[string]guestMount {
 // the agent's mounts with their options, the agent and its boot config in
 // /.runner-microvm, the act path, tool cache and temp directory with modes
 // 0777, 0777 and 1777, and the agent's own environment holds nothing from
-// the host's.
+// the host's. It is the one kvm test in cmd that runs alone, not in
+// parallel: t.Setenv, which puts the marker in the plugin's environment,
+// refuses a parallel test.
 func TestGuestSetup(t *testing.T) {
 	base, host := baseImage(t)
 	img := imageWithout(t, base, "tmp", "var/run", "opt")
@@ -158,6 +161,7 @@ done`)
 // On an image whose /tmp and /opt/hostedtoolcache have modes of their own,
 // the agent leaves them as they are.
 func TestGuestKeepsTheImagesDirectories(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	img, err := mutate.AppendLayers(base, tarLayer(t, "",
 		&tar.Header{Name: "tmp/", Typeflag: tar.TypeDir, Mode: 0o700},
@@ -179,6 +183,7 @@ func TestGuestKeepsTheImagesDirectories(t *testing.T) {
 // with the user's HOME; a missing working directory and its missing parent
 // are made owned by that user and group, mode 0755 (GST-5, GST-6).
 func TestExecAsUsersInTheGuest(t *testing.T) {
+	t.Parallel()
 	base, host := baseImage(t)
 	img, err := mutate.AppendLayers(base,
 		tarLayer(t, "root:x:0:0:root:/root:/bin/sh\nbuilder:x:1000:1000:Builder:/home/builder:/bin/sh\n", regular("etc/passwd")),
@@ -215,6 +220,7 @@ func TestExecAsUsersInTheGuest(t *testing.T) {
 // Its extracted agent is replaced, before Start, with one that starts and
 // then only waits.
 func TestSilentAgentFailsStart(t *testing.T) {
+	t.Parallel()
 	const ready = 5 * time.Second
 	base, host := baseImage(t)
 	p := startPlugin(t, buildPlugin(t, "-X "+module+"/internal/plugin.testReadyTimeout="+ready.String()))
