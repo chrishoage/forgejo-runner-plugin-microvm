@@ -71,6 +71,10 @@
           goTools.govulncheck
           libdir
           pkgs.cocogitto
+          # git for the commit check, for act/runner's action clones in the
+          # protocol test and its git http-backend, and for the harness's
+          # push, so none relies on the host's git.
+          pkgs.git
           # mkfs.ext4, which formats each VM's scratch disk: a host
           # dependency of the plugin (docs/development.md).
           pkgs.e2fsprogs
