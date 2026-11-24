@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -387,30 +388,109 @@ func writeFileAtomic(dir, path string, data []byte, perm os.FileMode) error {
 	return errors.Join(d.Sync(), d.Close())
 }
 
-// listen binds the listen socket. Its mode comes from the umask.
-//
-// SHORTCUT(#11): the socket's mode is the umask's, not one the operator
-// sets (provisional pick).
-//
-// SHORTCUT(#11): a socket left by a crashed plugin is not deleted, so
-// startup fails until it is.
+// socketMode is the listen socket's mode, whatever the umask: a runner in
+// the socket's group connects, and no one else. The group is the process's,
+// or the directory's when it is setgid; choosing it is the operator's
+// packaging.
+const socketMode = 0o660
+
+// listen binds the listen socket at path, mode 0660 whatever the umask. A
+// socket already at path is a crashed plugin's, since the listen-socket
+// directory's lock proves no live plugin owns it, so it is deleted first;
+// anything else there stops startup, naming it, since it is not the
+// plugin's to delete. The socket is bound under a temporary name, given its
+// mode, then renamed into place, so no client can connect while the umask's
+// mode is on it. The returned func closes the listener and deletes the
+// socket.
 func listen(ctx context.Context, path string) (net.Listener, func(), error) {
 	dir, err := openSockDir(filepath.Dir(path))
 	if err != nil {
 		return nil, nil, err
 	}
-	lis, err := new(net.ListenConfig).Listen(ctx, "unix", dir.path(filepath.Base(path)))
+	name := filepath.Base(path)
+	// A crashed plugin may also have left its temporary socket.
+	tmp := "." + name + ".new"
+	for _, n := range []string{name, tmp} {
+		if err := removeLeftoverSocket(dir, n, filepath.Join(filepath.Dir(path), n)); err != nil {
+			_ = dir.Close()
+			return nil, nil, fmt.Errorf("listen on %s: %w", path, err)
+		}
+	}
+	lis, err := bindSocket(ctx, dir, tmp, name)
 	if err != nil {
 		_ = dir.Close()
-		if errors.Is(err, syscall.EADDRINUSE) {
-			return nil, nil, fmt.Errorf("listen on %s: a file is already there: another plugin serves on it, "+
-				"or a stopped one left its socket, which must be deleted first: %w", path, err)
-		}
 		return nil, nil, fmt.Errorf("listen on %s: %w", path, err)
 	}
-	// The listener unlinks its socket on Close through the directory, so
-	// the directory closes after it.
-	return lis, func() { _ = lis.Close(); _ = dir.Close() }, nil
+	// The listener closes through the directory, so the directory closes
+	// after it.
+	return lis, func() {
+		_ = lis.Close()
+		_ = unix.Unlinkat(dir.fd, name, 0)
+		_ = dir.Close()
+	}, nil
+}
+
+// bindSocket binds a unix socket at tmp in dir, sets its mode, and renames
+// it to name. The listener never unlinks its socket on Close: tmp is gone
+// once it is renamed.
+func bindSocket(ctx context.Context, dir *sockDir, tmp, name string) (*net.UnixListener, error) {
+	l, err := new(net.ListenConfig).Listen(ctx, "unix", dir.path(tmp))
+	if err != nil {
+		return nil, err
+	}
+	lis := l.(*net.UnixListener)
+	lis.SetUnlinkOnClose(false)
+	err = unix.Fchmodat(dir.fd, tmp, socketMode, 0)
+	if err == nil {
+		err = unix.Renameat(dir.fd, tmp, dir.fd, name)
+	}
+	if err != nil {
+		_ = lis.Close()
+		_ = unix.Unlinkat(dir.fd, tmp, 0)
+		return nil, err
+	}
+	return lis, nil
+}
+
+// removeLeftoverSocket deletes the socket at name in dir, whose path is
+// path, and does nothing when there is no file there. Any other kind of file
+// is an error naming it.
+func removeLeftoverSocket(dir *sockDir, name, path string) error {
+	var st unix.Stat_t
+	err := unix.Fstatat(dir.fd, name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return fmt.Errorf("a %s is there, not a socket: runner-microvm deletes only a socket a stopped plugin left; "+
+			"move %s, or set listen to another path", fileKind(st.Mode), path)
+	}
+	if err := unix.Unlinkat(dir.fd, name, 0); err != nil {
+		return fmt.Errorf("delete the socket a stopped plugin left at %s: %w", path, err)
+	}
+	return nil
+}
+
+// fileKind names the kind of file mode, a stat's st_mode, is.
+func fileKind(mode uint32) string {
+	switch mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		return "regular file"
+	case unix.S_IFDIR:
+		return "directory"
+	case unix.S_IFLNK:
+		return "symbolic link"
+	case unix.S_IFIFO:
+		return "FIFO"
+	case unix.S_IFCHR:
+		return "character device"
+	case unix.S_IFBLK:
+		return "block device"
+	}
+	return "file of unknown kind"
 }
 
 // keepalivePolicy accepts client pings every 5 s or slower, also with no

@@ -39,9 +39,9 @@ services:
     # forgejo-runner v13.2.2, moved with the runner's Go module by one
     # Renovate group (renovate.json5).
     image: data.forgejo.org/forgejo/runner:13.2.2@sha256:a8543a45fe62bebef0534d5c223cf485d3294e6dd2e42a82dbcbfd40c54a6a22
-    # Root, so it can open the plugin's socket, whose mode comes from the
-    # plugin's umask: under rootless podman, container root is the host user
-    # who owns the socket; under rootful Docker it is real root.
+    # Root, so it can open the plugin's socket, mode 0660 and the host
+    # user's: under rootless podman, container root is the host user who
+    # owns the socket; under rootful Docker it is real root.
     user: "0:0"
     depends_on:
       forgejo:
