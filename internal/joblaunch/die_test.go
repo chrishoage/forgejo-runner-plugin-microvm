@@ -73,6 +73,7 @@ func stuckInMkfs(t *testing.T) (*jobv1.Spec, string) {
 		Job:       "job-1",
 		JobBinary: bin,
 		MkfsExt4:  mkfs,
+		LogLevel:  "info",
 		Network:   &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500},
 		Vms: []*jobv1.VM{{
 			Name: "echo", Cpus: 1, MemoryMib: 512, GuestAddress: "198.18.0.2", GuestMac: "02:00:c6:12:00:02",

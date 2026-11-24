@@ -5,6 +5,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 )
 
 // BootConfigPath is the boot config's file in the boot root, the VM's root
@@ -85,14 +87,19 @@ var apiMounts = []apiMount{
 	{"tmpfs", "/dev/shm", "tmpfs", syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC, ""},
 }
 
-// ReadBootConfig reads the boot config at path.
-func ReadBootConfig(path string) (*agentv1.BootConfig, error) {
+// ReadBootConfig reads the boot config at path, and sets level to its
+// log_level. The plugin always sets one, so any other value, the empty one
+// included, is its bug and fails, leaving level as it was.
+func ReadBootConfig(path string, level *slog.LevelVar) (*agentv1.BootConfig, error) {
 	b, err := os.ReadFile(path) //nolint:gosec // G304: the boot root's own file
 	if err != nil {
 		return nil, fmt.Errorf("boot config: %w", err)
 	}
 	cfg := &agentv1.BootConfig{}
 	if err := proto.Unmarshal(b, cfg); err != nil {
+		return nil, fmt.Errorf("boot config %s: %w", path, err)
+	}
+	if err := logging.SetLevel(level, cfg.GetLogLevel()); err != nil {
 		return nil, fmt.Errorf("boot config %s: %w", path, err)
 	}
 	return cfg, nil

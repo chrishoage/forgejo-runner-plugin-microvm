@@ -23,6 +23,7 @@ import (
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 )
 
 // fakeJobBinary writes a shell script standing in for the job binary: run
@@ -56,6 +57,7 @@ func testJobSpec(t *testing.T, jobBinary string) *jobv1.Spec {
 		Job:       "job-1",
 		JobBinary: jobBinary,
 		MkfsExt4:  fakeMkfs(t, "exit 0"),
+		LogLevel:  "info",
 		Network:   &jobv1.Network{Subnet: "198.18.0.0/24", GatewayAddress: "198.18.0.1", GatewayMac: "02:00:c6:12:00:01", Mtu: 1500},
 		Vms: []*jobv1.VM{{
 			Name: "echo", Cpus: 2, MemoryMib: 1024, GuestAddress: "198.18.0.2", GuestMac: "02:00:c6:12:00:02",
@@ -98,7 +100,7 @@ func runOn(t *testing.T, spec *jobv1.Spec, live *os.File, th *thread) ([]*jobv1.
 	if _, err := protodelim.MarshalTo(&in, spec); err != nil {
 		t.Fatal(err)
 	}
-	err := run(t.Context(), &in, &out, live, th, slog.New(slog.DiscardHandler))
+	err := run(t.Context(), &in, &out, live, th, slog.New(slog.DiscardHandler), new(slog.LevelVar))
 	var events []*jobv1.Event
 	r := bufio.NewReader(&out)
 	for {
@@ -123,8 +125,34 @@ func afterNetworkUp(t *testing.T, events []*jobv1.Event) []*jobv1.Event {
 	return events[1:]
 }
 
-// Each VM child's spec carries the job spec's library directory and libkrun
-// log level.
+// The job process log follows the spec's log level, set before the job
+// process logs anything else.
+func TestRunLogsAtTheSpecsLevel(t *testing.T) {
+	t.Parallel()
+	for level, debug := range map[string]bool{"debug": true, "info": false, "warn": false} {
+		spec := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+		spec.LogLevel = level
+		var in, out, log bytes.Buffer
+		if _, err := protodelim.MarshalTo(&in, spec); err != nil {
+			t.Fatal(err)
+		}
+		live, _ := livenessPipe(t)
+		var v slog.LevelVar
+		if err := Run(t.Context(), &in, &out, live, logging.New(&log, "test", &v), &v); err != nil {
+			t.Fatal(err)
+		}
+		got := log.String()
+		if strings.Contains(got, `level=DEBUG msg="read the job spec"`) != debug {
+			t.Errorf("%s: the debug line logged: %t, want %t:\n%s", level, !debug, debug, got)
+		}
+		if strings.Contains(got, `level=INFO msg="VM exited"`) != (level != "warn") {
+			t.Errorf("%s: the info line:\n%s", level, got)
+		}
+	}
+}
+
+// Each VM child's spec carries the job spec's library directory, libkrun
+// log level and log level.
 func TestRunPassesTheLibrariesOn(t *testing.T) {
 	t.Parallel()
 	got := filepath.Join(t.TempDir(), "vm-spec")
@@ -133,7 +161,7 @@ func TestRunPassesTheLibrariesOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := testJobSpec(t, bin)
-	spec.LibDir, spec.LibkrunLogLevel = "/opt/libkrun", "trace"
+	spec.LibDir, spec.LibkrunLogLevel, spec.LogLevel = "/opt/libkrun", "trace", "debug"
 	if _, err := runJob(t, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -146,8 +174,9 @@ func TestRunPassesTheLibrariesOn(t *testing.T) {
 	if err := protodelim.UnmarshalFrom(bufio.NewReader(f), child); err != nil {
 		t.Fatal(err)
 	}
-	if child.GetLibDir() != "/opt/libkrun" || child.GetLibkrunLogLevel() != "trace" {
-		t.Errorf("VM child spec: lib_dir %q, libkrun_log_level %q; want /opt/libkrun and trace", child.GetLibDir(), child.GetLibkrunLogLevel())
+	if child.GetLibDir() != "/opt/libkrun" || child.GetLibkrunLogLevel() != "trace" || child.GetLogLevel() != "debug" {
+		t.Errorf("VM child spec: lib_dir %q, libkrun_log_level %q, log_level %q; want /opt/libkrun, trace and debug",
+			child.GetLibDir(), child.GetLibkrunLogLevel(), child.GetLogLevel())
 	}
 }
 
@@ -461,6 +490,10 @@ func TestRunFails(t *testing.T) {
 	twoVMs.Vms = append(twoVMs.Vms, twoVMs.Vms[0])
 	noLog := testJobSpec(t, fakeJobBinary(t, "exit 0"))
 	noLog.Vms[0].VmLog = filepath.Join(t.TempDir(), "no", "such", "dir", "vm.log")
+	noLevel := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	noLevel.LogLevel = ""
+	badLevel := testJobSpec(t, fakeJobBinary(t, "exit 0"))
+	badLevel.LogLevel = "trace"
 	for name, tt := range map[string]struct {
 		spec      *jobv1.Spec
 		want      string
@@ -472,6 +505,8 @@ func TestRunFails(t *testing.T) {
 		"two VMs":       {twoVMs, "2 VMs", false, true},
 		"no VM log":     {noLog, "VM log", true, false},
 		"no VMs at all": {&jobv1.Spec{}, "0 VMs", false, true},
+		"no log level":  {noLevel, `log level ""`, false, true},
+		"a bad level":   {badLevel, `log level "trace"`, false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -545,7 +580,7 @@ func TestRunRefusesAGarbledSpec(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	live, _ := livenessPipe(t)
-	if err := Run(t.Context(), strings.NewReader("\xff\xff\xff\xff\xff"), &out, live, slog.New(slog.DiscardHandler)); err == nil {
+	if err := Run(t.Context(), strings.NewReader("\xff\xff\xff\xff\xff"), &out, live, slog.New(slog.DiscardHandler), new(slog.LevelVar)); err == nil {
 		t.Fatal("a garbled spec ran")
 	}
 	ev := &jobv1.Event{}

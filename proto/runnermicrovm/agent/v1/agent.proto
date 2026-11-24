@@ -153,6 +153,10 @@ message BootConfig {
   // scratch paths and again after them, root-owned, with its mode, and any
   // missing parent mode 0755; one the image has is left as it is.
   repeated GuestDir guest_dirs = 12;
+  // The agent's log level, the plugin's log_level: "debug", "info", "warn"
+  // or "error". The agent fails its boot on any other value, the empty one
+  // included.
+  string log_level = 14;
 }
 
 // GuestDir is a directory the agent creates in the job's root when the image

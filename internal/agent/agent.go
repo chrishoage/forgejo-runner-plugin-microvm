@@ -30,16 +30,18 @@ import (
 // vsock port: the VM is ready when the agent answers Ping, so every call
 // finds the guest prepared.
 func Main(args []string) int {
-	log := logging.Setup("runner-microvm-agent")
+	log, level := logging.Setup("runner-microvm-agent")
 	if len(args) > 0 {
 		log.Error("the agent takes no arguments", "args", args)
 		return 2
 	}
-	cfg, err := ReadBootConfig(BootConfigPath)
+	cfg, err := ReadBootConfig(BootConfigPath, level)
 	if err != nil {
 		log.Error("boot", "err", err)
 		return 1
 	}
+	log.Debug("read the boot config", "layers", len(cfg.GetLayers()), "mounts", len(cfg.GetMounts()), "disks", len(cfg.GetDisks()),
+		"scratch_paths", len(cfg.GetScratchPaths()), "log_level", cfg.GetLogLevel())
 	rwDisks, err := boot(kernel{}, cfg)
 	if err != nil {
 		log.Error("boot", "err", err)

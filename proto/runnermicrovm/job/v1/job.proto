@@ -51,6 +51,11 @@ message Spec {
   // libkrun_log_level: "warn", "info", "debug" or "trace". The job process
   // passes it on to each VM child, and a VM child refuses any other value.
   string libkrun_log_level = 7;
+  // The log level of the job process and of each of its VM children, the
+  // plugin's log_level: "debug", "info", "warn" or "error". The job process
+  // passes it on to each VM child; either fails on any other value, the
+  // empty one included.
+  string log_level = 8;
 }
 
 // VM is one of the job's VMs, run by one VM child.

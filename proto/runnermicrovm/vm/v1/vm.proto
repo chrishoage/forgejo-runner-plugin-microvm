@@ -58,6 +58,10 @@ message Spec {
   // "trace". Any other value, the empty one included, fails the VM before
   // libkrun is called.
   string libkrun_log_level = 15;
+  // The VM child's log level, from the job spec: "debug", "info", "warn" or
+  // "error". Any other value, the empty one included, fails the VM before
+  // libkrun is loaded.
+  string log_level = 16;
 }
 
 // Mount is a host directory shared into the VM (STO-1).

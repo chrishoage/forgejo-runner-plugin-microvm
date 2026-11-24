@@ -91,7 +91,7 @@ func checkCmd(stdout, stderr io.Writer, getenv func(string) string) int {
 // SIGTERM begins, has ended, or a second one of them, and reloads the config
 // file on each SIGHUP.
 func serveCmd(getenv func(string) string) int {
-	log := logging.Setup(Name)
+	log, level := logging.Setup(Name)
 	// First, so a SIGHUP during startup can't end the plugin, which is
 	// SIGHUP's default action. One queued signal is enough: a reload reads
 	// the file as it is then. Two queued SIGINTs or SIGTERMs are: the first
@@ -104,6 +104,11 @@ func serveCmd(getenv func(string) string) int {
 	defer signal.Stop(term)
 	cfg, err := config.Load(getenv)
 	if err != nil {
+		log.Error("stopped: invalid config", "err", err)
+		return 1
+	}
+	// Before anything else is logged, so the startup log follows it too.
+	if err := logging.SetLevel(level, cfg.LogLevel); err != nil {
 		log.Error("stopped: invalid config", "err", err)
 		return 1
 	}
@@ -138,7 +143,7 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	}
 	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB,
-		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel)
+		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel, "log_level", cfg.LogLevel)
 	logProfiles(log, cfg.Profiles)
 }
 
@@ -256,6 +261,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 		Dirs:            dirs,
 		LibDir:          cfg.LibDir,
 		LibkrunLogLevel: cfg.LibkrunLogLevel,
+		LogLevel:        cfg.LogLevel,
 		JobBinary:       jobBinary,
 		MkfsExt4:        mkfs,
 		Agent:           agent,

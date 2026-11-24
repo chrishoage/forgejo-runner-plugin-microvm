@@ -609,7 +609,11 @@ type BootConfig struct {
 	// creates each one the image lacks, after its own mounts, both before the
 	// scratch paths and again after them, root-owned, with its mode, and any
 	// missing parent mode 0755; one the image has is left as it is.
-	GuestDirs     []*GuestDir `protobuf:"bytes,12,rep,name=guest_dirs,json=guestDirs,proto3" json:"guest_dirs,omitempty"`
+	GuestDirs []*GuestDir `protobuf:"bytes,12,rep,name=guest_dirs,json=guestDirs,proto3" json:"guest_dirs,omitempty"`
+	// The agent's log level, the plugin's log_level: "debug", "info", "warn"
+	// or "error". The agent fails its boot on any other value, the empty one
+	// included.
+	LogLevel      string `protobuf:"bytes,14,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -733,6 +737,13 @@ func (x *BootConfig) GetGuestDirs() []*GuestDir {
 		return x.GuestDirs
 	}
 	return nil
+}
+
+func (x *BootConfig) GetLogLevel() string {
+	if x != nil {
+		return x.LogLevel
+	}
+	return ""
 }
 
 // GuestDir is a directory the agent creates in the job's root when the image
@@ -1159,7 +1170,7 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\xb5\x04\n" +
+	"\rFlushResponse\"\xd2\x04\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
 	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x1b\n" +
@@ -1177,7 +1188,8 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"vsock_port\x18\v \x01(\rR\tvsockPort\x12?\n" +
 	"\n" +
-	"guest_dirs\x18\f \x03(\v2 .runnermicrovm.agent.v1.GuestDirR\tguestDirs\"2\n" +
+	"guest_dirs\x18\f \x03(\v2 .runnermicrovm.agent.v1.GuestDirR\tguestDirs\x12\x1b\n" +
+	"\tlog_level\x18\x0e \x01(\tR\blogLevel\"2\n" +
 	"\bGuestDir\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\rR\x04mode\"4\n" +

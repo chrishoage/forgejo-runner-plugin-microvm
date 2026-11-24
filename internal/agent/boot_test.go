@@ -5,6 +5,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -135,6 +136,7 @@ func testBootConfig() *agentv1.BootConfig {
 		Layers:        []string{"0.erofs", "1.erofs", "2.erofs"},
 		ScratchDevice: "/dev/vda",
 		VsockPort:     1024,
+		LogLevel:      "info",
 	}
 }
 
@@ -631,17 +633,49 @@ func TestReadBootConfig(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadBootConfig(path)
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelError)
+	got, err := ReadBootConfig(path, level)
 	if err != nil || !proto.Equal(got, testBootConfig()) {
 		t.Errorf("ReadBootConfig = %v, %v", got, err)
 	}
-	if _, err := ReadBootConfig(filepath.Join(dir, "missing")); err == nil {
+	if level.Level() != slog.LevelInfo {
+		t.Errorf("level %v; want the boot config's, INFO", level.Level())
+	}
+	if _, err := ReadBootConfig(filepath.Join(dir, "missing"), level); err == nil {
 		t.Error("a missing boot config was read")
 	}
 	if err := os.WriteFile(path, []byte("\xff\xff\xff"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadBootConfig(path); err == nil {
+	if _, err := ReadBootConfig(path, level); err == nil {
 		t.Error("a garbled boot config was read")
+	}
+}
+
+// Only the plugin's bug can send a log_level other than debug, info, warn
+// or error, the empty one included: the agent refuses the boot config, and
+// keeps the level it had.
+func TestReadBootConfigRefusesABadLogLevel(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"", "verbose", "INFO", "warning"} {
+		cfg := testBootConfig()
+		cfg.LogLevel = name
+		b, err := proto.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "boot")
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		level := &slog.LevelVar{}
+		level.Set(slog.LevelWarn)
+		if _, err := ReadBootConfig(path, level); err == nil || !strings.Contains(err.Error(), "log level") {
+			t.Errorf("log_level %q: ReadBootConfig err %v; want one naming the log level", name, err)
+		}
+		if level.Level() != slog.LevelWarn {
+			t.Errorf("log_level %q: level %v; want it kept, WARN", name, level.Level())
+		}
 	}
 }

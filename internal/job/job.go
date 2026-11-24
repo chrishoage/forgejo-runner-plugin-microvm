@@ -57,23 +57,23 @@ func Main(args []string) int {
 	case len(args) == 2 && args[0] == "libs":
 		return vm.Libs(args[1], os.Stdout, os.Stderr)
 	case len(args) == 1 && args[0] == "vm":
-		log := logging.Setup("runner-microvm-vm")
+		log, level := logging.Setup("runner-microvm-vm")
 		live, err := liveness()
 		if err != nil {
 			log.Error("VM child", "err", err)
 			return 1
 		}
 		go dieWithPlugin(live, log, killSelf)
-		return vm.Main(os.Stdin, log)
+		return vm.Main(os.Stdin, log, level)
 	case len(args) == 0:
-		log := logging.Setup("runner-microvm-job")
+		log, level := logging.Setup("runner-microvm-job")
 		live, err := liveness()
 		if err != nil {
 			log.Error("job process", "err", err)
 			return 1
 		}
 		go dieWithPlugin(live, log, killGroup)
-		if err := Run(context.Background(), os.Stdin, os.Stdout, live, log); err != nil {
+		if err := Run(context.Background(), os.Stdin, os.Stdout, live, log, level); err != nil {
 			log.Error("job process", "err", err)
 			return 1
 		}
@@ -143,14 +143,17 @@ func killSelf() { _ = unix.Kill(os.Getpid(), unix.SIGKILL) }
 // Every child, each VM child and mkfs, is forked with Pdeathsig SIGKILL
 // from a locked OS thread of Run's own, which lives until Run returns, by
 // when every child has been waited for.
-func Run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, log *slog.Logger) error {
+//
+// log writes the job process log, at level, which Run sets to the spec's
+// log level before it logs anything else.
+func Run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, log *slog.Logger, level *slog.LevelVar) error {
 	th := startThread()
 	defer th.stop()
-	return run(ctx, in, out, live, th, log)
+	return run(ctx, in, out, live, th, log, level)
 }
 
 // run is Run, forking on th.
-func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *thread, log *slog.Logger) error {
+func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *thread, log *slog.Logger, level *slog.LevelVar) error {
 	spec := &jobv1.Spec{}
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
 		return failBug(out, fmt.Errorf("read the job spec: %w", err))
@@ -158,7 +161,13 @@ func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *th
 	if n := len(spec.GetVms()); n != 1 {
 		return failBug(out, fmt.Errorf("the job spec has %d VMs; a job has exactly one, the job's container", n))
 	}
+	// The plugin always sets it: any other value is its bug.
+	if err := logging.SetLevel(level, spec.GetLogLevel()); err != nil {
+		return failBug(out, fmt.Errorf("the job spec: %w", err))
+	}
 	log = log.With("job", spec.GetJob())
+	log.Debug("read the job spec", "vms", len(spec.GetVms()), "subnet", spec.GetNetwork().GetSubnet(),
+		"lib_dir", spec.GetLibDir(), "libkrun_log_level", spec.GetLibkrunLogLevel(), "log_level", spec.GetLogLevel())
 	network, links, err := startNetwork(spec, log)
 	if err != nil {
 		return fail(out, fmt.Errorf("network: %w", err))
@@ -277,6 +286,7 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 	childSpec, err := specFile(&vmv1.Spec{
 		LibDir:          spec.GetLibDir(),
 		LibkrunLogLevel: spec.GetLibkrunLogLevel(),
+		LogLevel:        spec.GetLogLevel(),
 		Cpus:            v.GetCpus(),
 		MemoryMib:       v.GetMemoryMib(),
 		RootDir:         v.GetRootDir(),

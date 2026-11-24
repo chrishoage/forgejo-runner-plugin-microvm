@@ -71,8 +71,13 @@ type Spec struct {
 	// libkrun_log_level: "warn", "info", "debug" or "trace". The job process
 	// passes it on to each VM child, and a VM child refuses any other value.
 	LibkrunLogLevel string `protobuf:"bytes,7,opt,name=libkrun_log_level,json=libkrunLogLevel,proto3" json:"libkrun_log_level,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The log level of the job process and of each of its VM children, the
+	// plugin's log_level: "debug", "info", "warn" or "error". The job process
+	// passes it on to each VM child; either fails on any other value, the
+	// empty one included.
+	LogLevel      string `protobuf:"bytes,8,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Spec) Reset() {
@@ -150,6 +155,13 @@ func (x *Spec) GetMkfsExt4() string {
 func (x *Spec) GetLibkrunLogLevel() string {
 	if x != nil {
 		return x.LibkrunLogLevel
+	}
+	return ""
+}
+
+func (x *Spec) GetLogLevel() string {
+	if x != nil {
+		return x.LogLevel
 	}
 	return ""
 }
@@ -927,7 +939,7 @@ var File_runnermicrovm_job_v1_job_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\n" +
-	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xfe\x01\n" +
+	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\x9b\x02\n" +
 	"\x04Spec\x12\x10\n" +
 	"\x03job\x18\x01 \x01(\tR\x03job\x12\x1d\n" +
 	"\n" +
@@ -936,7 +948,8 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\anetwork\x18\x04 \x01(\v2\x1d.runnermicrovm.job.v1.NetworkR\anetwork\x12*\n" +
 	"\x03vms\x18\x05 \x03(\v2\x18.runnermicrovm.job.v1.VMR\x03vms\x12\x1b\n" +
 	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\x12*\n" +
-	"\x11libkrun_log_level\x18\a \x01(\tR\x0flibkrunLogLevel\"\xc5\x04\n" +
+	"\x11libkrun_log_level\x18\a \x01(\tR\x0flibkrunLogLevel\x12\x1b\n" +
+	"\tlog_level\x18\b \x01(\tR\blogLevel\"\xc5\x04\n" +
 	"\x02VM\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +
