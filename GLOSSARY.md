@@ -52,6 +52,10 @@ Reading the config file again while the plugin runs, so later jobs get its new p
 How the plugin stops on SIGTERM or SIGINT: it takes no new jobs, serves the jobs it has until each is removed, then exits. A second signal ends it at once.
 _Avoid_: graceful shutdown, stop
 
+**Startup cleanup**:
+Deleting, after the plugin takes its directory locks, every per-job file an earlier plugin process left.
+_Avoid_: garbage collection, recovery
+
 ## Per-job processes
 
 **Job process**:
