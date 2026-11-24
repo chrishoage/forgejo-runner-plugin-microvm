@@ -249,7 +249,10 @@ func TestGuestCantReach(t *testing.T) {
 	})
 
 	t.Run("vsock", func(t *testing.T) {
-		// Every port up to 2048, the agent's among them, and a few above.
+		// Every port up to 2048, the agent's among them, and a few above,
+		// all at once: libkrun leaves a request for a port it doesn't
+		// serve unanswered, so each waits out the probe's 2 s bound,
+		// the kernel's default for a vsock connect.
 		probeIn(t, v, "vsock", "0-2048", agentVsock, "8080", "65535", "4294967294")
 		// The plugin still reaches the agent.
 		probeIn(t, v, "netinfo")

@@ -814,8 +814,19 @@ func discover(xid uint32, mac net.HardwareAddr) []byte {
 	return append(b, 53, 1, 1, 255)        // DHCPDISCOVER, end
 }
 
+// vsockWait bounds each vsock connect: the kernel's own default, so the
+// probe waits as long as a step's connect would. libkrun answers a request
+// for a port it serves as soon as its muxer reads it, a reset at the
+// agent's port within milliseconds, and drops one for any other port
+// unanswered, so each of those waits out the bound.
+const vsockWait = 2 * time.Second
+
 // vsock opens an AF_VSOCK stream connection to cid on every port in ranges
-// and fails if any opens. The kernel bounds each connect (2 s by default).
+// and fails if any opens. All at once, so the scan waits out vsockWait once
+// rather than once for each batch: 2,052 ports, the tests' scan, take as
+// many descriptors, within the guest's hard limit of 4,096, to which Go
+// raises the soft one. A scan beyond the limit fails, as a guest that
+// can't make a vsock socket at all must.
 func vsock(cid uint32, ranges []string) error {
 	var ports []uint32
 	for _, r := range ranges {
@@ -827,24 +838,18 @@ func vsock(cid uint32, ranges []string) error {
 	}
 	slices.Sort(ports)
 	ports = slices.Compact(ports)
-	// A guest that can't make a vsock socket at all must not pass.
-	errNoSocket := errors.New("no vsock socket")
-	errs := scan(ports, func(port uint32) error {
-		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-		if err != nil {
-			return fmt.Errorf("%w: %w", errNoSocket, err)
-		}
-		defer func() { _ = unix.Close(fd) }()
-		return unix.Connect(fd, &unix.SockaddrVM{CID: cid, Port: port})
-	})
+	addrs := make([]unix.Sockaddr, len(ports))
+	for i, p := range ports {
+		addrs[i] = &unix.SockaddrVM{CID: cid, Port: p}
+	}
+	errs, err := connectAll(addrs, vsockWait, len(addrs))
+	if err != nil {
+		return fmt.Errorf("vsock: %w", err)
+	}
 	var opened []string
 	reasons := map[string]int{}
-	for _, p := range ports {
-		err := errs[p]
-		if errors.Is(err, errNoSocket) {
-			return err
-		}
-		if err == nil {
+	for i, p := range ports {
+		if err := errs[i]; err == nil {
 			opened = append(opened, strconv.FormatUint(uint64(p), 10))
 		} else {
 			reasons[err.Error()]++
