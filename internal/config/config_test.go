@@ -104,6 +104,20 @@ func TestLogLevel(t *testing.T) {
 	}
 }
 
+// keep_job_logs takes YAML's plain true and false; left out, it is false.
+func TestKeepJobLogs(t *testing.T) {
+	t.Parallel()
+	for content, want := range map[string]bool{
+		"":                       false,
+		"keep_job_logs: true\n":  true,
+		"keep_job_logs: false\n": false,
+	} {
+		if got := mustLoad(t, content).KeepJobLogs; got != want {
+			t.Errorf("%q: %v, want %v", content, got, want)
+		}
+	}
+}
+
 // No file at the default path, an empty file, and a file with only comments
 // or a null document each give every built-in value (CFG-1).
 func TestNoFileOrEmptyFileGivesBuiltinValues(t *testing.T) {
@@ -193,6 +207,7 @@ cache_max_gib: 5
 lib_dir: %[1]s/lib/
 libkrun_log_level: debug
 log_level: warn
+keep_job_logs: true
 `, base))
 	want := &Config{
 		path:            cfg.File,
@@ -207,6 +222,7 @@ log_level: warn
 		LibDir:          base + "/lib",
 		LibkrunLogLevel: "debug",
 		LogLevel:        "warn",
+		KeepJobLogs:     true,
 		Profiles:        Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -282,6 +298,11 @@ func TestInvalidPluginLevelValuesFail(t *testing.T) {
 		{"log_level: INFO\n", `line 1: log_level: must be debug, info, warn or error, not "INFO"`},
 		{"log_level: 0\n", `line 1: log_level: must be a string`},
 		{"log_level:\n", `line 1: log_level: has no value`},
+		{"\nkeep_job_logs: yes\n", `line 2: keep_job_logs: must be true or false, not "yes"`},
+		{"keep_job_logs: \"true\"\n", `line 1: keep_job_logs: must be true or false, not "true"`},
+		{"keep_job_logs: 1\n", `line 1: keep_job_logs: must be true or false, not "1"`},
+		{"keep_job_logs:\n", `line 1: keep_job_logs: has no value`},
+		{"keep_job_logs: [true]\n", `line 1: keep_job_logs: must be true or false`},
 		{"profiles: [default]\n", `line 1: profiles: must be a mapping of profile names to profiles`},
 		{"profiles:\n  big: 8\n", `line 2: profile "big": must be a mapping of profile keys`},
 		{"max_memory_mib: 1\nmax_memory_mib: 2\n", `line 2: max_memory_mib: is already set on line 1`},

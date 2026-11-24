@@ -214,14 +214,14 @@ func TestReloadLogsPluginLevelKeysAsNeedingARestart(t *testing.T) {
 			base, state, base, base, base)
 	}
 	f := newReloadFixture(t, dirs("state")+"max_memory_mib: 4096\nprofiles:\n  big: {cpus: 3}\n")
-	writeFile(t, f.path, dirs("state2")+"max_memory_mib: 2048\ncache_max_gib: 0\nlib_dir: /opt/libkrun\nlibkrun_log_level: debug\nlog_level: error\n"+
+	writeFile(t, f.path, dirs("state2")+"max_memory_mib: 2048\ncache_max_gib: 0\nlib_dir: /opt/libkrun\nlibkrun_log_level: debug\nlog_level: error\nkeep_job_logs: true\n"+
 		"profiles:\n  big: {cpus: 4}\n")
 
 	next := reloadConfig(f.log, f.srv, f.cfg, (*config.Config).Reload)
 	if next.StateDir != base+"/state" || next.MaxMemoryMiB != 4096 || next.CacheMaxGiB != 20 || next.LibDir != "" ||
-		next.LibkrunLogLevel != "warn" || next.LogLevel != "info" {
-		t.Errorf("state_dir %s, max_memory_mib %d, cache_max_gib %d, lib_dir %q, libkrun_log_level %s, log_level %s: want the running values",
-			next.StateDir, next.MaxMemoryMiB, next.CacheMaxGiB, next.LibDir, next.LibkrunLogLevel, next.LogLevel)
+		next.LibkrunLogLevel != "warn" || next.LogLevel != "info" || next.KeepJobLogs {
+		t.Errorf("state_dir %s, max_memory_mib %d, cache_max_gib %d, lib_dir %q, libkrun_log_level %s, log_level %s, keep_job_logs %v: want the running values",
+			next.StateDir, next.MaxMemoryMiB, next.CacheMaxGiB, next.LibDir, next.LibkrunLogLevel, next.LogLevel, next.KeepJobLogs)
 	}
 	if j := jobOf(t, f.srv, createOn(t, f.srv, bigLabel)); j.profile.CPUs != 4 {
 		t.Errorf("the profiles did not reload: %+v", j.profile)
@@ -235,6 +235,7 @@ func TestReloadLogsPluginLevelKeysAsNeedingARestart(t *testing.T) {
 		`key=lib_dir running="" file=/opt/libkrun`,
 		`key=libkrun_log_level running=warn file=debug`,
 		`key=log_level running=info file=error`,
+		`key=keep_job_logs running=false file=true`,
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log does not contain %q:\n%s", want, log)

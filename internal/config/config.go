@@ -84,6 +84,9 @@ type Config struct {
 	// LogLevel is the log level of the plugin, every job process, every
 	// VM child and every agent, one of logLevels.
 	LogLevel string
+	// KeepJobLogs makes Remove move each job's job logs to
+	// <state>/logs/<id>/ rather than delete them (LOG-3).
+	KeepJobLogs bool
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
 
@@ -225,6 +228,7 @@ func (c *Config) Reload() (*Config, []Change, error) {
 		{"lib_dir", c.LibDir, f.LibDir},
 		{"libkrun_log_level", c.LibkrunLogLevel, f.LibkrunLogLevel},
 		{"log_level", c.LogLevel, f.LogLevel},
+		{"keep_job_logs", strconv.FormatBool(c.KeepJobLogs), strconv.FormatBool(f.KeepJobLogs)},
 	} {
 		if k.running != k.file {
 			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
@@ -478,6 +482,8 @@ func (d *decoder) top(c *Config, root *yaml.Node) {
 			ok = d.oneOf(p, libkrunLogLevels, &c.LibkrunLogLevel)
 		case "log_level":
 			ok = d.oneOf(p, logLevels, &c.LogLevel)
+		case "keep_job_logs":
+			c.KeepJobLogs, ok = d.boolean(p, "")
 		case "profiles":
 			d.profiles(c, p)
 		default:

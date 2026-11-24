@@ -350,8 +350,8 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 		MemoryMib:        j.profile.MemoryMiB,
 		ScratchDisk:      filepath.Join(vmState, "scratch.ext4"),
 		ScratchSizeBytes: j.profile.ScratchBytes(),
-		VmLog:            filepath.Join(vmState, "vm.log"),
-		Console:          filepath.Join(vmState, "console"),
+		VmLog:            filepath.Join(vmState, vmLogName),
+		Console:          filepath.Join(vmState, consoleName),
 		AgentSocket:      filepath.Join(vmRuntime, "agent.sock"),
 		AgentPort:        agentPort,
 		RootDir:          root,
@@ -373,7 +373,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 		MkfsExt4:        s.cfg.MkfsExt4,
 		Network:         jobNetwork(),
 		Vms:             []*jobv1.VM{vm},
-	}, filepath.Join(s.jobStateDir(j.id), "job.log"))
+	}, filepath.Join(s.jobStateDir(j.id), jobLogName))
 	if err != nil {
 		return imagecache.Image{}, fmt.Errorf("job process: %w", err)
 	}

@@ -73,7 +73,7 @@ func TestReloadKeepsPluginLevelValues(t *testing.T) {
 	}
 	running := *c
 	rewrite(t, path, dirsConfig(base, "run/other.sock", "state2", "cache", "run/jobs")+
-		"max_memory_mib: 8192\ncache_max_gib: 0\nlib_dir: /opt/libkrun\nlibkrun_log_level: trace\nlog_level: debug\nprofiles:\n  big: {cpus: 4}\n")
+		"max_memory_mib: 8192\ncache_max_gib: 0\nlib_dir: /opt/libkrun\nlibkrun_log_level: trace\nlog_level: debug\nkeep_job_logs: true\nprofiles:\n  big: {cpus: 4}\n")
 
 	next, changes := mustReload(t, c)
 	want := []Change{
@@ -84,6 +84,7 @@ func TestReloadKeepsPluginLevelValues(t *testing.T) {
 		{Key: "lib_dir", Running: "", File: "/opt/libkrun"},
 		{Key: "libkrun_log_level", Running: "warn", File: "trace"},
 		{Key: "log_level", Running: "info", File: "debug"},
+		{Key: "keep_job_logs", Running: "false", File: "true"},
 	}
 	if !reflect.DeepEqual(changes, want) {
 		t.Errorf("changes %+v, want %+v", changes, want)
@@ -91,7 +92,8 @@ func TestReloadKeepsPluginLevelValues(t *testing.T) {
 	if next.Listen != running.Listen || next.StateDir != running.StateDir || next.CacheDir != running.CacheDir ||
 		next.RuntimeDir != running.RuntimeDir || next.MaxMemoryMiB != running.MaxMemoryMiB ||
 		next.CacheMaxGiB != running.CacheMaxGiB || next.LibDir != running.LibDir ||
-		next.LibkrunLogLevel != running.LibkrunLogLevel || next.LogLevel != running.LogLevel {
+		next.LibkrunLogLevel != running.LibkrunLogLevel || next.LogLevel != running.LogLevel ||
+		next.KeepJobLogs != running.KeepJobLogs {
 		t.Errorf("a plugin-level value changed: %+v, running %+v", next, running)
 	}
 	if next.Profiles["big"].CPUs != 4 {

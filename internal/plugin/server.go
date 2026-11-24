@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -72,6 +73,9 @@ type Config struct {
 	// LogLevel is the log level every job process, VM child and agent
 	// follows, the plugin's own: debug, info, warn or error.
 	LogLevel string
+	// KeepJobLogs makes Remove move each job's job logs to
+	// <state>/logs/<id>/ rather than delete them (LOG-3).
+	KeepJobLogs bool
 	// JobBinary is the extracted job binary's path.
 	JobBinary string
 	// MkfsExt4 is the host's mkfs.ext4, which formats each scratch disk.
@@ -137,6 +141,9 @@ type Server struct {
 	// warnedIgnored is set by the first Create that carries a request field
 	// the plugin ignores, which logs the one warning naming them.
 	warnedIgnored atomic.Bool
+
+	// newID makes each environment id add tries: newID outside tests.
+	newID func() (string, error)
 }
 
 // job is one job in the table, from Create to Remove.
@@ -226,7 +233,7 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	hs.SetServingStatus(pluginv1alpha.BackendPlugin_ServiceDesc.ServiceName, healthv1.HealthCheckResponse_SERVING)
 	return &Server{
 		log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles,
-		drained: make(chan struct{}), health: hs,
+		drained: make(chan struct{}), health: hs, newID: newID,
 	}, nil
 }
 
@@ -469,11 +476,11 @@ func (s *Server) add(ctx context.Context, image, hostname, name string, prof con
 		return nil, errShuttingDown
 	}
 	for {
-		id, err := newID()
+		id, err := s.newID()
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "new environment id: %v", err)
 		}
-		if _, taken := s.jobs[id]; taken {
+		if _, taken := s.jobs[id]; taken || s.hasKeptLogs(id) {
 			continue
 		}
 		jobCtx, cancel := context.WithCancel(context.Background())
@@ -485,6 +492,20 @@ func (s *Server) add(ctx context.Context, image, hostname, name string, prof con
 		s.jobs[id] = j
 		return j, nil
 	}
+}
+
+// hasKeptLogs reports whether, with keep_job_logs set, an earlier job's kept
+// logs are at <state>/logs/<id>. Kept logs outlive restarts, which the job
+// table doesn't, so an id is fresh only if it names none: a job under such
+// an id would lose its own logs at Remove, whose move never replaces them.
+// Only a path that is there counts; any other error is left to that move,
+// which warns.
+func (s *Server) hasKeptLogs(id string) bool {
+	if !s.cfg.KeepJobLogs {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(s.cfg.Dirs.State, "logs", id))
+	return err == nil
 }
 
 // saturatingAdd returns a+b, both at least 0, or the largest Duration where
@@ -675,8 +696,10 @@ func (s *Server) removeForgotten(ctx context.Context, j *job, timeout time.Durat
 const flushTimeout = 30 * time.Second
 
 // remove tears down j, which is out of the table: it stops its backstop,
-// flushes its VM, ends the job process, which ends the VM, and deletes the
-// job's files.
+// flushes its VM, ends the job process, which ends the VM, keeps the job's
+// job logs when the operator asked to, and deletes the job's files. Every
+// removal comes here, the runner's Remove, the backstop's and Close's, so
+// logs are kept whatever removed the job.
 func (s *Server) remove(ctx context.Context, j *job) error {
 	if j.backstop != nil {
 		j.backstop.Stop()
@@ -689,6 +712,7 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 	// The kill can't be left half done: it returns once the group is
 	// reaped, moments after SIGKILL.
 	err := s.stop(context.WithoutCancel(ctx), j)
+	kept := s.keepJobLogs(ctx, j.id)
 	err = errors.Join(err,
 		s.cfg.Cache.Release(context.WithoutCancel(ctx), j.id),
 		removeTree(s.jobStateDir(j.id)),
@@ -700,8 +724,28 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 		// nothing more, but may leave its files behind.
 		level = slog.LevelWarn
 	}
-	s.log.Log(ctx, level, "removed", "env", j.id, "err", err, "since_create", time.Since(j.created).Round(time.Millisecond))
+	attrs := []any{"env", j.id, "err", err, "since_create", time.Since(j.created).Round(time.Millisecond)}
+	if kept != "" {
+		attrs = append(attrs, "kept_logs", kept)
+	}
+	s.log.Log(ctx, level, "removed", attrs...)
 	return err
+}
+
+// keepJobLogs moves the job logs of the job id to <state>/logs/<id>/ when
+// keep_job_logs is set, and returns that directory, or "" when none were
+// kept. A move that fails is a warning, and the job's logs are then deleted
+// with its state directory: logs are worth keeping, not worth failing a
+// Remove for.
+func (s *Server) keepJobLogs(ctx context.Context, id string) string {
+	if !s.cfg.KeepJobLogs {
+		return ""
+	}
+	kept, err := keepJobLogs(s.cfg.Dirs.State, id, renameNoReplace)
+	if err != nil {
+		s.log.WarnContext(ctx, "could not keep the job's logs: deleting them", "env", id, "err", err)
+	}
+	return kept
 }
 
 // flush flushes the VM of j, which is locked, before Remove kills it, so the
