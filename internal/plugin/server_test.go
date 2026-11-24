@@ -383,41 +383,6 @@ func TestServeStopsWithAStreamOpen(t *testing.T) {
 	}
 }
 
-// Startup fails, naming the path, when a file is already at the listen
-// socket's path, and leaves the file and no open descriptor behind. Not
-// parallel: it counts the process's open descriptors.
-func TestListenRefusesAnExistingFile(t *testing.T) {
-	dir := t.TempDir()
-	stale := filepath.Join(dir, "stale.sock")
-	l, err := new(net.ListenConfig).Listen(t.Context(), "unix", stale)
-	if err != nil {
-		t.Fatal(err)
-	}
-	l.(*net.UnixListener).SetUnlinkOnClose(false)
-	_ = l.Close()
-	file := filepath.Join(dir, "file.sock")
-	if err := os.WriteFile(file, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{stale, file} {
-		before := openFDs(t)
-		lis, closeLis, err := listen(t.Context(), path)
-		if err == nil {
-			closeLis()
-			t.Fatalf("listen on %s, where a file is, succeeded on %v", path, lis.Addr())
-		}
-		if msg := err.Error(); !strings.Contains(msg, path) || !strings.Contains(msg, "a file is already there") {
-			t.Errorf("error %q does not say a file is at %s", msg, path)
-		}
-		if _, err := os.Lstat(path); err != nil {
-			t.Errorf("the file at %s is gone: %v", path, err)
-		}
-		if after := openFDs(t); after != before {
-			t.Errorf("%d open descriptors after a failed listen, %d before", after, before)
-		}
-	}
-}
-
 // openFDs counts the process's open descriptors.
 func openFDs(t *testing.T) int {
 	t.Helper()

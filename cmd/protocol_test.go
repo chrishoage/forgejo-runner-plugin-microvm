@@ -28,6 +28,9 @@ import (
 	"code.forgejo.org/forgejo/runner/v13/act/runner"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
+	grpclib "google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // The workflows both the harness and this test run, and what each one's
@@ -546,15 +549,9 @@ func launchPlugin(t *testing.T, bin, profiles string, root bool) *plugin {
 
 // restart runs the plugin p ran again, unprivileged, on the same config
 // file and directories, once p's own process has died: launchPluginIn on
-// p's base. The listen socket p left is deleted first.
-//
-// SHORTCUT(#11): startup doesn't delete a socket a crashed plugin left, so
-// the test does.
+// p's base. The plugin binds its socket over the one p left.
 func (p *plugin) restart(t *testing.T) *plugin {
 	t.Helper()
-	if err := os.Remove(p.sock); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
 	return launchPluginIn(t, p.base, p.bin, p.profiles, false)
 }
 
@@ -655,10 +652,26 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 			t.Error(err)
 		}
 	})
+	// A socket a dead plugin left may be at sock, which the new one binds
+	// over, and the new one can have the inode number the deleted one had,
+	// so the wait is for health to answer SERVING, which only a live plugin
+	// does. A root plugin's base is fresh: its socket is the new one, which
+	// the test makes its own to connect.
+	chmodded := !root
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			break
+		if fi, err := os.Lstat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			if !chmodded {
+				// It is root's, mode 0660 (internal/plugin's listen),
+				// and the test isn't root.
+				if err := asRoot("chmod", "0666", sock); err != nil {
+					t.Fatal(err)
+				}
+				chmodded = true
+			}
+			if serving(sock) {
+				break
+			}
 		}
 		select {
 		case <-exited:
@@ -666,21 +679,29 @@ func launchPluginIn(t *testing.T, base, bin, profiles string, root bool) *plugin
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no listen socket at %s\n%s", sock, log.String())
+			t.Fatalf("no plugin serving at %s\n%s", sock, log.String())
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if root {
-		// Its mode is the umask's (internal/plugin's listen), and the
-		// test isn't root.
-		if err := asRoot("chmod", "0666", sock); err != nil {
-			t.Fatal(err)
-		}
 	}
 	return &plugin{
 		sock: sock, config: cfg, dirs: dirs, state: filepath.Join(base, "state"), pid: pid, log: log,
 		base: base, bin: bin, profiles: profiles,
 	}
+}
+
+// serving reports whether the plugin listening at sock answers health's
+// Check with SERVING within a second. Each call dials afresh, so no
+// client's reconnect backoff delays the next.
+func serving(sock string) bool {
+	conn, err := grpclib.NewClient("unix://"+sock, grpclib.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := healthv1.NewHealthClient(conn).Check(ctx, &healthv1.HealthCheckRequest{})
+	return err == nil && resp.GetStatus() == healthv1.HealthCheckResponse_SERVING
 }
 
 // removeAll deletes dir, giving back the write bit an image's read-only
