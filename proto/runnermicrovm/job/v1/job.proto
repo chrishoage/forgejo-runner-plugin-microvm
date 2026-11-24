@@ -47,6 +47,10 @@ message Spec {
   // The host's mkfs.ext4, which the plugin found at startup. The job process
   // formats each VM's scratch disk with it (VM-5).
   string mkfs_ext4 = 6;
+  // libkrun's log level for each of the job's VMs, the plugin's
+  // libkrun_log_level: "warn", "info", "debug" or "trace". The job process
+  // passes it on to each VM child, and a VM child refuses any other value.
+  string libkrun_log_level = 7;
 }
 
 // VM is one of the job's VMs, run by one VM child.

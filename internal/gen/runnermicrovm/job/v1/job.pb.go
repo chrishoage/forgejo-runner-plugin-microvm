@@ -66,9 +66,13 @@ type Spec struct {
 	Vms []*VM `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
 	// The host's mkfs.ext4, which the plugin found at startup. The job process
 	// formats each VM's scratch disk with it (VM-5).
-	MkfsExt4      string `protobuf:"bytes,6,opt,name=mkfs_ext4,json=mkfsExt4,proto3" json:"mkfs_ext4,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MkfsExt4 string `protobuf:"bytes,6,opt,name=mkfs_ext4,json=mkfsExt4,proto3" json:"mkfs_ext4,omitempty"`
+	// libkrun's log level for each of the job's VMs, the plugin's
+	// libkrun_log_level: "warn", "info", "debug" or "trace". The job process
+	// passes it on to each VM child, and a VM child refuses any other value.
+	LibkrunLogLevel string `protobuf:"bytes,7,opt,name=libkrun_log_level,json=libkrunLogLevel,proto3" json:"libkrun_log_level,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Spec) Reset() {
@@ -139,6 +143,13 @@ func (x *Spec) GetVms() []*VM {
 func (x *Spec) GetMkfsExt4() string {
 	if x != nil {
 		return x.MkfsExt4
+	}
+	return ""
+}
+
+func (x *Spec) GetLibkrunLogLevel() string {
+	if x != nil {
+		return x.LibkrunLogLevel
 	}
 	return ""
 }
@@ -916,7 +927,7 @@ var File_runnermicrovm_job_v1_job_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\n" +
-	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xd2\x01\n" +
+	"\x1erunnermicrovm/job/v1/job.proto\x12\x14runnermicrovm.job.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xfe\x01\n" +
 	"\x04Spec\x12\x10\n" +
 	"\x03job\x18\x01 \x01(\tR\x03job\x12\x1d\n" +
 	"\n" +
@@ -924,7 +935,8 @@ const file_runnermicrovm_job_v1_job_proto_rawDesc = "" +
 	"\alib_dir\x18\x03 \x01(\tR\x06libDir\x127\n" +
 	"\anetwork\x18\x04 \x01(\v2\x1d.runnermicrovm.job.v1.NetworkR\anetwork\x12*\n" +
 	"\x03vms\x18\x05 \x03(\v2\x18.runnermicrovm.job.v1.VMR\x03vms\x12\x1b\n" +
-	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\"\xc5\x04\n" +
+	"\tmkfs_ext4\x18\x06 \x01(\tR\bmkfsExt4\x12*\n" +
+	"\x11libkrun_log_level\x18\a \x01(\tR\x0flibkrunLogLevel\"\xc5\x04\n" +
 	"\x02VM\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +

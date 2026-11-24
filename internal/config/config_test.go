@@ -16,15 +16,16 @@ import (
 // path, which names file when it isn't empty.
 func wantBuiltin(path, file string) *Config {
 	return &Config{
-		path:        path,
-		named:       file != "",
-		File:        file,
-		Listen:      "/run/runner-microvm/runner-microvm.sock",
-		StateDir:    "/var/lib/runner-microvm",
-		CacheDir:    "/var/cache/runner-microvm",
-		RuntimeDir:  "/run/runner-microvm/jobs",
-		CacheMaxGiB: 20,
-		Profiles:    Profiles{},
+		path:            path,
+		named:           file != "",
+		File:            file,
+		Listen:          "/run/runner-microvm/runner-microvm.sock",
+		StateDir:        "/var/lib/runner-microvm",
+		CacheDir:        "/var/cache/runner-microvm",
+		RuntimeDir:      "/run/runner-microvm/jobs",
+		CacheMaxGiB:     20,
+		LibkrunLogLevel: "warn",
+		Profiles:        Profiles{},
 	}
 }
 
@@ -67,6 +68,22 @@ func wantErr(t *testing.T, path, msg, want string) {
 	t.Helper()
 	if full := fmt.Sprintf("config %s: %s", path, want); !strings.Contains(msg, full) {
 		t.Errorf("error:\n%s\nwant it to contain:\n%s", msg, full)
+	}
+}
+
+// libkrun_log_level takes each of its four values; left out, it is warn.
+func TestLibkrunLogLevel(t *testing.T) {
+	t.Parallel()
+	for content, want := range map[string]string{
+		"":                           "warn",
+		"libkrun_log_level: warn\n":  "warn",
+		"libkrun_log_level: info\n":  "info",
+		"libkrun_log_level: debug\n": "debug",
+		"libkrun_log_level: trace\n": "trace",
+	} {
+		if got := mustLoad(t, content).LibkrunLogLevel; got != want {
+			t.Errorf("%q: %q, want %q", content, got, want)
+		}
 	}
 }
 
@@ -157,19 +174,21 @@ runtime_dir: %[1]s/runtime
 max_memory_mib: 16384
 cache_max_gib: 5
 lib_dir: %[1]s/lib/
+libkrun_log_level: debug
 `, base))
 	want := &Config{
-		path:         cfg.File,
-		named:        true,
-		File:         cfg.File,
-		Listen:       base + "/listen/rm.sock",
-		StateDir:     base + "/state",
-		CacheDir:     base + "/cache",
-		RuntimeDir:   base + "/runtime",
-		MaxMemoryMiB: 16384,
-		CacheMaxGiB:  5,
-		LibDir:       base + "/lib",
-		Profiles:     Profiles{},
+		path:            cfg.File,
+		named:           true,
+		File:            cfg.File,
+		Listen:          base + "/listen/rm.sock",
+		StateDir:        base + "/state",
+		CacheDir:        base + "/cache",
+		RuntimeDir:      base + "/runtime",
+		MaxMemoryMiB:    16384,
+		CacheMaxGiB:     5,
+		LibDir:          base + "/lib",
+		LibkrunLogLevel: "debug",
+		Profiles:        Profiles{},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v, want %+v", cfg, want)
@@ -234,6 +253,11 @@ func TestInvalidPluginLevelValuesFail(t *testing.T) {
 		{"lib_dir: lib\n", `line 1: lib_dir: must be an absolute path, not "lib"`},
 		{"lib_dir: \"\"\n", `line 1: lib_dir: must be an absolute path, not ""`},
 		{"lib_dir:\n", `line 1: lib_dir: has no value`},
+		{"\nlibkrun_log_level: error\n", `line 2: libkrun_log_level: must be warn, info, debug or trace, not "error"`},
+		{"libkrun_log_level: off\n", `line 1: libkrun_log_level: must be warn, info, debug or trace, not "off"`},
+		{"libkrun_log_level: DEBUG\n", `line 1: libkrun_log_level: must be warn, info, debug or trace, not "DEBUG"`},
+		{"libkrun_log_level: 4\n", `line 1: libkrun_log_level: must be a string`},
+		{"libkrun_log_level:\n", `line 1: libkrun_log_level: has no value`},
 		{"profiles: [default]\n", `line 1: profiles: must be a mapping of profile names to profiles`},
 		{"profiles:\n  big: 8\n", `line 2: profile "big": must be a mapping of profile keys`},
 		{"max_memory_mib: 1\nmax_memory_mib: 2\n", `line 2: max_memory_mib: is already set on line 1`},

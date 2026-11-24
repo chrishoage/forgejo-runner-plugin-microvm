@@ -73,9 +73,13 @@ type Spec struct {
 	// SOCK_DGRAM socket, one Ethernet frame per datagram.
 	GuestMac string `protobuf:"bytes,12,opt,name=guest_mac,json=guestMac,proto3" json:"guest_mac,omitempty"`
 	// The agent's boot config, passed on to the agent unopened.
-	Boot          *v1.BootConfig `protobuf:"bytes,13,opt,name=boot,proto3" json:"boot,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Boot *v1.BootConfig `protobuf:"bytes,13,opt,name=boot,proto3" json:"boot,omitempty"`
+	// libkrun's log level, from the job spec: "warn", "info", "debug" or
+	// "trace". Any other value, the empty one included, fails the VM before
+	// libkrun is called.
+	LibkrunLogLevel string `protobuf:"bytes,15,opt,name=libkrun_log_level,json=libkrunLogLevel,proto3" json:"libkrun_log_level,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Spec) Reset() {
@@ -204,6 +208,13 @@ func (x *Spec) GetBoot() *v1.BootConfig {
 		return x.Boot
 	}
 	return nil
+}
+
+func (x *Spec) GetLibkrunLogLevel() string {
+	if x != nil {
+		return x.LibkrunLogLevel
+	}
+	return ""
 }
 
 // Mount is a host directory shared into the VM (STO-1).
@@ -339,7 +350,7 @@ var File_runnermicrovm_vm_v1_vm_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	"\n" +
-	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\xe0\x03\n" +
+	"\x1crunnermicrovm/vm/v1/vm.proto\x12\x13runnermicrovm.vm.v1\x1a\"runnermicrovm/agent/v1/agent.proto\"\x8c\x04\n" +
 	"\x04Spec\x12\x17\n" +
 	"\alib_dir\x18\x01 \x01(\tR\x06libDir\x12\x12\n" +
 	"\x04cpus\x18\x02 \x01(\rR\x04cpus\x12\x1d\n" +
@@ -357,7 +368,8 @@ const file_runnermicrovm_vm_v1_vm_proto_rawDesc = "" +
 	" \x03(\v2\x1a.runnermicrovm.vm.v1.MountR\x06mounts\x12/\n" +
 	"\x05disks\x18\v \x03(\v2\x19.runnermicrovm.vm.v1.DiskR\x05disks\x12\x1b\n" +
 	"\tguest_mac\x18\f \x01(\tR\bguestMac\x126\n" +
-	"\x04boot\x18\r \x01(\v2\".runnermicrovm.agent.v1.BootConfigR\x04boot\"P\n" +
+	"\x04boot\x18\r \x01(\v2\".runnermicrovm.agent.v1.BootConfigR\x04boot\x12*\n" +
+	"\x11libkrun_log_level\x18\x0f \x01(\tR\x0flibkrunLogLevel\"P\n" +
 	"\x05Mount\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x10\n" +
 	"\x03tag\x18\x02 \x01(\tR\x03tag\x12\x1d\n" +

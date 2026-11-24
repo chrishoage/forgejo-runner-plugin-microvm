@@ -54,7 +54,7 @@ func testSpec() *vmv1.Spec {
 	return &vmv1.Spec{
 		Cpus: 2, MemoryMib: 1024, RootDir: "/state/jobs/j/0/root", LayerDir: "/cache/jobs/j/0", LayerTag: "the-layers", Console: "/state/jobs/j/0/console",
 		AgentSocket: "/runtime/j/0/agent.sock", AgentPort: 1024, ScratchDisk: "/state/jobs/j/0/scratch.ext4",
-		GuestMac: "02:00:c6:12:00:02",
+		GuestMac: "02:00:c6:12:00:02", LibkrunLogLevel: "warn",
 	}
 }
 
@@ -222,6 +222,28 @@ func TestBootRefusesCPUCounts(t *testing.T) {
 		}
 		if len(calls) != 0 {
 			t.Errorf("%d CPUs: called libkrun: %v", n, calls)
+		}
+	}
+}
+
+// libkrun's log level is the spec's, by libkrun's numbers; any other name
+// fails before libkrun is called.
+func TestBootSetsTheLibkrunLogLevel(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]string{"warn": "set_log_level 2", "info": "set_log_level 3", "debug": "set_log_level 4", "trace": "set_log_level 5"} {
+		var calls []string
+		spec := testSpec()
+		spec.LibkrunLogLevel = name
+		if err := boot(fakeKrun(&calls, ""), spec); err != nil || len(calls) == 0 || calls[0] != want {
+			t.Errorf("%s: err %v, calls %v; want %q first", name, err, calls, want)
+		}
+	}
+	for _, name := range []string{"", "error", "off", "DEBUG"} {
+		var calls []string
+		spec := testSpec()
+		spec.LibkrunLogLevel = name
+		if err := boot(fakeKrun(&calls, ""), spec); err == nil || len(calls) != 0 {
+			t.Errorf("%q: err %v, calls %v; want an error and no call", name, err, calls)
 		}
 	}
 }

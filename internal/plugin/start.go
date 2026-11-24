@@ -363,12 +363,13 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (map[string]stri
 	}
 	booting := time.Now()
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
-		Job:       j.id,
-		JobBinary: s.cfg.JobBinary,
-		LibDir:    s.cfg.LibDir,
-		MkfsExt4:  s.cfg.MkfsExt4,
-		Network:   jobNetwork(),
-		Vms:       []*jobv1.VM{vm},
+		Job:             j.id,
+		JobBinary:       s.cfg.JobBinary,
+		LibDir:          s.cfg.LibDir,
+		LibkrunLogLevel: s.cfg.LibkrunLogLevel,
+		MkfsExt4:        s.cfg.MkfsExt4,
+		Network:         jobNetwork(),
+		Vms:             []*jobv1.VM{vm},
 	}, filepath.Join(s.jobStateDir(j.id), "job.log"))
 	if err != nil {
 		return nil, fmt.Errorf("job process: %w", err)

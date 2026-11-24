@@ -66,6 +66,9 @@ type Config struct {
 	Dirs Dirs
 	// LibDir holds libkrun and libkrunfw; empty loads them by soname.
 	LibDir string
+	// LibkrunLogLevel is libkrun's log level in every VM: warn, info,
+	// debug or trace.
+	LibkrunLogLevel string
 	// JobBinary is the extracted job binary's path.
 	JobBinary string
 	// MkfsExt4 is the host's mkfs.ext4, which formats each scratch disk.

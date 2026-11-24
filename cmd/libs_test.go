@@ -65,3 +65,33 @@ func TestLibsBySoname(t *testing.T) {
 	}
 	bootVM(t, p, "soname")
 }
+
+// libkrunDebug matches a libkrun debug line in a VM log: libkrun's logger
+// writes the level after the time.
+var libkrunDebug = regexp.MustCompile(`(?m)^\[\S+ DEBUG `)
+
+// With libkrun_log_level: debug, a VM's log holds libkrun's debug lines;
+// with the built-in, warn, none.
+func TestLibkrunLogLevel(t *testing.T) {
+	t.Parallel()
+	bin := buildPlugin(t)
+	for _, tc := range []struct {
+		name, settings string
+		debug          bool
+	}{
+		{"builtin", "", false},
+		{"debug", "libkrun_log_level: debug\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := startPluginSetup(t, bin, pluginSetup{settings: "lib_dir: " + devLibDir(t) + "\n" + tc.settings})
+			v := bootVM(t, p, "krunlog")
+			b, err := os.ReadFile(filepath.Join(p.state, "jobs", v.id, "0", "vm.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := libkrunDebug.Match(b); got != tc.debug {
+				t.Errorf("libkrun debug lines in the VM log: %t, want %t; its start:\n%s", got, tc.debug, b[:min(len(b), 4<<10)])
+			}
+		})
+	}
+}

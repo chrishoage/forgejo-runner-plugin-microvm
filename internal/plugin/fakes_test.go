@@ -54,14 +54,17 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 		cache.dir = dirs.Cache
 	}
 	srv, err := NewServer(discardLog(), Config{
-		Arch:         arch,
-		Dirs:         dirs,
-		JobBinary:    "/fake/runner-microvm-job",
-		MkfsExt4:     "/fake/mkfs.ext4",
-		Agent:        agent,
-		Cache:        cache,
-		Launcher:     launcher,
-		ReadyTimeout: 5 * time.Second,
+		Arch:      arch,
+		Dirs:      dirs,
+		JobBinary: "/fake/runner-microvm-job",
+		MkfsExt4:  "/fake/mkfs.ext4",
+		LibDir:    "/fake/lib",
+		// Not the built-in, so the test sees it passed on.
+		LibkrunLogLevel: "debug",
+		Agent:           agent,
+		Cache:           cache,
+		Launcher:        launcher,
+		ReadyTimeout:    5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

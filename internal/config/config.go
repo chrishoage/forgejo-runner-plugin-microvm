@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -39,7 +40,12 @@ const (
 	builtinCacheDir    = "/var/cache/runner-microvm"
 	builtinRuntimeDir  = "/run/runner-microvm/jobs"
 	builtinCacheMaxGiB = 20
+	builtinLibkrunLog  = "warn"
 )
+
+// libkrunLogLevels are libkrun_log_level's values, least verbose first. None
+// is below warn, so libkrun's errors always reach the VM log.
+var libkrunLogLevels = []string{"warn", "info", "debug", "trace"}
 
 // MaxCacheMaxGiB is the largest cache_max_gib: the image cache takes its cap
 // as an int64 of bytes, and a larger value's byte count overflows one.
@@ -66,6 +72,10 @@ type Config struct {
 	// from, absolute and cleaned; empty loads them by soname through the
 	// system's dynamic loader (VM-10).
 	LibDir string
+	// LibkrunLogLevel is libkrun's log level in every VM, one of
+	// libkrunLogLevels: separate from the plugin's own, since libkrun's
+	// debug is a flood of virtio traffic.
+	LibkrunLogLevel string
 	// Profiles are the profiles the file defines, by name; never nil.
 	Profiles Profiles
 
@@ -205,6 +215,7 @@ func (c *Config) Reload() (*Config, []Change, error) {
 		{"max_memory_mib", strconv.FormatUint(c.MaxMemoryMiB, 10), strconv.FormatUint(f.MaxMemoryMiB, 10)},
 		{"cache_max_gib", strconv.FormatUint(c.CacheMaxGiB, 10), strconv.FormatUint(f.CacheMaxGiB, 10)},
 		{"lib_dir", c.LibDir, f.LibDir},
+		{"libkrun_log_level", c.LibkrunLogLevel, f.LibkrunLogLevel},
 	} {
 		if k.running != k.file {
 			changes = append(changes, Change{Key: k.key, Running: k.running, File: k.file})
@@ -299,12 +310,13 @@ func noFile(path string) bool {
 // builtin returns the config with every built-in value.
 func builtin() *Config {
 	return &Config{
-		Listen:      builtinListen,
-		StateDir:    builtinStateDir,
-		CacheDir:    builtinCacheDir,
-		RuntimeDir:  builtinRuntimeDir,
-		CacheMaxGiB: builtinCacheMaxGiB,
-		Profiles:    Profiles{},
+		Listen:          builtinListen,
+		StateDir:        builtinStateDir,
+		CacheDir:        builtinCacheDir,
+		RuntimeDir:      builtinRuntimeDir,
+		CacheMaxGiB:     builtinCacheMaxGiB,
+		LibkrunLogLevel: builtinLibkrunLog,
+		Profiles:        Profiles{},
 	}
 }
 
@@ -452,6 +464,8 @@ func (d *decoder) top(c *Config, root *yaml.Node) {
 			c.CacheMaxGiB, ok = d.integer(p, "", 0, MaxCacheMaxGiB)
 		case "lib_dir":
 			ok = d.absPath(p, &c.LibDir)
+		case "libkrun_log_level":
+			ok = d.oneOf(p, libkrunLogLevels, &c.LibkrunLogLevel)
 		case "profiles":
 			d.profiles(c, p)
 		default:
@@ -747,6 +761,21 @@ func (d *decoder) absPath(p pair, dst *string) bool {
 		return false
 	}
 	*dst = filepath.Clean(s)
+	return true
+}
+
+// oneOf sets *dst to p's value, which must be one of values.
+func (d *decoder) oneOf(p pair, values []string, dst *string) bool {
+	s, ok := d.str(p, "")
+	if !ok {
+		return false
+	}
+	if !slices.Contains(values, s) {
+		last := len(values) - 1
+		d.errorf(p.key.Line, "", p.key.Value, "must be %s or %s, not %q", strings.Join(values[:last], ", "), values[last], s)
+		return false
+	}
+	*dst = s
 	return true
 }
 
