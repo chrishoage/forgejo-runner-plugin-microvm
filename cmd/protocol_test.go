@@ -808,6 +808,20 @@ func serving(sock string) bool {
 	return err == nil && resp.GetStatus() == healthv1.HealthCheckResponse_SERVING
 }
 
+// logMatches reports whether the plugin p's log matches re within 10 s. p's
+// stderr reaches p.log through os/exec's copying goroutine, so a line the
+// plugin logged before a call returned can arrive after it.
+func (p *plugin) logMatches(re *regexp.Regexp) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for !re.MatchString(p.log.String()) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}
+
 // exitStatus returns the status p's process exited with, once p.exited has
 // closed: its zombie's exit_code, field 52 of /proc/<pid>/stat.
 func (p *plugin) exitStatus(t *testing.T) syscall.WaitStatus {
