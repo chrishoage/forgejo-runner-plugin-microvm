@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -92,6 +93,11 @@ type Profile struct {
 	// there are none, the built-in value. Never changed once loaded: a job
 	// keeps its profile's list as it was at Create.
 	ScratchPaths []string
+	// Mounts are the host directories shared into the job's container,
+	// read-only, in the file's order (STO-1, STO-2). Nil when there are
+	// none, the built-in value. Never changed once loaded, like
+	// ScratchPaths.
+	Mounts []Mount
 	// ForcePull looks the job's tag up in the registry at every Start,
 	// even when the image cache holds it (IMG-6). False by default.
 	ForcePull bool
@@ -204,6 +210,11 @@ func (c *Config) Reload() (*Config, []Change, error) {
 // config a reload replaces, or nil at startup: a reload checks the file's
 // profiles against running's plugin-level values, which stay in effect.
 func load(path string, named bool, running *Config) (*Config, error) {
+	return loadOn(path, named, running, runtime.GOARCH)
+}
+
+// loadOn is load for a plugin running on arch, a GOARCH.
+func loadOn(path string, named bool, running *Config, arch string) (*Config, error) {
 	data, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) && !named {
 		if !noFile(path) {
@@ -219,7 +230,7 @@ func load(path string, named bool, running *Config) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
-	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}, running: running}
+	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}, running: running, arch: arch}
 	c := builtin()
 	c.File, c.path, c.named = path, path, named
 	if d.decode(c, data) {
@@ -306,6 +317,9 @@ type decoder struct {
 	memLines []profileLine
 	// running is the config a reload replaces, or nil at startup.
 	running *Config
+	// arch is the GOARCH the plugin runs on, for the mounts-plus-disks
+	// limit (CFG-10).
+	arch string
 }
 
 // profileLine is a line in the profile name.
@@ -478,6 +492,10 @@ func (d *decoder) profiles(c *Config, p pair) {
 // reports whether every key was valid.
 func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int) bool {
 	scope, ok := inProfile(name), true
+	// The guest paths the profile sets, and how many mounts and disks it
+	// has, for the checks across its keys (checkTargets).
+	var scratch, targets []guestPath
+	count, listLine, listKey := 0, 0, ""
 	for _, kp := range d.pairs(m, scope, false, nil) {
 		switch kp.key.Value {
 		case "cpus":
@@ -491,8 +509,13 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 			n, valid := d.integer(kp, scope, 1, MaxScratchGiB)
 			prof.ScratchGiB, ok = n, ok && valid
 		case "scratch_paths":
-			paths, valid := d.scratchPaths(kp, scope)
-			prof.ScratchPaths, ok = paths, ok && valid
+			paths, claims, valid := d.scratchPaths(kp, scope)
+			prof.ScratchPaths, scratch, ok = paths, claims, ok && valid
+		case "mounts":
+			ms, claims, n, valid := d.mounts(kp, scope)
+			prof.Mounts, ok = ms, ok && valid
+			targets, count = append(targets, claims...), count+n
+			listLine, listKey = kp.key.Line, kp.key.Value
 		case "force_pull":
 			b, valid := d.boolean(kp, scope)
 			prof.ForcePull, ok = b, ok && valid
@@ -501,7 +524,7 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 			ok = false
 		}
 	}
-	return ok
+	return d.checkTargets(scope, scratch, targets, count, d.arch, listKey, listLine) && ok
 }
 
 // apiDirs are the guest directories the agent's own mounts hold, under
@@ -510,19 +533,20 @@ func (d *decoder) profile(name string, m *yaml.Node, prof *Profile, memLine *int
 var apiDirs = []string{"/proc", "/sys", "/dev"}
 
 // scratchPaths returns p's value, in scope, a list of guest paths, each
-// cleaned; nil for an empty list. Every invalid path is reported, at its own
-// line.
-func (d *decoder) scratchPaths(p pair, scope string) ([]string, bool) {
+// cleaned, nil for an empty list, and each valid path with its line. Every
+// invalid path is reported, at its own line.
+func (d *decoder) scratchPaths(p pair, scope string) ([]string, []guestPath, bool) {
 	v := deref(p.value)
 	switch {
 	case isNull(v):
 		d.errorf(p.key.Line, scope, p.key.Value, "has no value")
-		return nil, false
+		return nil, nil, false
 	case v.Kind != yaml.SequenceNode:
 		d.errorf(p.key.Line, scope, p.key.Value, "must be a list of paths")
-		return nil, false
+		return nil, nil, false
 	}
 	var paths []string
+	var claims []guestPath
 	seen := map[string]int{}
 	ok := true
 	for _, n := range v.Content {
@@ -536,7 +560,7 @@ func (d *decoder) scratchPaths(p pair, scope string) ([]string, bool) {
 			ok = false
 			continue
 		}
-		clean, problem := scratchPath(n.Value)
+		clean, problem := targetPath(n.Value)
 		if problem == "" {
 			if first, dup := seen[clean]; dup {
 				problem = fmt.Sprintf("is already listed on line %d", first)
@@ -549,12 +573,15 @@ func (d *decoder) scratchPaths(p pair, scope string) ([]string, bool) {
 		}
 		seen[clean] = n.Line
 		paths = append(paths, clean)
+		claims = append(claims, guestPath{key: p.key.Value, raw: n.Value, clean: clean, line: n.Line})
 	}
-	return paths, ok
+	return paths, claims, ok
 }
 
-// scratchPath returns the guest path s cleaned, or what is wrong with it.
-func scratchPath(s string) (string, string) {
+// targetPath returns the guest path s cleaned, or what is wrong with it as a
+// scratch path or a mount's or a disk's target: STO-5's rules, which all
+// three share.
+func targetPath(s string) (string, string) {
 	if strings.ContainsRune(s, 0) {
 		return "", "holds a NUL byte"
 	}
