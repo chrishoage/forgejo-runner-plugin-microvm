@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -108,9 +110,22 @@ type Server struct {
 	profiles config.Profiles
 	// closed is set by Close: SetProfiles then does nothing.
 	closed bool
+	// draining is set by Drain: Create then fails with Unavailable.
+	// removing counts the removals of jobs already out of the table and
+	// still being torn down. drained closes once draining is set, the table
+	// is empty and removing is 0, and done is set then.
+	draining bool
+	removing int
+	drained  chan struct{}
+	done     bool
+
+	// health is the standard health service: SERVING for "" and the
+	// BackendPlugin service until Drain, then NOT_SERVING.
+	health *health.Server
 
 	// removals counts the removals in progress of jobs Remove or the
-	// backstop took out of the table, which Close waits for.
+	// backstop took out of the table, which Close waits for: gRPC's Stop
+	// doesn't wait for a Remove still tearing its job down.
 	removals sync.WaitGroup
 
 	// warnedIgnored is set by the first Create that carries a request field
@@ -197,7 +212,74 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	if cfg.FlushTimeout == 0 {
 		cfg.FlushTimeout = flushTimeout
 	}
-	return &Server{log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles}, nil
+	hs := health.NewServer()
+	hs.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+	hs.SetServingStatus(pluginv1alpha.BackendPlugin_ServiceDesc.ServiceName, healthv1.HealthCheckResponse_SERVING)
+	return &Server{
+		log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles,
+		drained: make(chan struct{}), health: hs,
+	}, nil
+}
+
+// errShuttingDown is Create's error during a drain. Unavailable is reserved
+// for it: the runner reads it as "the plugin is gone".
+var errShuttingDown = status.Error(codes.Unavailable, "runner-microvm is shutting down")
+
+// Drain starts the drain: health turns NOT_SERVING, and every later Create
+// fails with Unavailable, while every job already created is served as
+// usual until it is removed. Drained closes once no job is left. A second
+// Drain does nothing more.
+func (s *Server) Drain() {
+	s.mu.Lock()
+	first := !s.draining
+	s.draining = true
+	s.checkDrained()
+	s.mu.Unlock()
+	if first {
+		// Every status it has turns NOT_SERVING, and stays so.
+		s.health.Shutdown()
+	}
+}
+
+// Drained closes once a drain has begun and no job is left: the table is
+// empty and every removal has finished.
+func (s *Server) Drained() <-chan struct{} { return s.drained }
+
+// checkDrained closes drained once a drain has begun and no job is left.
+// s.mu is held.
+func (s *Server) checkDrained() {
+	if s.draining && !s.done && len(s.jobs) == 0 && s.removing == 0 {
+		s.done = true
+		close(s.drained)
+	}
+}
+
+// take takes the job id out of the table for its removal, and counts the
+// removal until its finish is called. It reports false when the table has
+// no such job.
+func (s *Server) take(id string) (*job, func(), bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, nil, false
+	}
+	return j, s.takeLocked(id), true
+}
+
+// takeLocked takes the job id, which is in the table, out of it, and counts
+// its removal until the returned func is called. s.mu is held.
+func (s *Server) takeLocked(id string) func() {
+	delete(s.jobs, id)
+	s.removing++
+	s.removals.Add(1)
+	return func() {
+		defer s.removals.Done()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.removing--
+		s.checkDrained()
+	}
 }
 
 // SetProfiles replaces the profiles later Creates pick from. A job already
@@ -215,9 +297,9 @@ func (s *Server) SetProfiles(ps config.Profiles) bool {
 }
 
 // Close tears down every job still in the table, all at once, each as
-// Remove does, and releases the server: one VM whose flush hangs costs its
-// own flush timeout, not every other job's. A second Close does nothing
-// more.
+// Remove does, waits for every removal already begun, and releases the
+// server: one VM whose flush hangs costs its own flush timeout, not every
+// other job's. A second Close does nothing more.
 func (s *Server) Close(ctx context.Context) error {
 	s.mu.Lock()
 	jobs := s.jobs
@@ -253,6 +335,11 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 // returns the job's environment id, paths and platform. It boots nothing
 // (PROTO-3). The job keeps a copy of its profile for its whole life.
 func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
+	// During a drain nothing else about the request matters; add checks
+	// again, under the table's lock, for a drain that begins meanwhile.
+	if s.isDraining() {
+		return nil, errShuttingDown
+	}
 	s.warnIgnored(req)
 	if len(req.GetServices()) > 0 {
 		// The request is well formed; the plugin can't run services until
@@ -321,6 +408,20 @@ func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest) {
 		"name", req.GetName(), "fields", strings.Join(fields, ","))
 }
 
+// jobCount returns how many jobs are in the table.
+func (s *Server) jobCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.jobs)
+}
+
+// isDraining reports whether a drain has begun.
+func (s *Server) isDraining() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.draining
+}
+
 // lookupProfile returns a copy of the profile name names, or fails with
 // InvalidArgument naming arg, the label argument, when there is none
 // (CFG-6).
@@ -340,10 +441,15 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 
 // add puts a new job in the table, under a fresh environment id, with its
 // image, its hostname and its copy of the profile name names, and, for a
-// timeout above 0, its backstop, which removes it with ctx.
+// timeout above 0, its backstop, which removes it with ctx. During a drain
+// it fails with Unavailable, so no job enters the table once the drain has
+// begun.
 func (s *Server) add(ctx context.Context, image, hostname, name string, prof config.Profile, timeout time.Duration) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.draining {
+		return nil, errShuttingDown
+	}
 	for {
 		id, err := newID()
 		if err != nil {
@@ -501,21 +607,13 @@ func await(ctx context.Context, op func() error) error {
 // and otherwise with the teardown's outcome.
 func (s *Server) Remove(ctx context.Context, req *pluginv1alpha.RemoveRequest) (*pluginv1alpha.RemoveResponse, error) {
 	id := req.GetEnvironmentId()
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	delete(s.jobs, id)
-	if ok {
-		// Counted under mu, so a Close that finds the table without j
-		// waits for its removal.
-		s.removals.Add(1)
-	}
-	s.mu.Unlock()
+	j, finish, ok := s.take(id)
 	if !ok {
 		return nil, notFound(id)
 	}
 	done := make(chan error, 1)
 	go func() {
-		defer s.removals.Done()
+		defer finish()
 		// The teardown is bounded by the flush timeout and the kill.
 		done <- s.remove(context.WithoutCancel(ctx), j)
 	}()
@@ -546,10 +644,9 @@ func (s *Server) removeForgotten(ctx context.Context, j *job, timeout time.Durat
 		s.mu.Unlock()
 		return
 	}
-	delete(s.jobs, j.id)
-	s.removals.Add(1)
+	finish := s.takeLocked(j.id)
 	s.mu.Unlock()
-	defer s.removals.Done()
+	defer finish()
 	s.log.Warn("the runner has not removed the job within its environment timeout: removing it",
 		"job", j.id, "environment_timeout", timeout, "backstop_delay", s.cfg.BackstopDelay)
 	_ = s.remove(ctx, j)

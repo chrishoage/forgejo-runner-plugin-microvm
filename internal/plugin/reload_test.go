@@ -357,7 +357,7 @@ func TestStopDoesNotWaitForABlockedReload(t *testing.T) {
 	hup <- syscall.SIGHUP
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
-	go func() { served <- serveWithReloads(ctx, f.log, lis, f.srv, hup, f.cfg, read) }()
+	go func() { served <- serveWithReloads(ctx, f.log, lis, f.srv, hup, nil, f.cfg, read) }()
 	select {
 	case <-reading:
 	case <-time.After(10 * time.Second):

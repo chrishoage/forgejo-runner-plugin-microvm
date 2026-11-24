@@ -48,6 +48,10 @@ _Avoid_: default (which is the name of a profile)
 **Reload**:
 Reading the config file again while the plugin runs, so later jobs get its new profiles.
 
+**Drain**:
+How the plugin stops on SIGTERM or SIGINT: it takes no new jobs, serves the jobs it has until each is removed, then exits. A second signal ends it at once.
+_Avoid_: graceful shutdown, stop
+
 ## Per-job processes
 
 **Job process**:
