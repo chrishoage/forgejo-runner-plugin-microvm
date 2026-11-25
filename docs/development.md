@@ -52,6 +52,17 @@ nix develop -c just release-assets 1.2.3  # dist/runner-microvm-1.2.3-linux-amd6
 - **One build path:** `just build` and `just release-assets` both call one private recipe, `plugin`, which builds the payload, then the plugin with the shared flags and `-tags payload`; only the output path, the linker flags and the job binary's loader differ. Two of the same `go build` line would drift.
 - **No GoReleaser.** Its free version can't package a binary built elsewhere (`prebuilt` is Pro only), so it would be a second build definition; what it would add here is two shell lines. **No CI job runs the recipe:** the maintainer decided the release path is proven at the first release, and fixed then if needed.
 
+## Releasing
+
+```sh
+nix develop -c just release-notes         # the notes for the commits since the latest v* tag
+```
+
+- **The release notes are generated, never written by hand: `just release-notes [ref]` prints them for the commits up to `ref` (`HEAD` by default) since the `v*` tag before it, or from the first commit when there is none** (#125). The version PR's body is their preview, and the release workflow generates them again when it publishes, so commits merged after the version PR are listed too.
+- **The notes start with two lines: "Tested with forgejo-runner <version>", the runner module's version in `go.mod`, which the protocol test runs against; and "Requires libkrun ≥ <min>, libkrunfw ≥ <min>", from `nix/lib-minimums.json`; both files as committed at `ref`.** So a past tag's notes show that tag's versions. One tested runner version and no range: nothing tests a range, and the plugin protocol (`v1alpha`) can change between runner releases.
+- **Then `cog changelog`, showing only `feat`, `fix`, `perf`, `revert` and breaking changes** (`docs/conventions.md`, Commits and merging). `cog.toml` sets `tag_prefix = "v"`, so cocogitto reads the `v*` tags as versions. The two commits in `commits-ignore.txt` aren't Conventional Commits; `cog changelog` skips them with a warning.
+- **No `CHANGELOG.md`.** It would be written at bump time and go stale when more commits land before the release; the version PR's preview and the release's notes are enough.
+
 ## Running the plugin
 
 ```sh
