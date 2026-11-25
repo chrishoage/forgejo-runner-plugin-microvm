@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 /bin/
+# What `just release-assets` builds (docs/development.md).
+/dist/
 /.direnv/
 /result
 # The payload `just payload` builds for embedding; never committed.
