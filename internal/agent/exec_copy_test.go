@@ -7,9 +7,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +24,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
 )
 
 // result is an Exec's whole output.
@@ -673,5 +678,37 @@ func TestCopyOut(t *testing.T) {
 	}
 	if !bytes.Equal(b, make([]byte, 1024)) {
 		t.Errorf("a missing path: %d bytes, want 1024 zeros", len(b))
+	}
+}
+
+// The agent holds an Exec's request, as Exec converts it, with its env
+// values as secrets: logging that request, its environment or the
+// command's whole environment through slog's text handler, or printing the
+// request with fmt, shows no value (LOG-2).
+func TestExecEnvironmentRedacts(t *testing.T) {
+	t.Parallel()
+	const value = "canary-0123456789abcdef"
+	req := newExecRequest(&agentv1.ExecRequest{Argv: []string{"true"}, Env: map[string]string{"CANARY": value}, WorkingDir: "/src"})
+	env := environ([]string{"IMAGE=" + value}, req.env, "/bin", "/root")
+	var out bytes.Buffer
+	log := logging.New(&out, "runner-microvm-agent", slog.LevelDebug)
+	log.Debug("exec", "request", req)
+	log.Debug("exec", slog.Any("request", &req))
+	log.Debug("exec", "request_env", req.env)
+	log.Debug("exec", "env", env)
+	log.Debug("exec", "value", env["CANARY"])
+	if strings.Contains(out.String(), value) || strings.Count(out.String(), secret.Redacted) < 7 {
+		t.Errorf("the log shows a value, or no redaction:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "request.env.CANARY="+secret.Redacted) {
+		t.Errorf("the log does not name the request's variable:\n%s", out.String())
+	}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+		if got := fmt.Sprintf(verb, req); strings.Contains(got, value) {
+			t.Errorf("%s of the request shows the value: %s", verb, got)
+		}
+	}
+	if got, want := env.Environ(), []string{"CANARY=" + value, "HOME=/root", "IMAGE=" + value, "PATH=/bin"}; !slices.Equal(got, want) {
+		t.Errorf("the command's environment = %q, want %q", got, want)
 	}
 }

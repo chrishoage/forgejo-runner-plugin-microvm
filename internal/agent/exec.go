@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
 )
 
 // outputGrace is how long Exec waits for the end of the output once the
@@ -35,16 +36,46 @@ const relayReadSize = 32 << 10
 // root (GST-5), in the request's working directory, else the image's, else
 // / (GST-6), with the image's environment under the request's (GST-4).
 // Cancelling the call kills the command's process group at once (GST-8).
+//
+// The request is converted at once, and only its conversion is used: its
+// env values are then held as secrets for the whole call (LOG-2).
 func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_ExecServer) error {
+	return s.exec(newExecRequest(req), stream)
+}
+
+// execRequest is an Exec as the agent holds it, its env values secrets, so
+// that logging it shows them redacted (LOG-2).
+type execRequest struct {
+	argv       []string
+	env        secret.Env
+	user       string
+	workingDir string
+}
+
+func newExecRequest(req *agentv1.ExecRequest) execRequest {
+	return execRequest{argv: req.GetArgv(), env: secret.EnvOf(req.GetEnv()), user: req.GetUser(), workingDir: req.GetWorkingDir()}
+}
+
+// LogValue implements slog.LogValuer: argv[0] and the environment's names,
+// never another argument, the working directory or a value.
+func (r execRequest) LogValue() slog.Value {
+	argv0 := ""
+	if len(r.argv) > 0 {
+		argv0 = r.argv[0]
+	}
+	return slog.GroupValue(slog.String("argv0", argv0), slog.Any("env", r.env))
+}
+
+func (s *server) exec(req execRequest, stream agentv1.AgentService_ExecServer) error {
 	startError := func(format string, args ...any) error {
 		return stream.Send(&agentv1.ExecResponse{Event: &agentv1.ExecResponse_StartError{StartError: fmt.Sprintf(format, args...)}})
 	}
-	argv := req.GetArgv()
+	argv := req.argv
 	if len(argv) == 0 {
 		return startError("no command")
 	}
 	image := s.image
-	id, err := resolveUser(s.root, cmp.Or(req.GetUser(), image.GetUser()))
+	id, err := resolveUser(s.root, cmp.Or(req.user, image.GetUser()))
 	if err != nil {
 		return startError("%v", err)
 	}
@@ -52,12 +83,12 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 	if err != nil {
 		return err
 	}
-	env := environ(image.GetEnv(), req.GetEnv(), image.GetDefaultPath(), id.home)
+	env := environ(image.GetEnv(), req.env, image.GetDefaultPath(), id.home)
 	path, err := lookPath(argv[0], env)
 	if err != nil {
 		return startError("%v", err)
 	}
-	dir := cmp.Or(req.GetWorkingDir(), image.GetWorkingDir(), "/")
+	dir := cmp.Or(req.workingDir, image.GetWorkingDir(), "/")
 	if err := makeWorkDir(dir, id); err != nil {
 		return startError("%v", err)
 	}
@@ -67,7 +98,7 @@ func (s *server) Exec(req *agentv1.ExecRequest, stream agentv1.AgentService_Exec
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, argv[1:]...) //nolint:gosec // G204: running the job's command is the agent's purpose
 	cmd.Args[0] = argv[0]
-	cmd.Env = env
+	cmd.Env = env.Environ()
 	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: cred}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -247,44 +278,35 @@ func (o *output) buffered() (int, error) {
 	return int(n), errors.Join(err, ioctlErr)
 }
 
-// environ returns a command's environment as KEY=VALUE, sorted: the
+// environ returns a command's environment, its values secrets (LOG-2): the
 // image's, with the request's on top (GST-4), PATH set to defaultPath when
 // neither sets it, and HOME to home, the user's, when neither sets it
 // (GST-5). An image entry without `=` names no variable and is dropped.
-func environ(image []string, req map[string]string, defaultPath, home string) []string {
-	vars := make(map[string]string, len(image)+len(req)+2)
+func environ(image []string, req secret.Env, defaultPath, home string) secret.Env {
+	vars := make(secret.Env, len(image)+len(req)+2)
 	for _, kv := range image {
 		if k, v, ok := strings.Cut(kv, "="); ok {
-			vars[k] = v
+			vars[k] = secret.New(v)
 		}
 	}
 	maps.Copy(vars, req)
 	if _, ok := vars["PATH"]; !ok && defaultPath != "" {
-		vars["PATH"] = defaultPath
+		vars["PATH"] = secret.New(defaultPath)
 	}
 	if _, ok := vars["HOME"]; !ok {
-		vars["HOME"] = home
+		vars["HOME"] = secret.New(home)
 	}
-	out := make([]string, 0, len(vars))
-	for k, v := range vars {
-		out = append(out, k+"="+v)
-	}
-	slices.Sort(out)
-	return out
+	return vars
 }
 
 // lookPath finds name in env's PATH, as the command's own environment
-// would, not the agent's (GST-4).
-func lookPath(name string, env []string) (string, error) {
+// would, not the agent's (GST-4). Its error quotes the PATH: it goes only
+// to the runner, which shows it in the job's log, never to a log.
+func lookPath(name string, env secret.Env) (string, error) {
 	if strings.Contains(name, "/") {
 		return name, nil
 	}
-	var pathVar string
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
-			pathVar = v
-		}
-	}
+	pathVar := env["PATH"].Reveal()
 	for _, dir := range filepath.SplitList(pathVar) {
 		if dir == "" {
 			dir = "."

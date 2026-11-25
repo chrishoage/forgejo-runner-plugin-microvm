@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,8 @@ import (
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
 )
 
 // startedJob returns a client and a started job's environment id.
@@ -354,5 +358,34 @@ func TestCopyInRechunksTowardTheAgent(t *testing.T) {
 	// 80 chunks of 256 KiB, then the runner's second chunk.
 	if len(agent.sizes) != 81 || slices.Max(agent.sizes) != 256<<10 || agent.sizes[80] != 5 {
 		t.Errorf("the agent got chunks of %v", agent.sizes)
+	}
+}
+
+// The plugin holds an Exec's env values as secrets: logging the request it
+// holds, or its environment, through slog's text handler shows the
+// redaction and never a value, while the agent's request carries them in
+// the clear (LOG-2).
+func TestExecRequestRedactsItsEnv(t *testing.T) {
+	t.Parallel()
+	const value = "canary-0123456789abcdef"
+	r := newExecRequest(&pluginv1alpha.ExecRequest{
+		EnvironmentId: "job-1", Command: []string{"true"},
+		Env: map[string]string{"CANARY": value, "GITHUB_WORKSPACE": "/workspace/" + value}, Workdir: "src",
+	})
+	var out bytes.Buffer
+	log := logging.New(&out, "runner-microvm", slog.LevelDebug)
+	log.Debug("exec", "env", r.env)
+	log.Debug("exec", "request", r)
+	log.Debug("exec", slog.Any("request", &r))
+	log.Debug("exec", "value", r.env["CANARY"])
+	if strings.Contains(out.String(), value) || strings.Count(out.String(), secret.Redacted) < 4 {
+		t.Errorf("the log shows a value, or no redaction:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "env.CANARY="+secret.Redacted) {
+		t.Errorf("the log does not name the variable:\n%s", out.String())
+	}
+	a := r.agent()
+	if a.GetEnv()["CANARY"] != value || a.GetWorkingDir() != "/workspace/"+value+"/src" || !slices.Equal(a.GetArgv(), []string{"true"}) {
+		t.Errorf("the agent's request = %v", a)
 	}
 }
