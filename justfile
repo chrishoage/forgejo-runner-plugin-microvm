@@ -69,6 +69,28 @@ release-notes to="HEAD":
     echo
     cog changelog "$prev..$to"
 
+# VERSION defaults to what `cog bump --auto` proposes; a leading v is dropped.
+# Open the version PR: write VERSION to the VERSION file on a branch
+# release/v<VERSION>, commit it, push it, open a PR showing the notes, and
+# switch back to the branch it started on.
+bump version="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version='{{ version }}'
+    if [ -z "$version" ]; then
+        version=$(cog bump --auto --dry-run)
+    fi
+    version="${version#v}"
+    branch="release/v$version"
+    notes=$({{ just_executable() }} release-notes)
+    git switch -c "$branch"
+    echo "$version" > VERSION
+    git add VERSION
+    git commit -m "chore(release): v$version"
+    git push -u origin "$branch"
+    gh pr create --base main --head "$branch" --title "chore(release): v$version" --body "$notes"
+    git switch -
+
 # Apply the formatters (gofumpt, goimports).
 fmt:
     golangci-lint fmt

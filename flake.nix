@@ -71,6 +71,8 @@
           goTools.govulncheck
           libdir
           pkgs.cocogitto
+          # gh, for `just bump`'s version PR (docs/development.md, Releasing).
+          pkgs.gh
           # git for the commit check, for act/runner's action clones in the
           # protocol test and its git http-backend, and for the harness's
           # push, so none relies on the host's git.
