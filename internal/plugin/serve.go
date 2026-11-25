@@ -38,6 +38,11 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/payload"
 )
 
+// version is the release this binary is built from: `just release-assets`
+// sets it with -ldflags -X, and every other build says dev, so a build
+// between releases never claims to be the last one.
+var version = "dev"
+
 // usage is what runner-microvm prints for no subcommand, an unknown one, or
 // an argument.
 const usage = `usage: runner-microvm <command>
@@ -46,6 +51,7 @@ Commands:
   serve   run the plugin; SIGINT or SIGTERM drains it, and a second one stops
           it at once; SIGHUP reloads the profiles
   check   validate the config file, print every error, and exit
+  version print the version and exit
 
 The config file is ` + config.DefaultPath + `, or the file ` + config.PathEnv + ` names.
 `
@@ -54,7 +60,8 @@ The config file is ` + config.DefaultPath + `, or the file ` + config.PathEnv + 
 // and returns its exit code: serve runs the plugin until a drain, which
 // SIGINT or SIGTERM begins, has ended;
 // check validates the config file and exits 0, or 1 after printing every
-// error. Anything else prints the usage and exits 2.
+// error; version prints the version and exits 0. Anything else prints the
+// usage and exits 2.
 func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	if len(args) != 1 {
 		_, _ = io.WriteString(stderr, usage)
@@ -65,6 +72,9 @@ func Main(args []string, stdout, stderr io.Writer, getenv func(string) string) i
 		return serveCmd(getenv)
 	case "check":
 		return checkCmd(stdout, stderr, getenv)
+	case "version":
+		_, _ = fmt.Fprintln(stdout, version)
+		return 0
 	default:
 		_, _ = io.WriteString(stderr, usage)
 		return 2
@@ -128,8 +138,8 @@ func libDirSetting(dir string) string {
 	return dir
 }
 
-// logConfig logs the config file read, or that there was none, every
-// plugin-level setting in effect, and each profile, default always among
+// logConfig logs the config file read, or that there was none, the version
+// and every plugin-level setting in effect, and each profile, default always among
 // them.
 func logConfig(log *slog.Logger, cfg *config.Config) {
 	if cfg.File == "" {
@@ -141,7 +151,7 @@ func logConfig(log *slog.Logger, cfg *config.Config) {
 	if cfg.MaxMemoryMiB == 0 {
 		maxMemory = "0 (no limit)"
 	}
-	log.Info("settings", "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
+	log.Info("settings", "version", version, "listen", "unix://"+cfg.Listen, "state_dir", cfg.StateDir, "cache_dir", cfg.CacheDir,
 		"runtime_dir", cfg.RuntimeDir, "max_memory_mib", maxMemory, "cache_max_gib", cfg.CacheMaxGiB,
 		"lib_dir", libDirSetting(cfg.LibDir), "libkrun_log_level", cfg.LibkrunLogLevel, "log_level", cfg.LogLevel,
 		"keep_job_logs", cfg.KeepJobLogs)

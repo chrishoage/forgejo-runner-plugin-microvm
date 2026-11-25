@@ -60,16 +60,70 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// version prints the version variable's value and a newline, and exits 0,
+// without reading any config file.
+func TestVersion(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := runMain(filepath.Join(t.TempDir(), "missing.yaml"), "version")
+	if code != 0 || stdout != version+"\n" || stderr != "" {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and %q", code, stdout, stderr, version+"\n")
+	}
+}
+
+// A build that doesn't set the version says dev.
+func TestVersionIsDevUnlessSet(t *testing.T) {
+	t.Parallel()
+	if version != "dev" {
+		t.Errorf("version is %q, want dev", version)
+	}
+}
+
 // No subcommand, an unknown one, or an argument prints the usage and exits
-// 2, before reading any config file.
+// 2, before reading any config file. The usage lists every subcommand.
 func TestUsage(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "missing.yaml")
-	for _, args := range [][]string{nil, {"run"}, {"check", "extra"}, {"serve", "/etc/x.yaml"}, {"--help"}} {
+	for _, args := range [][]string{
+		nil, {"run"}, {"check", "extra"}, {"serve", "/etc/x.yaml"}, {"version", "extra"}, {"--help"}, {"--version"},
+	} {
 		code, stdout, stderr := runMain(missing, args...)
 		if code != 2 || stdout != "" || !strings.HasPrefix(stderr, "usage: runner-microvm <command>") {
 			t.Errorf("%q: exit %d, stdout %q, stderr %q", args, code, stdout, stderr)
 		}
+	}
+	for _, cmd := range []string{"serve", "check", "version"} {
+		if !strings.Contains(usage, "\n  "+cmd+" ") {
+			t.Errorf("the usage does not list %s:\n%s", cmd, usage)
+		}
+	}
+}
+
+// The settings line carries the version.
+func TestSettingsLineCarriesTheVersion(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(func(k string) string {
+		if k == config.PathEnv {
+			return file
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	logConfig(slog.New(slog.NewTextHandler(&out, nil)), cfg)
+	var settings string
+	for line := range strings.Lines(out.String()) {
+		if strings.Contains(line, " msg=settings ") {
+			settings = line
+		}
+	}
+	if !strings.Contains(settings, " version="+version+" ") {
+		t.Errorf("the settings line does not carry version=%s:\n%s", version, out.String())
 	}
 }
 
