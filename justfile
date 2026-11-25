@@ -50,6 +50,25 @@ release-assets version:
     interp=$(readelf -l internal/payload/runner-microvm-job | sed -n 's/.*Requesting program interpreter: \(.*\)]$/\1/p') && test "$interp" = '{{ release_ldso }}' || { echo "the job binary's loader is '$interp', not {{ release_ldso }}" >&2; exit 1; }
     cd '{{ release_dir }}' && sha256sum 'runner-microvm-{{ version }}-linux-amd64' > SHA256SUMS
 
+# Print the release notes for the commits up to TO since the v* tag before it
+# (all of them if there is none): the forgejo-runner version the tests run
+# against and the library minimums, both as committed at TO, then
+# `cog changelog`, which lists the types cog.toml keeps.
+release-notes to="HEAD":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    to='{{ to }}'
+    prev=$(git describe --tags --abbrev=0 --match 'v*' --exclude "$to" "$to" 2>/dev/null || true)
+    gomod=$(mktemp --suffix=.mod)
+    trap 'rm -f "$gomod"' EXIT
+    git show "$to:go.mod" > "$gomod"
+    runner=$(go mod edit -json "$gomod" | jq -r '.Require[] | select(.Path | startswith("code.forgejo.org/forgejo/runner/")) | .Version')
+    echo "Tested with forgejo-runner $runner"
+    echo
+    git show "$to:nix/lib-minimums.json" | jq -r '"Requires libkrun ≥ \(.libkrun), libkrunfw ≥ \(.libkrunfw)"'
+    echo
+    cog changelog "$prev..$to"
+
 # Apply the formatters (gofumpt, goimports).
 fmt:
     golangci-lint fmt

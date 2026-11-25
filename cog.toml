@@ -3,6 +3,18 @@
 # Conventional Commits, checked by `just lint-commits` and CI's `commits` job.
 # The allowed types are cocogitto's defaults minus `style`: feat, fix, docs,
 # refactor, test, build, ci, chore, perf and revert. Merge commits fail.
+#
+# The release notes (`just release-notes`) list feat, fix, perf and revert,
+# and breaking changes of every type; the other types are omitted here.
+
+# Release tags are v<version>, so `cog bump` and `cog changelog` find them.
+tag_prefix = "v"
 
 [commit_types]
 style = {}
+docs = { omit_from_changelog = true }
+refactor = { omit_from_changelog = true }
+test = { omit_from_changelog = true }
+build = { omit_from_changelog = true }
+ci = { omit_from_changelog = true }
+chore = { omit_from_changelog = true }

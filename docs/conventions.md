@@ -15,19 +15,20 @@ A change is done when:
 
 ## Commits and merging
 
-- **Every commit is a [Conventional Commit](https://www.conventionalcommits.org/).** It gives the release epic (#12) a history it can build a changelog from.
+- **Every commit is a [Conventional Commit](https://www.conventionalcommits.org/).** The release notes and the next version are computed from it (`docs/development.md`, Releasing).
 - **PRs are rebase-merged,** so each logical commit lands on `main` as written. That keeps room for PRs with several meaningful commits.
 - **A PR's commits are its logical changes only; a fix to something the PR already contains is folded into the commit that introduced it,** never added as a new commit. That covers review findings, red CI and follow-ups: `git commit --fixup=<commit>`, then `git rebase --autosquash` locally, then force-push the PR branch. Rebase merge lands every commit on `main` as written, so a follow-up commit would become history.
 - **cocogitto checks the messages** (`cog check`, configured in `cog.toml`). It is a single binary from the flake, with no Node toolchain.
   - `just lint-commits` checks `origin/main..HEAD` and is part of `just check`. `just lint-commits <range>` checks another range.
   - CI's `commits` job checks the PR's own commits (its base to its head), or the commits a push to `main` added.
-  - Two commits on `main` predate the rule and are not Conventional Commits: the initial empty commit and the agent-skills setup. `commits-ignore.txt` lists them, and the commit check skips them. The changelog (#12) must skip them too. No later commit is ever added to the list; its message is fixed before it merges.
+  - Two commits on `main` predate the rule and are not Conventional Commits: the initial empty commit and the agent-skills setup. `commits-ignore.txt` lists them, and the commit check skips them. `cog changelog` skips them too, with a warning. No later commit is ever added to the list; its message is fixed before it merges.
   - `cog check` can't skip commits, and cocogitto 7.0.0 checks the whole history when a range starts at the root commit. When a range contains an ignored commit or starts at the root, the recipe runs `cog verify` on each commit itself.
 - **Rules:**
   - The allowed types are `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, `chore`, `perf` and `revert`: the standard set. cocogitto's extra default, `style`, is turned off.
   - Scopes are optional and free-form.
   - A breaking change is marked with `!` or a `BREAKING CHANGE:` footer.
   - Merge commits fail, because they can't land on `main` under rebase merging.
+- **The release notes list `feat`, `fix`, `perf` and `revert`, and breaking changes of every type;** `cog.toml` omits the other types from `cog changelog`, which still lists their breaking changes. Those four are what an operator acts on; the rest is the project's own housekeeping (#125).
 
 ## Showing a check going red
 
