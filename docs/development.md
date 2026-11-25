@@ -54,10 +54,18 @@ nix develop -c just release-assets 1.2.3  # dist/runner-microvm-1.2.3-linux-amd6
 
 ## Releasing
 
+The maintainer releases in two steps, each one recipe, on a clean, up-to-date `main`:
+
 ```sh
+nix develop -c just bump [version]        # 1. open the version PR; review and merge it like any other
+nix develop -c just release               # 2. tag the chosen commit of main v<version> and push the tag
 nix develop -c just release-notes         # the notes for the commits since the latest v* tag
 ```
 
+- **Versioning and releasing are separate steps** (#125). The version is a reviewed commit on `main` before anything is tagged, and a release starts only from a tag, so nothing on `main`'s CI has to decide whether a push is a release.
+- **The `VERSION` file at the repository root holds the bare version (`0.1.0`, no `v`).** It is what the version PR changes and what `just release` reads. The first version PR creates it. (Flagged decision, #125: rejected committing a placeholder such as `0.0.0` before then, a version that never existed and that `just release` would tag.)
+- **SemVer tags `v<version>`, starting at `v0.1.0`, staying on 0.x while the runner's plugin protocol is `v1alpha`.** While the major version is 0, cocogitto never proposes 1.0.0: a breaking change bumps only as its type would (`feat` the minor, any other type the patch), so `just bump` with no version stays on 0.x. To bump the minor for a breaking `fix`, pass the version.
+- **`just bump [version]` writes the given version, else what `cog bump --auto --dry-run` proposes from the Conventional Commits since the latest `v*` tag, to `VERSION`; commits `chore(release): v<version>` on a branch `release/v<version>`; pushes it; opens a PR with `gh` whose body is the notes preview (`just release-notes`); and switches back to the branch it started on.** So `just release` never runs by accident on the version branch, whose commit the rebase merge rewrites. A leading `v` on the version is dropped. Nothing is validated: the maintainer runs it. `gh` is in the dev shell for it, and uses the maintainer's own login.
 - **The release notes are generated, never written by hand: `just release-notes [ref]` prints them for the commits up to `ref` (`HEAD` by default) since the `v*` tag before it, or from the first commit when there is none** (#125). The version PR's body is their preview, and the release workflow generates them again when it publishes, so commits merged after the version PR are listed too.
 - **The notes start with two lines: "Tested with forgejo-runner <version>", the runner module's version in `go.mod`, which the protocol test runs against; and "Requires libkrun ≥ <min>, libkrunfw ≥ <min>", from `nix/lib-minimums.json`; both files as committed at `ref`.** So a past tag's notes show that tag's versions. One tested runner version and no range: nothing tests a range, and the plugin protocol (`v1alpha`) can change between runner releases.
 - **Then `cog changelog`, showing only `feat`, `fix`, `perf`, `revert` and breaking changes** (`docs/conventions.md`, Commits and merging). `cog.toml` sets `tag_prefix = "v"`, so cocogitto reads the `v*` tags as versions. The two commits in `commits-ignore.txt` aren't Conventional Commits; `cog changelog` skips them with a warning.
