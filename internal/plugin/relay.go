@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"path"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
 )
 
 // started returns the job id names, locked, with a call context that Remove
@@ -92,6 +94,42 @@ func workingDir(req *pluginv1alpha.ExecRequest) string {
 	return path.Join(workspace, dir)
 }
 
+// execRequest is an Exec as the plugin holds it, its env values secrets,
+// so that logging it, or its environment, shows them redacted (LOG-2).
+type execRequest struct {
+	argv       []string
+	env        secret.Env
+	user       string
+	workingDir string
+}
+
+// newExecRequest takes the runner's request, and its working directory as
+// workingDir resolves it.
+func newExecRequest(req *pluginv1alpha.ExecRequest) execRequest {
+	return execRequest{argv: req.GetCommand(), env: secret.EnvOf(req.GetEnv()), user: req.GetUser(), workingDir: workingDir(req)}
+}
+
+// argv0 is the command's argv[0], the only part of its argv the plugin
+// logs: the rest of a step's argv can carry what the workflow put there.
+func (r execRequest) argv0() string {
+	if len(r.argv) == 0 {
+		return ""
+	}
+	return r.argv[0]
+}
+
+// LogValue implements slog.LogValuer: argv[0] and the environment's names,
+// never another argument, the working directory or a value.
+func (r execRequest) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("argv0", r.argv0()), slog.Any("env", r.env))
+}
+
+// agent is the request for the agent, the one place the values are
+// revealed.
+func (r execRequest) agent() *agentv1.ExecRequest {
+	return &agentv1.ExecRequest{Argv: r.argv, Env: r.env.Reveal(), User: r.user, WorkingDir: r.workingDir}
+}
+
 // logCall logs a call on j that began at begin and ended with err, with
 // attrs, as one debug line: Exec's, CopyIn's and CopyOut's.
 func (s *Server) logCall(ctx context.Context, msg string, j *job, begin time.Time, err error, attrs ...any) {
@@ -105,31 +143,28 @@ func (s *Server) logCall(ctx context.Context, msg string, j *job, begin time.Tim
 
 // Exec runs the command through the job's container's agent and relays its
 // output, then its exit code or why it could not start. The env values are
-// secrets: they are never logged (LOG-2). Its debug line names only the
+// secrets, held as secret's type until the agent's request: they are never
+// logged (LOG-2). Its debug line names only the
 // command's argv[0]: the rest of a step's argv can carry what the workflow
-// put there.
-func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.BackendPlugin_ExecServer) (err error) {
+// put there. The request is converted at once, and only its conversion is
+// used: the runner's request, its values in the clear, is never in reach.
+func (s *Server) Exec(req *pluginv1alpha.ExecRequest, stream pluginv1alpha.BackendPlugin_ExecServer) error {
+	return s.exec(req.GetEnvironmentId(), newExecRequest(req), stream)
+}
+
+func (s *Server) exec(id string, call execRequest, stream pluginv1alpha.BackendPlugin_ExecServer) (err error) {
 	begin := time.Now()
-	j, ctx, done, err := s.started(stream.Context(), req.GetEnvironmentId())
+	j, ctx, done, err := s.started(stream.Context(), id)
 	if err != nil {
 		return err
 	}
 	defer done()
 	var outcome []any
 	defer func() {
-		argv0 := ""
-		if argv := req.GetCommand(); len(argv) > 0 {
-			argv0 = argv[0]
-		}
-		s.logCall(ctx, "exec", j, begin, err, append([]any{"argv0", argv0}, outcome...)...)
+		s.logCall(ctx, "exec", j, begin, err, append([]any{"argv0", call.argv0()}, outcome...)...)
 	}()
 	defer func() { err = callError(ctx, j, err) }()
-	out, err := j.agent.Exec(ctx, &agentv1.ExecRequest{
-		Argv:       req.GetCommand(),
-		Env:        req.GetEnv(),
-		User:       req.GetUser(),
-		WorkingDir: workingDir(req),
-	})
+	out, err := j.agent.Exec(ctx, call.agent())
 	if err != nil {
 		return s.agentError(ctx, j, err)
 	}
