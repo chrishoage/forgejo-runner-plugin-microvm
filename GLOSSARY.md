@@ -34,8 +34,16 @@ A named VM shape (CPUs, memory, scratch size, mounts, disks) that an operator de
 _Avoid_: flavour, template, size
 
 **Memory budget**:
-The plugin's cap on the memory of every running VM, across all jobs (`max_memory_mib`). A job is admitted only when all its VMs fit.
+The plugin's cap on the memory of every running VM, across all jobs (`max_memory_mib`). A job is admitted only when all its VMs fit, and holds its share until its VMs have ended.
 _Avoid_: VM slot
+
+**Admission**:
+A job's taking of what it needs before its VMs boot, at Start: its share of the memory budget and, once the disk queues land, its disks. A job that can't have them yet waits, in arrival order, and is never admitted in part.
+_Avoid_: scheduling, reservation
+
+**Wait**:
+The time a job spends at Start before its admission. It ends only when the job is admitted, cancelled, timed out or removed, or the plugin drains.
+_Avoid_: block, hold
 
 **Config file**:
 The one YAML file in which the operator sets the plugin's settings and its profiles.
