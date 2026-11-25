@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Profiles with scratch paths, mounts and disks, sharing values through a
+# YAML anchor and merge keys. Profile keys reload on SIGHUP; a running job
+# keeps the profile it was created with.
+max_memory_mib: 16384
+
+profiles:
+  # Labels without ;profile= use this one. Its anchor lets other profiles
+  # merge its keys; profiles never inherit from each other otherwise.
+  default: &base
+    cpus: 2
+    memory_mib: 2048
+    scratch_paths:
+      - /root/.cache        # empty at every boot, on the scratch disk
+
+  # big is default's keys, with cpus and memory_mib overridden: an explicit
+  # key wins over a merged one.
+  big:
+    <<: *base
+    cpus: 8
+    memory_mib: 8192
+    scratch_gib: 40
+    force_pull: true      # look the label's tag up on every Start
+
+  # persist keeps data between jobs on a read-write disk: jobs on it run one
+  # at a time, each waiting for the disk.
+  persist:
+    cpus: 4
+    memory_mib: 4096
+    scratch_paths:
+      - /var/lib/docker
+    disks:
+      - source: /srv/vols/persist.ext4     # an ext4 file the operator created
+        target: /data
+        read_write: true
+      - source: /srv/vols/datasets.erofs   # read-only: ext4 or EROFS
+        target: /datasets
+    mounts:
+      - source: /srv/tools                 # read-only by default
+        target: /opt/tools

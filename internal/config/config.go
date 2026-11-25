@@ -244,11 +244,14 @@ func (c *Config) Reload() (*Config, []Change, error) {
 // config a reload replaces, or nil at startup: a reload checks the file's
 // profiles against running's plugin-level values, which stay in effect.
 func load(path string, named bool, running *Config) (*Config, error) {
-	return loadOn(path, named, running, runtime.GOARCH)
+	return loadOn(path, named, running, runtime.GOARCH, true)
 }
 
-// loadOn is load for a plugin running on arch, a GOARCH.
-func loadOn(path string, named bool, running *Config, arch string) (*Config, error) {
+// loadOn is load for a plugin running on arch, a GOARCH. sources says
+// whether mount and disk sources are checked on the host: only the test of
+// the reference's examples turns it off, since their sources don't exist on
+// a test host.
+func loadOn(path string, named bool, running *Config, arch string, sources bool) (*Config, error) {
 	data, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) && !named {
 		if !noFile(path) {
@@ -264,7 +267,7 @@ func loadOn(path string, named bool, running *Config, arch string) (*Config, err
 	if err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
-	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}, running: running, arch: arch}
+	d := &decoder{prefix: "config " + path + ": ", lines: map[string]int{}, invalid: map[string]bool{}, running: running, arch: arch, sources: sources}
 	c := builtin()
 	c.File, c.path, c.named = path, path, named
 	if d.decode(c, data) {
@@ -356,6 +359,9 @@ type decoder struct {
 	// arch is the GOARCH the plugin runs on, for the mounts-plus-disks
 	// limit (CFG-10).
 	arch string
+	// sources says whether mount and disk sources are checked on the host:
+	// a mount's must be a directory, a disk's a regular file.
+	sources bool
 }
 
 // profileLine is a line in the profile name.

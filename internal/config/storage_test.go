@@ -171,15 +171,15 @@ func TestMountsPlusDisksLimit(t *testing.T) {
 	three := "profiles:\n  three:\n" + mounts(src[0], "/a", src[1], "/b", src[2], "/c")
 	four := "profiles:\n  four:\n" + mounts(src[0], "/a", src[1], "/b", src[2], "/c", src[3], "/d")
 	for _, content := range []string{three, four} {
-		if _, err := loadOn(writeConfig(t, content), true, nil, "arm64"); err != nil {
+		if _, err := loadOn(writeConfig(t, content), true, nil, "arm64", true); err != nil {
 			t.Errorf("arm64: %v", err)
 		}
 	}
-	if _, err := loadOn(writeConfig(t, three), true, nil, "amd64"); err != nil {
+	if _, err := loadOn(writeConfig(t, three), true, nil, "amd64", true); err != nil {
 		t.Errorf("amd64, three: %v", err)
 	}
 	path := writeConfig(t, four)
-	_, err := loadOn(path, true, nil, "amd64")
+	_, err := loadOn(path, true, nil, "amd64", true)
 	if err == nil {
 		t.Fatal("amd64: four mounts loaded")
 	}
@@ -392,15 +392,15 @@ func TestMountsAndDisksShareTheLimit(t *testing.T) {
 	src, dirs := diskFiles(t, 2), sources(t, 2)
 	ms := mounts(dirs[0], "/a", dirs[1], "/b")
 	three := "profiles:\n  three:\n" + ms + disks(src[0], "/c")
-	if _, err := loadOn(writeConfig(t, three), true, nil, "amd64"); err != nil {
+	if _, err := loadOn(writeConfig(t, three), true, nil, "amd64", true); err != nil {
 		t.Errorf("amd64, 2 mounts and 1 disk: %v", err)
 	}
 	four := "profiles:\n  four:\n" + ms + disks(src[0], "/c", src[1], "/d")
-	if _, err := loadOn(writeConfig(t, four), true, nil, "arm64"); err != nil {
+	if _, err := loadOn(writeConfig(t, four), true, nil, "arm64", true); err != nil {
 		t.Errorf("arm64, 2 mounts and 2 disks: %v", err)
 	}
 	path := writeConfig(t, four)
-	_, err := loadOn(path, true, nil, "amd64")
+	_, err := loadOn(path, true, nil, "amd64", true)
 	if err == nil {
 		t.Fatal("amd64: 2 mounts and 2 disks loaded")
 	}

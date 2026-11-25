@@ -124,6 +124,9 @@ func (d *decoder) storageList(p pair, scope string, source func(string) string) 
 		d.errorf(p.key.Line, scope, p.key.Value, "must be a list of entries")
 		return nil, 0, false
 	}
+	if !d.sources {
+		source = func(string) string { return "" }
+	}
 	inList := scope + ": " + p.key.Value
 	var entries []storageEntry
 	ok := true

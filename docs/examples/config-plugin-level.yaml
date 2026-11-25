@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Every plugin-level key, each set to something other than its built-in
+# value, except runtime_dir, which keeps it. Plugin-level keys are read at
+# startup only: a reload logs a change as needing a restart and keeps the
+# running value.
+listen: unix:///run/runner-microvm/plugin.sock     # built-in: unix:///run/runner-microvm/runner-microvm.sock
+state_dir: /srv/runner-microvm/state               # built-in: /var/lib/runner-microvm
+cache_dir: /srv/runner-microvm/cache               # built-in: /var/cache/runner-microvm
+runtime_dir: /run/runner-microvm/jobs              # the built-in value; the socket's directory may be its parent
+max_memory_mib: 24576                              # built-in: unset, no limit
+cache_max_gib: 50                                  # built-in: 20
+lib_dir: /opt/libkrun/lib                          # built-in: unset, load by soname
+libkrun_log_level: info                            # built-in: warn
+log_level: debug                                   # built-in: info
+keep_job_logs: true                                # built-in: false
+profiles:
+  default:
+    memory_mib: 2048

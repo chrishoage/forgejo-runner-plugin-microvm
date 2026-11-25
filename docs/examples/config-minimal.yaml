@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# A minimal config file: every setting at its built-in value except the
+# default profile, which labels without ;profile= use. Without a file at all,
+# every setting, this profile included, takes its built-in value.
+profiles:
+  default:
+    cpus: 4
+    memory_mib: 4096
