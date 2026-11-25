@@ -415,6 +415,8 @@ The agent's CopyIn and CopyOut move files in and out of the job's container inta
 
 The plugin's settings and its profiles come from the config file, one YAML file (CFG-1). `internal/config` reads and validates it; the plugin is its only user.
 
+The keys, their built-in values, meanings and rules, and the label syntax, are listed in one place, the operator's reference [`configuration.md`](configuration.md), with example config files, `config-*.yaml` under [`examples/`](examples/), that `internal/config`'s tests run through the same checks as `check`, sources' existence aside (#126). This section records the decisions behind them and how they are built; it doesn't restate the keys. One list of keys can't disagree with another, and a test fails when the reference's tables and the decoder's keys differ.
+
 - **`runner-microvm serve` runs the plugin, and `runner-microvm check` validates the config file and exits 0 if it is valid, or 1 after printing every error.** Neither takes arguments; no subcommand, an unknown one or an argument prints the usage and exits 2. With `check`, an operator tests a file before a reload or a restart instead of reading the log afterwards, and one way to name the file keeps `serve`, `check` and reload in agreement.
 - **`runner-microvm version` prints the bare version and a newline to stdout and exits 0; it takes no arguments either, and reads no config file** (#124). Without it an operator can only identify a binary by its checksum; bare output keeps it scriptable. A release build says its version (`1.2.3`, no `v`), and every other build says `dev` (`docs/development.md`, Building and the payload).
 - **The file is `/etc/runner-microvm/config.yaml`, unless `RUNNER_MICROVM_CONFIG=<path>` names another;** a relative path in the variable is made absolute once, at startup. It is the default path plus the override that operators and packagers expect.
@@ -424,20 +426,7 @@ The plugin's settings and its profiles come from the config file, one YAML file 
 - **The decoder walks the file's `yaml.Node` tree itself, key by key, so every error, decoding and validation alike, carries the line of the key at fault and, inside `profiles`, the profile's name:** `config <path>: line <n>: profile "<name>": <key>: <problem>`, and for a plugin-level key the same without the profile (CFG-2, CFG-3). An unknown key fails exactly as `KnownFields` would, but `KnownFields` exists only on a `yaml.Decoder` over bytes, not on a node's `Decode`, so a profile decoded from its own node couldn't use it, and its errors would be the library's text, whose line would have to be parsed out. Walking the nodes never blames a key written after `profiles:` on the last profile. Every error in the file is reported, not only the first. A key set twice in one mapping fails, naming both lines.
 - **A YAML syntax error stops startup with the library's line.** A second YAML document in the file is an error, and a top level that isn't a mapping is too.
 - **Unknown top-level keys are errors, Compose-style `x-` keys included.** Operators share values between profiles with YAML anchors on a profile and merge keys (`big: {<<: *default, cpus: 8}`): plain YAML, which the decoder expands, so the plugin never sees it, and profiles still don't inherit from each other (CFG-5). An explicit key wins over a merged one; an error in a merged key names the line where it is written and the profile it was merged into. A mapping that merges itself fails, and merges that expand to more than 100,000 keys fail, so a file can't make decoding loop or blow up.
-- **The plugin-level keys are read at startup only; a reload changes none of them (below):**
-
-  | Key | Built-in value | Rule |
-  |---|---|---|
-  | `listen` | `unix:///run/runner-microvm/runner-microvm.sock` | `unix://` followed by an absolute path; any other form is an invalid value |
-  | `state_dir` | `/var/lib/runner-microvm` | absolute |
-  | `cache_dir` | `/var/cache/runner-microvm` | absolute |
-  | `runtime_dir` | `/run/runner-microvm/jobs` | absolute |
-  | `max_memory_mib` | unset | an integer ≥ 0; unset or 0 means no limit (Admission, below) |
-  | `cache_max_gib` | 20 | an integer ≥ 0 whose byte count fits an `int64` (at most 8589934591): the image cache takes its cap as an `int64` of bytes; 0 keeps no layer that no VM is using (Image cache, below) |
-  | `lib_dir` | unset | absolute; unset loads libkrun and libkrunfw by soname through the system's dynamic loader, set loads them only from it (libkrun, above) |
-  | `libkrun_log_level` | `warn` | `warn`, `info`, `debug` or `trace`: libkrun's log level in every VM's log (libkrun, above) |
-  | `log_level` | `info` | `debug`, `info`, `warn` or `error`: the log level of the plugin, every job process, every VM child and every agent (Logging, below) |
-  | `keep_job_logs` | `false` | `true` or `false`: `true` makes Remove move each job's job logs to `<state>/logs/<id>/` rather than delete them (Logging, Keeping job logs, below) |
+- **The plugin-level keys are read at startup only; a reload changes none of them (below).** Their table is the reference's (Plugin-level keys).
 
   - The names end in `_dir`: that says what the value is, and avoids a bare `cache` in a file operators keep next to the runner config, whose own `cache:` section is the actions cache.
   - `listen` keeps the `unix://` scheme: it matches the runner's `plugins.<key>.address`, and leaves room for another transport later without changing the key.
@@ -448,16 +437,7 @@ The plugin's settings and its profiles come from the config file, one YAML file 
   - A plugin-level 0 is taken literally, except `max_memory_mib`, where 0 means no limit: literal values are honest.
   - `cache_max_gib` is converted to bytes and passed to the image cache's constructor as its size cap (IMG-14); there is no `cache_max_mib`, because tests set a small cap on the constructor directly. A value whose byte count overflows an `int64` is invalid, as for `scratch_gib`, rather than clamped: a clamped value would be logged as typed but not be the cap in effect. `cache_max_gib: 0` is taken literally: plugin-level 0 is literal, and here it is a meaningful value, a cache that keeps nothing no VM is using.
 - **`profiles` is a map from profile name to profile.** A name must match `[a-z0-9][a-z0-9_-]*`: a name with `;`, `=`, a space, or an empty name can never appear in a label, so it's a mistake best caught at load. Each profile key arrives with the change that gives it meaning.
-- **The profile keys:**
-
-  | Key | Built-in value | Rule |
-  |---|---|---|
-  | `cpus` | 2 | an integer, 1 to 255 |
-  | `memory_mib` | 1024 | an integer, 1 to 4294967295 |
-  | `scratch_gib` | 10 | an integer ≥ 1 whose byte size fits an `int64` (at most 8589934591): the scratch file's size is an `int64` of bytes |
-  | `scratch_paths` | `[]` | a list of guest paths, each absolute, not `/`, not `/proc`, `/sys` or `/dev` or under them, and listed once (GST-13) |
-  | `mounts` | `[]` | a list of `{source, target, read_write}`: `source` an absolute path to an existing directory, `target` a guest path under STO-5's rules, `read_write` `false` by default, `true` for a read-write mount (STO-1, STO-3, STO-5) |
-  | `force_pull` | `false` | `true` or `false` (IMG-6) |
+- **The profile keys** are the reference's table (Profile keys), and a mount's or a disk's entry keys its own (Mount and disk entries).
 
   - The scratch size key is `scratch_gib`, not `disk_gib`: `disk_gib` would sit next to #9's `disks:` list, which means something else.
   - A key left out takes its built-in value; `0` is an invalid value that stops startup (CFG-3). Having `cpus: 0` silently mean 2 is magic, and the decoder can tell a missing key from a 0. So is a negative value, a quoted number, or no value.

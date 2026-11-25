@@ -17,6 +17,7 @@ Durable decisions live here, not in this file or in issues.
 
 - `docs/architecture.md`: the processes, packages and their import rules, on-disk layout, failure handling and tests.
 - `GLOSSARY.md`: the project's vocabulary; use its terms.
+- `docs/configuration.md`: the config file reference, the one place its keys are listed; its examples are `docs/examples/config-*.yaml`.
 - `docs/development.md`: how the project is built, the toolchain and the dev shell.
 - `docs/conventions.md`: the definition of done, commits and merging, the PR template, SPDX headers, lint, dependency licenses, Renovate.
 - `docs/adr/`: decisions that are hard to reverse.
