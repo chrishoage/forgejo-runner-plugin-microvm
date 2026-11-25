@@ -259,13 +259,12 @@ func holdLock(t *testing.T, p string, how int) func() {
 	return release
 }
 
-// Every disk takes a disk lock at Start. Against the test's exclusive lock
-// on the disk file, a job with it read-only and one with it read-write each
-// fail Start with the same text; against the test's shared lock, the
-// read-write job fails and the read-only one boots, and a second read-only
-// job boots beside it, two VMs reading one disk at once. With the test's
-// lock gone, the two read-only VMs' own shared locks still fail the
-// read-write job (STO-7, STO-8). The two VMs are as small as boot allows.
+// Every disk takes a disk lock at Start, which a process outside the
+// plugin, here the test, can hold. Against the test's exclusive lock on the
+// disk file, a job with it read-only and one with it read-write each fail
+// Start with the same text; against the test's shared lock, the read-write
+// job fails and a read-only one boots and reads the disk (STO-7, STO-8).
+// The plugin's own jobs wait for each other instead (cmd/diskqueue_test.go).
 func TestDiskLocks(t *testing.T) {
 	t.Parallel()
 	img, host := baseImage(t)
@@ -300,14 +299,10 @@ func TestDiskLocks(t *testing.T) {
 	release()
 
 	release = holdLock(t, disk, unix.LOCK_SH)
+	defer release()
 	wantInUse("rw", "a shared lock")
-	a := bootImage(t, p, "ro-a", ref+";profile=ro")
-	b := bootImage(t, p, "ro-b", ref+";profile=ro")
-	release()
-	for _, v := range []*vm{a, b} {
-		if code, out := as(t, v, "0", "test \"$(cat /data/marker)\" = shared"); code != 0 {
-			t.Errorf("a read-only job's step exited %d:\n%s", code, out)
-		}
+	v := bootImage(t, p, "ro", ref+";profile=ro")
+	if code, out := as(t, v, "0", "test \"$(cat /data/marker)\" = shared"); code != 0 {
+		t.Errorf("the read-only job's step exited %d:\n%s", code, out)
 	}
-	wantInUse("rw", "two read-only jobs")
 }
