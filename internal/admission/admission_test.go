@@ -5,42 +5,57 @@ package admission
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 )
 
-// queue admits jobs on a budget in the background and records the order
-// they are admitted in, and each one's wait.
+// queue admits jobs on an admitter in the background and records the order
+// they are admitted in, each one's waits, and each wait's end.
 type queue struct {
 	t *testing.T
-	b *Budget
+	b *Admitter
 
 	mu       sync.Mutex
 	admitted []string
-	waits    map[string]Wait
+	waits    map[string][]Wait
+	ended    map[string][]error
 	errs     map[string]error
 	cancels  map[string]context.CancelFunc
 	wg       sync.WaitGroup
 }
 
 func newQueue(t *testing.T, capMiB uint64) *queue {
-	return &queue{t: t, b: New(capMiB), waits: map[string]Wait{}, errs: map[string]error{}, cancels: map[string]context.CancelFunc{}}
+	return &queue{t: t, b: New(capMiB), waits: map[string][]Wait{}, ended: map[string][]error{}, errs: map[string]error{}, cancels: map[string]context.CancelFunc{}}
 }
 
 // admit starts admitting job, needing need MiB, and returns once it is
 // admitted or waiting: every goroutine in the bubble is blocked then.
-func (q *queue) admit(job string, need uint64) {
+func (q *queue) admit(job string, need uint64) { q.admitDisks(job, need) }
+
+// admitDisks starts admitting job, needing disks and need MiB, as admit
+// does.
+func (q *queue) admitDisks(job string, need uint64, disks ...Disk) {
 	ctx, cancel := context.WithCancel(q.t.Context())
 	q.mu.Lock()
 	q.cancels[job] = cancel
 	q.mu.Unlock()
 	q.wg.Go(func() {
-		err := q.b.Admit(ctx, job, need, func(w Wait) {
-			q.mu.Lock()
-			q.waits[job] = w
-			q.mu.Unlock()
+		err := q.b.Admit(ctx, job, disks, need, Observer{
+			Waiting: func(w Wait) {
+				q.mu.Lock()
+				q.waits[job] = append(q.waits[job], w)
+				q.mu.Unlock()
+			},
+			Waited: func(_ Wait, _ time.Duration, err error) {
+				q.mu.Lock()
+				q.ended[job] = append(q.ended[job], err)
+				q.mu.Unlock()
+			},
 		})
 		q.mu.Lock()
 		defer q.mu.Unlock()
@@ -78,6 +93,18 @@ func (q *queue) want(jobs ...string) {
 	}
 }
 
+// wantAll fails the test unless exactly jobs were admitted, in any order:
+// jobs admitted at one release run in no order of their own.
+func (q *queue) wantAll(jobs ...string) {
+	q.t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	got, want := slices.Sorted(slices.Values(q.admitted)), slices.Sorted(slices.Values(jobs))
+	if !slices.Equal(got, want) {
+		q.t.Errorf("admitted %v, want %v in any order", q.admitted, jobs)
+	}
+}
+
 // end cancels every wait left and waits for each Admit to return.
 func (q *queue) end() {
 	q.mu.Lock()
@@ -112,8 +139,8 @@ func TestJobsThatDoNotFitWaitInArrivalOrder(t *testing.T) {
 			"d": {NeedMiB: 3072, FreeMiB: 1024, CapMiB: 4096, Ahead: 2},
 		}
 		for job, want := range wantWaits {
-			if got := q.waits[job]; got != want {
-				t.Errorf("%s's wait = %+v, want %+v", job, got, want)
+			if got := q.waits[job]; len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+				t.Errorf("%s's waits = %+v, want %+v", job, got, want)
 			}
 		}
 		q.mu.Unlock()
@@ -180,13 +207,13 @@ func TestAWaitEndsWithItsContextsCause(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := New(1024)
-		if err := b.Admit(t.Context(), "a", 1024, nil); err != nil {
+		if err := b.Admit(t.Context(), "a", nil, 1024, Observer{}); err != nil {
 			t.Fatal(err)
 		}
 		cause := errors.New("draining")
 		ctx, cancel := context.WithCancelCause(t.Context())
 		done := make(chan error, 1)
-		go func() { done <- b.Admit(ctx, "b", 1024, func(Wait) {}) }()
+		go func() { done <- b.Admit(ctx, "b", nil, 1024, Observer{Waiting: func(Wait) {}}) }()
 		synctest.Wait()
 		cancel(cause)
 		if err := <-done; !errors.Is(err, cause) {
@@ -210,7 +237,7 @@ func TestAnEndedWaitGivesBackAnAdmissionWhileWaitingRuns(t *testing.T) {
 		// wait's context ends.
 		done := make(chan error, 1)
 		go func() {
-			done <- q.b.Admit(ctx, "b", 1024, func(Wait) { <-ctx.Done() })
+			done <- q.b.Admit(ctx, "b", nil, 1024, Observer{Waiting: func(Wait) { <-ctx.Done() }})
 		}()
 		synctest.Wait()
 		q.admit("c", 1024)
@@ -238,10 +265,10 @@ func TestAJobThatFitsIsAdmittedWhateverItsContext(t *testing.T) {
 	b := New(1024)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := b.Admit(ctx, "a", 1024, func(Wait) { t.Error("a job that fits waited") }); err != nil {
+	if err := b.Admit(ctx, "a", nil, 1024, Observer{Waiting: func(Wait) { t.Error("a job that fits waited") }}); err != nil {
 		t.Fatalf("Admit = %v, want it admitted", err)
 	}
-	if err := b.Admit(ctx, "b", 1, func(Wait) {}); !errors.Is(err, context.Canceled) {
+	if err := b.Admit(ctx, "b", nil, 1, Observer{Waiting: func(Wait) {}}); !errors.Is(err, context.Canceled) {
 		t.Errorf("Admit of a job that must wait, with its context ended = %v, want context.Canceled", err)
 	}
 }
@@ -298,7 +325,7 @@ func TestFits(t *testing.T) {
 	if !New(0).Fits(1 << 40) {
 		t.Error("with no cap, a job does not fit")
 	}
-	if err := b.Admit(t.Context(), "huge", 4097, func(Wait) { t.Error("a job that never fits waited") }); err == nil {
+	if err := b.Admit(t.Context(), "huge", nil, 4097, Observer{Waiting: func(Wait) { t.Error("a job that never fits waited") }}); err == nil {
 		t.Error("Admit of a job that never fits succeeded")
 	}
 }
@@ -308,13 +335,13 @@ func TestFits(t *testing.T) {
 func TestAJobIsAdmittedOnce(t *testing.T) {
 	t.Parallel()
 	b := New(4096)
-	if err := b.Admit(t.Context(), "a", 1024, nil); err != nil {
+	if err := b.Admit(t.Context(), "a", nil, 1024, Observer{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Admit(t.Context(), "a", 1024, nil); err == nil {
+	if err := b.Admit(t.Context(), "a", nil, 1024, Observer{}); err == nil {
 		t.Error("a second Admit of one job succeeded")
 	}
-	if err := b.Admit(t.Context(), "b", 3072, func(Wait) { t.Error("b waited: a holds more than its need") }); err != nil {
+	if err := b.Admit(t.Context(), "b", nil, 3072, Observer{Waiting: func(Wait) { t.Error("b waited: a holds more than its need") }}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -333,7 +360,7 @@ func TestArrivalIsWhenTheWaitIsRecorded(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			admit := func(job string, need uint64, waiting func(Wait)) {
 				q.wg.Go(func() {
-					if err := q.b.Admit(ctx, job, need, waiting); err != nil {
+					if err := q.b.Admit(ctx, job, nil, need, Observer{Waiting: waiting}); err != nil {
 						return
 					}
 					q.mu.Lock()
@@ -360,4 +387,250 @@ func TestArrivalIsWhenTheWaitIsRecorded(t *testing.T) {
 			q.end()
 		})
 	}
+}
+
+// ro and rw are the disk keyed k, read-only or read-write, at /disk<k>.
+func ro(k uint64) Disk { return Disk{Key: DiskKey{Dev: 1, Ino: k}, Path: fmt.Sprintf("/disk%d", k)} }
+
+func rw(k uint64) Disk {
+	d := ro(k)
+	d.ReadWrite = true
+	return d
+}
+
+// waitsOf returns job's waits so far.
+func (q *queue) waitsOf(job string) []Wait {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.Clone(q.waits[job])
+}
+
+// Writers to one disk are admitted one at a time, in arrival order, and
+// each disk wait names the disk, its holders and how many are ahead.
+func TestWritersTakeADiskOneAtATime(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 0)
+		defer q.end()
+		for _, job := range []string{"a", "b", "c", "d"} {
+			q.admitDisks(job, 0, rw(1))
+		}
+		q.want("a")
+		d := rw(1)
+		for job, ahead := range map[string]int{"b": 0, "c": 1, "d": 2} {
+			want := []Wait{{Disk: &d, Holders: []string{"a"}, Ahead: ahead}}
+			if got := q.waitsOf(job); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s's waits = %+v, want %+v", job, got, want)
+			}
+		}
+		for i, job := range []string{"a", "b", "c"} {
+			q.release(job)
+			q.want([]string{"a", "b", "c", "d"}[:i+2]...)
+		}
+		q.release("d")
+	})
+}
+
+// Readers share a disk; a writer waits for every earlier reader; a reader
+// behind a waiting writer waits for it, though the disk is only read, and
+// the readers behind the writer are admitted together once it leaves.
+func TestReadersShareADiskAndWritersWaitForThem(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 0)
+		defer q.end()
+		q.admitDisks("r1", 0, ro(1))
+		q.admitDisks("r2", 0, ro(1))
+		q.want("r1", "r2")
+		q.admitDisks("w", 0, rw(1))
+		q.admitDisks("r3", 0, ro(1))
+		q.admitDisks("r4", 0, ro(1))
+		q.want("r1", "r2")
+		d := ro(1)
+		if got, want := q.waitsOf("r3"), []Wait{{Disk: &d, Holders: []string{"r1", "r2"}, Ahead: 1}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("r3's waits = %+v, want %+v", got, want)
+		}
+
+		q.release("r1")
+		q.want("r1", "r2")
+		q.release("r2")
+		q.want("r1", "r2", "w")
+		q.release("w")
+		q.wantAll("r1", "r2", "w", "r3", "r4")
+		q.release("r3")
+		q.release("r4")
+	})
+}
+
+// Jobs needing disks {A, B} and {B, A}, many at once, all finish: each
+// takes its disks in key order, whatever order its profile lists them in
+// (QUE-5). A deadlock would block every goroutine, which synctest reports.
+func TestOppositeDiskOrdersNeverDeadlock(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := New(0)
+		var wg sync.WaitGroup
+		for i := range 200 {
+			disks := []Disk{rw(1), rw(2)}
+			if i%2 == 1 {
+				disks = []Disk{rw(2), rw(1)}
+			}
+			job := fmt.Sprint(i)
+			wg.Go(func() {
+				if err := b.Admit(t.Context(), job, disks, 0, Observer{}); err != nil {
+					t.Errorf("%s: %v", job, err)
+					return
+				}
+				time.Sleep(time.Second)
+				b.Release(job)
+			})
+		}
+		wg.Wait()
+		if len(b.disks) != 0 || len(b.jobs) != 0 {
+			t.Errorf("after every job is released, %d disk queues and %d jobs are left", len(b.disks), len(b.jobs))
+		}
+	})
+}
+
+// A job waiting for a disk holds no memory: a later job that needs all
+// the memory left is admitted at once. A job holding its disks and waiting
+// for memory is admitted when memory frees.
+func TestADiskWaitHoldsNoMemory(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 1024)
+		defer q.end()
+		q.admitDisks("a", 512, rw(1))
+		q.admitDisks("b", 512, rw(1))
+		q.admit("c", 512)
+		q.want("a", "c")
+		if w := q.waitsOf("b"); len(w) != 1 || w[0].Disk == nil {
+			t.Errorf("b's waits = %+v, want one for its disk", w)
+		}
+
+		// a frees its disk and its memory: b takes both.
+		q.release("a")
+		q.want("a", "c", "b")
+		// e takes its disk, then waits for memory, holding the disk.
+		q.admitDisks("e", 1024, rw(3))
+		q.admitDisks("f", 0, rw(3))
+		q.want("a", "c", "b")
+		w := q.waitsOf("e")
+		if len(w) != 1 || w[0].Disk != nil || w[0].NeedMiB != 1024 || w[0].FreeMiB != 0 || w[0].Ahead != 0 {
+			t.Errorf("e's waits = %+v, want one for 1024 MiB with none free", w)
+		}
+		if w := q.waitsOf("f"); len(w) != 1 || !reflect.DeepEqual(w[0].Holders, []string{"e"}) {
+			t.Errorf("f's waits = %+v, want one for the disk e holds", w)
+		}
+		q.release("c")
+		q.want("a", "c", "b")
+		q.release("b")
+		q.want("a", "c", "b", "e")
+		q.release("e")
+		q.want("a", "c", "b", "e", "f")
+		q.release("f")
+	})
+}
+
+// A cancelled wait gives back the disks it already took and leaves the
+// queue it waits in: a job behind it moves up, and the disk it took is
+// free at once. Its wait ends with its context's error.
+func TestACancelledWaitGivesBackItsDisks(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 0)
+		defer q.end()
+		q.admitDisks("x", 0, rw(2))
+		q.admitDisks("y", 0, rw(2), rw(1))
+		q.admitDisks("z", 0, rw(2))
+		q.want("x")
+		q.cancel("y")
+		q.mu.Lock()
+		if err := q.errs["y"]; !errors.Is(err, context.Canceled) {
+			t.Errorf("the cancelled wait returned %v, want context.Canceled", err)
+		}
+		if ended := q.ended["y"]; len(ended) != 1 || !errors.Is(ended[0], context.Canceled) {
+			t.Errorf("y's waits ended with %v, want one context.Canceled", ended)
+		}
+		q.mu.Unlock()
+		// y took disk 1 before it waited for disk 2: it gave it back.
+		q.admitDisks("v", 0, rw(1))
+		q.want("x", "v")
+		q.release("x")
+		q.want("x", "v", "z")
+		for _, job := range []string{"y", "v", "z"} {
+			q.release(job)
+		}
+		if len(q.b.disks) != 0 || len(q.b.jobs) != 0 {
+			t.Errorf("%d disk queues and %d jobs left", len(q.b.disks), len(q.b.jobs))
+		}
+	})
+}
+
+// A wait for memory that is cancelled gives back the disks the job holds.
+func TestACancelledMemoryWaitGivesBackItsDisks(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 1024)
+		defer q.end()
+		q.admit("a", 1024)
+		q.admitDisks("b", 1024, rw(1), ro(2))
+		q.want("a")
+		q.cancel("b")
+		q.admitDisks("c", 0, rw(1), rw(2))
+		q.want("a", "c")
+		q.release("a")
+		q.release("c")
+	})
+}
+
+// Release is exactly once for a job's disks and memory together: a second
+// release frees nothing more, and a release while the job's Admit still
+// waits frees nothing.
+func TestReleaseIsExactlyOnceForDisksAndMemory(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 1024)
+		defer q.end()
+		q.admitDisks("a", 1024, rw(1), ro(2))
+		q.admitDisks("b", 512, ro(2))
+		// b holds disk 2 and waits for memory; its release does nothing.
+		q.release("b")
+		q.admitDisks("w", 0, rw(2))
+		q.want("a")
+
+		q.release("a")
+		q.want("a", "b")
+		q.release("a")
+		q.admitDisks("c", 1024, rw(1))
+		// a's second release freed no memory: c waits for b's.
+		q.want("a", "b")
+		q.release("b")
+		q.wantAll("a", "b", "w", "c")
+		q.release("b")
+		q.release("w")
+		q.release("c")
+		if len(q.b.disks) != 0 || len(q.b.jobs) != 0 {
+			t.Errorf("%d disk queues and %d jobs left", len(q.b.disks), len(q.b.jobs))
+		}
+	})
+}
+
+// A disk listed twice is one entry, at its strongest mode: read-only and
+// read-write together are a write.
+func TestADiskListedTwiceIsOneEntry(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		q := newQueue(t, 0)
+		defer q.end()
+		q.admitDisks("a", 0, ro(1), ro(1))
+		q.admitDisks("b", 0, ro(1), rw(1))
+		q.want("a")
+		if w := q.waitsOf("b"); len(w) != 1 || !w[0].Disk.ReadWrite {
+			t.Errorf("b's waits = %+v, want one, writing", w)
+		}
+		q.release("a")
+		q.want("a", "b")
+		q.release("b")
+	})
 }

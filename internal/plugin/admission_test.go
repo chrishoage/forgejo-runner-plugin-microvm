@@ -93,7 +93,7 @@ func (r *runningStart) remaining() []string {
 // withBudget gives srv a memory budget of capMiB, as max_memory_mib does,
 // and a log t can read. It runs before any call on srv.
 func withBudget(srv *Server, capMiB uint64) *logBuffer {
-	srv.memory = admission.New(capMiB)
+	srv.admission = admission.New(capMiB)
 	buf := &logBuffer{}
 	srv.log = slog.New(slog.NewTextHandler(buf, nil))
 	return buf
@@ -226,11 +226,11 @@ func wantFree(t *testing.T, srv *Server, needMiB uint64) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := srv.memory.Admit(ctx, "probe", needMiB, nil); err != nil {
+	if err := srv.admission.Admit(ctx, "probe", nil, needMiB, admission.Observer{}); err != nil {
 		t.Errorf("%d MiB of the memory budget are not free: %v", needMiB, err)
 		return
 	}
-	srv.memory.Release("probe")
+	srv.admission.Release("probe")
 }
 
 // A drain fails a Start waiting for memory with Unavailable, as a new
@@ -395,8 +395,8 @@ func wantHeld(t *testing.T, srv *Server, needMiB uint64) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := srv.memory.Admit(ctx, "probe", needMiB, nil); err == nil {
-		srv.memory.Release("probe")
+	if err := srv.admission.Admit(ctx, "probe", nil, needMiB, admission.Observer{}); err == nil {
+		srv.admission.Release("probe")
 		t.Errorf("%d MiB of the memory budget are free, want them held", needMiB)
 	}
 }

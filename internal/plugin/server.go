@@ -142,10 +142,10 @@ type Server struct {
 	// doesn't wait for a Remove still tearing its job down.
 	removals sync.WaitGroup
 
-	// memory is the memory budget, which each job is admitted to at Start
-	// and released from once its job process group is reaped (QUE-1,
-	// QUE-7).
-	memory *admission.Budget
+	// admission is the memory budget and the disk queues, which each job
+	// is admitted to at Start and released from once its job process group
+	// is reaped (QUE-1, QUE-3, QUE-7).
+	admission *admission.Admitter
 	// drainCtx ends when the drain begins, with errShuttingDown as its
 	// cause, ending every Start's wait for admission.
 	drainCtx   context.Context
@@ -248,7 +248,7 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	return &Server{
 		log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles,
 		drained: make(chan struct{}), health: hs, newID: newID,
-		memory: admission.New(cfg.MaxMemoryMiB), drainCtx: drainCtx, startDrain: startDrain,
+		admission: admission.New(cfg.MaxMemoryMiB), drainCtx: drainCtx, startDrain: startDrain,
 	}, nil
 }
 
@@ -395,9 +395,9 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 		return nil, err
 	}
 	// The request is well formed; only the operator can make room for it.
-	if need := jobMemoryMiB(prof); !s.memory.Fits(need) {
+	if need := jobMemoryMiB(prof); !s.admission.Fits(need) {
 		return nil, status.Errorf(codes.FailedPrecondition,
-			"the job needs %d MiB of memory, more than max_memory_mib, %d MiB: it could never run", need, s.memory.Cap())
+			"the job needs %d MiB of memory, more than max_memory_mib, %d MiB: it could never run", need, s.admission.Cap())
 	}
 	image := req.GetImage()
 	if image == "" {
@@ -745,7 +745,7 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 	// its memory, for good: nothing removes it again.
 	reaped, err := s.stop(context.WithoutCancel(ctx), j)
 	if reaped {
-		s.memory.Release(j.id)
+		s.admission.Release(j.id)
 	}
 	kept := s.keepJobLogs(ctx, j.id)
 	err = errors.Join(err,
