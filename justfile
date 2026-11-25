@@ -13,14 +13,42 @@ default:
 # Build flags shared by every binary: reproducible under Nix.
 build_flags := "-trimpath -buildvcs=false"
 
+# The job binary's dynamic loader in a release: the x86_64 psABI's path, where
+# FHS glibc distributions have it. Other builds keep the dev shell's Go
+# default, the Nix store's glibc, which the dev shell's libkrun is linked
+# against (docs/development.md).
+release_ldso := "/lib64/ld-linux-x86-64.so.2"
+
+# LDSO, when set, is the job binary's dynamic loader.
 # Build the job binary and the agent into internal/payload/, for embedding.
-payload:
-    CGO_ENABLED=0 go build {{ build_flags }} -o internal/payload/runner-microvm-job ./cmd/runner-microvm-job
+payload ldso="":
+    CGO_ENABLED=0 go build {{ build_flags }} -ldflags '{{ if ldso == "" { "" } else { "-I " + ldso } }}' -o internal/payload/runner-microvm-job ./cmd/runner-microvm-job
     CGO_ENABLED=0 go build {{ build_flags }} -o internal/payload/runner-microvm-agent ./cmd/runner-microvm-agent
 
-# Build bin/runner-microvm with the job binary and the agent embedded.
-build: payload
-    CGO_ENABLED=0 go build {{ build_flags }} -tags payload -o bin/runner-microvm ./cmd/runner-microvm
+# Build bin/runner-microvm, job binary and agent embedded; it says version dev.
+build: (plugin "bin/runner-microvm")
+
+# Build the plugin, payload embedded, to OUT, passing LDFLAGS to the linker
+# and LDSO to payload: the one build definition `build` and `release-assets`
+# share.
+[private]
+plugin out ldflags="" ldso="": (payload ldso)
+    CGO_ENABLED=0 go build {{ build_flags }} -tags payload -ldflags '{{ ldflags }}' -o '{{ out }}' ./cmd/runner-microvm
+
+# The variable the version is set in (docs/development.md).
+version_var := "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/plugin.version"
+
+# Where release-assets writes what a release attaches.
+release_dir := "dist"
+
+# VERSION is passed as is (1.2.3, no v), and dist/ is replaced each time. It
+# fails unless the embedded job binary names release_ldso as its loader.
+# Build what a release attaches into dist/: the versioned binary and SHA256SUMS.
+release-assets version:
+    rm -rf '{{ release_dir }}'
+    {{ just_executable() }} plugin '{{ release_dir }}/runner-microvm-{{ version }}-linux-amd64' '-X {{ version_var }}={{ version }}' '{{ release_ldso }}'
+    interp=$(readelf -l internal/payload/runner-microvm-job | sed -n 's/.*Requesting program interpreter: \(.*\)]$/\1/p') && test "$interp" = '{{ release_ldso }}' || { echo "the job binary's loader is '$interp', not {{ release_ldso }}" >&2; exit 1; }
+    cd '{{ release_dir }}' && sha256sum 'runner-microvm-{{ version }}-linux-amd64' > SHA256SUMS
 
 # Apply the formatters (gofumpt, goimports).
 fmt:
