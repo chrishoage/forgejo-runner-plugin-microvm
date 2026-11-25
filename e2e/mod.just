@@ -122,7 +122,8 @@ up:
     # default, a larger profile, big, which the microvm-big label names,
     # and storage, with the fixtures above, which the microvm-storage label
     # names; each key on a line of its own, so an edit for a reload is one
-    # sed.
+    # sed. Its memory budget is big's memory, so two big jobs run one after
+    # the other, and two of the others at once.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
     {
         echo "listen: unix://$sock"
@@ -130,6 +131,7 @@ up:
         echo "cache_dir: {{ plugin_dir }}/cache"
         echo "runtime_dir: {{ plugin_dir }}/runtime"
         echo "lib_dir: ${RUNNER_MICROVM_LIBDIR:?is not set: run inside the dev shell}"
+        echo "max_memory_mib: 1536"
         echo "profiles:"
         echo "  default:"
         echo "    cpus: 1"
@@ -208,7 +210,7 @@ up:
     {{ compose }} logs runner >&2
     exit 1
 
-# Push e2e/workflows/<workflow>.yml to a fresh repository of that name, dispatch it, print the job's log and the VM's shape; fail unless it succeeds and the log shows the first step's output, and for mount-write unless the file it wrote is on the host, owned by the plugin's user.
+# Push e2e/workflows/<workflow>.yml to a fresh repository of that name, dispatch it, print the job's log and the VM's shape; fail unless it succeeds and the log shows the first step's output, for mount-write unless the file it wrote is on the host, owned by the plugin's user, and for queue unless the plugin logged a wait for memory and its end.
 run workflow="echo":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -247,6 +249,10 @@ run workflow="echo":
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
         GIT_CONFIG_VALUE_0="Authorization: Basic $(printf '%s:%s' '{{ admin }}' "$password" | base64 -w0)" \
         timeout 60 git -C "$work" push -q "http://127.0.0.1:3000/{{ admin }}/{{ workflow }}.git" main
+
+    # queue's check reads the plugin's log from here on, so a wait logged
+    # by an earlier run can't pass it.
+    from=$(($(wc -l <'{{ plugin_log }}') + 1))
 
     # mount-write's step writes this file on the read-write mount, and the
     # check after the run reads its owner, so none may be left from a
@@ -299,6 +305,17 @@ run workflow="echo":
     # The VM's shape, as each shape step printed it: its own line, like the
     # step's output above.
     grep -E '^shape: ' <<<"$lines" | sed 's/^/run {{ workflow }}: /' || true
+    # queue's two jobs run one after the other: the plugin logged one
+    # job's wait for memory, and its end once the other was removed.
+    if [ '{{ workflow }}' = queue ]; then
+        new=$(tail -n +"$from" '{{ plugin_log }}')
+        for msg in 'waiting for memory' 'got memory'; do
+            grep -F "msg=\"$msg\"" <<<"$new" | sed 's/^/run {{ workflow }}: /' || {
+                echo "the plugin logged no \"$msg\" for this run; its log is .e2e/plugin.log" >&2
+                exit 1
+            }
+        done
+    fi
     # The file mount-write's step wrote as the guest's root must be on the
     # host, owned by the plugin's user, who is the user running the
     # harness: the plugin runs unprivileged on the host (STO-3).

@@ -10,7 +10,9 @@ log:
 
 runner:
   file: /data/.runner
-  capacity: 1
+  # Two tasks at once, so jobs reach the plugin together and its memory
+  # budget, not the runner, decides which run at once (queue.yml).
+  capacity: 2
   # The workflows' labels, routed to the plugin with the test image:
   # microvm names no profile, so it gets default; microvm-big names big.
   # microvm-node has the Node image, with git and node, for the workflows
