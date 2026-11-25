@@ -256,7 +256,8 @@ func TestStartAttachesTheProfilesDisks(t *testing.T) {
 	t.Parallel()
 	launcher := &fakeLauncher{}
 	srv := newTestServer(t, &fakeCache{}, launcher)
-	ds := []config.Disk{{Source: "/srv/store.ext4", Target: "/var/lib/store"}, {Source: "/srv/tools.erofs", Target: "/opt/tools"}}
+	store, tools := diskFile(t, "store.ext4"), diskFile(t, "tools.erofs")
+	ds := []config.Disk{{Source: store, Target: "/var/lib/store"}, {Source: tools, Target: "/opt/tools"}}
 	srv.SetProfiles(config.Profiles{"data": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1, Disks: ds}})
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
 	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
@@ -278,7 +279,7 @@ func TestStartAttachesTheProfilesDisks(t *testing.T) {
 	for _, d := range vm.GetBoot().GetDisks() {
 		mounted = append(mounted, fmt.Sprintf("%s %s rw=%v", d.GetBlockId(), d.GetTarget(), d.GetReadWrite()))
 	}
-	if want := []string{"/srv/store.ext4 disk0 rw=false", "/srv/tools.erofs disk1 rw=false"}; !slices.Equal(attached, want) {
+	if want := []string{store + " disk0 rw=false", tools + " disk1 rw=false"}; !slices.Equal(attached, want) {
 		t.Errorf("job spec disks %q, want %q", attached, want)
 	}
 	if want := []string{"disk0 /var/lib/store rw=false", "disk1 /opt/tools rw=false"}; !slices.Equal(mounted, want) {

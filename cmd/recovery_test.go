@@ -82,9 +82,11 @@ func waitGone(t *testing.T, procs []proc, bound time.Duration, after string) {
 }
 
 // STO-10, a killed VM: a job writes to a read-write disk, and the test
-// kills its job process's group, the VM child in it, without a Remove. The
-// next job on that disk mounts it read-write and boots: no disk lock is
-// left held, and the mount replays the journal the kill left.
+// kills its job process's group, the VM child in it, then removes the job,
+// as the runner always does: its Remove finds the VM gone and still
+// succeeds, and frees the disk (QUE-7) without touching it. The next job on
+// that disk mounts it read-write and boots: no disk lock is left held, and
+// the mount replays the journal the kill left.
 func TestRecoveryAfterAKilledVM(t *testing.T) {
 	t.Parallel()
 	img, host := baseImage(t)
@@ -116,9 +118,8 @@ func TestRecoveryAfterAKilledVM(t *testing.T) {
 	}
 	// The plugin, their subreaper, reaps them.
 	waitGone(t, procs, 10*time.Second, "the job process's group was killed")
+	first.remove(t)
 	wantMountsReadWrite(t, p, disk, "killed-vm-2", ref)
-	// The first job's Remove, on cleanup, finds its VM gone, and still
-	// succeeds.
 }
 
 // STO-10, a killed plugin: a job writes to a read-write disk, and the test

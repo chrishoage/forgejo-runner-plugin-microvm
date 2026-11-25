@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -118,13 +119,14 @@ const (
 	tailBytes = 4 << 10
 )
 
-// Start pulls the job's image, waits for the job's admission, starts its job
-// process, which boots the VM, waits until the agent answers Ping, and ends
-// with StartComplete carrying the image's environment (PROTO-8). Before that
-// it sends a progress line for the image, the wait if there is one, the VM
-// and the total (PROTO-9). A failed Start kills the job process, waits until
-// its group is reaped, and then releases the job's admission; when the kill
-// fails, the job keeps its admission until its Remove reaps the group.
+// Start pulls the job's image, waits for the job's admission to its disks
+// and memory, starts its job process, which boots the VM, waits until the
+// agent answers Ping, and ends with StartComplete carrying the image's
+// environment (PROTO-8). Before that it sends a progress line for the image,
+// each wait if there is one, the VM and the total (PROTO-9). A failed Start
+// kills the job process, waits until its group is reaped, and then releases
+// the job's admission, its disks and memory together; when the kill fails,
+// the job keeps its admission until its Remove reaps the group.
 func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.BackendPlugin_StartServer) error {
 	j, err := s.lookup(req.GetEnvironmentId())
 	if err != nil {
@@ -411,14 +413,21 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 	return img, nil
 }
 
-// admit admits j, which is locked, to the memory budget, once its image is
-// ready and before its job process starts, waiting in arrival order while it
-// doesn't fit (QUE-2). A wait sends a progress line and logs a line when it
-// starts and when it ends; a job admitted at once does neither (QUE-8). The
+// admit admits j, which is locked, to its disks and then the memory budget,
+// once its image is ready and before its job process starts, waiting in
+// arrival order while a disk isn't free for it or it doesn't fit (QUE-2,
+// QUE-3). Each disk is keyed by its source's device and inode, read here,
+// so two paths to one file share its queue; a source missing then fails
+// Start naming it, and one whose stat hangs ends with ctx (statUntil). Each wait sends a progress line and logs a line when it
+// starts and when it ends; a job admitted at once does neither (QUE-8). A
 // wait ends early only with ctx, or with the drain, which fails it with
 // errShuttingDown (QUE-6), even while its waiting line's send blocks: that
 // send gives up when the wait ends.
 func (s *Server) admit(ctx context.Context, j *job, p *progress) error {
+	disks, err := admissionDisks(ctx, s.statUntil, j.profile.Disks)
+	if err != nil {
+		return err
+	}
 	need := jobMemoryMiB(j.profile)
 	waitCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -429,21 +438,121 @@ func (s *Server) admit(ctx context.Context, j *job, p *progress) error {
 	}
 	stop := context.AfterFunc(s.drainCtx, func() { cancel(context.Cause(s.drainCtx)) }) //nolint:contextcheck // the drain only cancels the wait's own context, derived from ctx
 	defer stop()
-	err := s.admission.Admit(waitCtx, j.id, nil, need, admission.Observer{
+	return s.admission.Admit(waitCtx, j.id, disks, need, admission.Observer{
 		Waiting: func(w admission.Wait) {
+			if d := w.Disk; d != nil {
+				// A disk is waited for only while some job holds it: a
+				// line's head that nobody holds up is admitted.
+				s.log.Info("waiting for disk", "env", j.id, "disk", d.Path, "mode", diskMode(d.ReadWrite),
+					"holders", strings.Join(w.Holders, ","), "ahead", w.Ahead)
+				p.lineUntil(waitCtx, "waiting for disk %s (held by %s; %d ahead)", d.Path, strings.Join(w.Holders, ", "), w.Ahead)
+				return
+			}
 			s.log.Info("waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "free_mib", w.FreeMiB, "cap_mib", w.CapMiB, "ahead", w.Ahead)
 			p.lineUntil(waitCtx, "waiting for memory: needs %d MiB, %d of %d MiB free; %d ahead", w.NeedMiB, w.FreeMiB, w.CapMiB, w.Ahead)
 		},
 		Waited: func(w admission.Wait, took time.Duration, err error) {
-			if err != nil {
-				s.log.Info("stopped waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "took", took.Round(time.Millisecond), "err", err)
+			took = took.Round(time.Millisecond)
+			if d := w.Disk; d != nil {
+				if err != nil {
+					s.log.Info("stopped waiting for disk", "env", j.id, "disk", d.Path, "mode", diskMode(d.ReadWrite), "took", took, "err", err)
+					return
+				}
+				s.log.Info("got disk", "env", j.id, "disk", d.Path, "mode", diskMode(d.ReadWrite), "took", took)
+				p.line("got disk %s after %s", d.Path, seconds(took))
 				return
 			}
-			s.log.Info("got memory", "env", j.id, "need_mib", w.NeedMiB, "took", took.Round(time.Millisecond))
+			if err != nil {
+				s.log.Info("stopped waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "took", took, "err", err)
+				return
+			}
+			s.log.Info("got memory", "env", j.id, "need_mib", w.NeedMiB, "took", took)
 			p.line("got memory after %s", seconds(took))
 		},
 	})
-	return err
+}
+
+// admissionDisks returns ds as admission takes them: each keyed by its
+// source's device and inode, read with stat, which follows symlinks as the
+// job process's open does, so the key is the file the disk lock will be on.
+// A source that is missing, or can't be read, is an error naming it, as the
+// job process's own check is (STO-5). Each stat ends early with ctx.
+func admissionDisks(ctx context.Context, stat func(context.Context, string) (fs.FileInfo, error), ds []config.Disk) ([]admission.Disk, error) {
+	out := make([]admission.Disk, 0, len(ds))
+	for _, d := range ds {
+		fi, err := stat(ctx, d.Source)
+		var pe *fs.PathError
+		switch {
+		case ctx.Err() != nil:
+			return nil, context.Cause(ctx)
+		case errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("disk %s: does not exist", d.Source)
+		case errors.As(err, &pe):
+			return nil, fmt.Errorf("disk %s: %w", d.Source, pe.Err)
+		case err != nil:
+			return nil, fmt.Errorf("disk %s: %w", d.Source, err)
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil, &bugError{fmt.Errorf("disk %s: stat returned no device and inode", d.Source)}
+		}
+		out = append(out, admission.Disk{
+			Key:  admission.DiskKey{Dev: st.Dev, Ino: st.Ino},
+			Path: d.Source, ReadWrite: d.ReadWrite,
+		})
+	}
+	return out, nil
+}
+
+// statUntil is statDisk of path, given up on once ctx ends: a source on a
+// hung mount (a dead NFS or FUSE server) blocks stat with no way to cancel
+// it, and Start holds its job's lock meanwhile, which Remove, and so the
+// drain, waits for. The stat runs on in its own goroutine, holding nothing
+// but path, until the kernel returns, and each stuck one holds an OS
+// thread, so a path has at most one stat in flight: a Start that finds an
+// earlier one of path still running fails at once naming it, and path
+// leaves statting when that stat returns.
+func (s *Server) statUntil(ctx context.Context, path string) (fs.FileInfo, error) {
+	s.statMu.Lock()
+	if _, ok := s.statting[path]; ok {
+		s.statMu.Unlock()
+		return nil, errors.New("an earlier stat of it is still stuck, as on a hung mount")
+	}
+	s.statting[path] = struct{}{}
+	s.statMu.Unlock()
+	type result struct {
+		fi  fs.FileInfo
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		fi, err := s.statDisk(path)
+		s.statMu.Lock()
+		delete(s.statting, path)
+		s.statMu.Unlock()
+		done <- result{fi, err}
+	}()
+	select {
+	case r := <-done:
+		return r.fi, r.err
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
+// disksStatting is how many disk sources have a stat in flight.
+func (s *Server) disksStatting() int {
+	s.statMu.Lock()
+	defer s.statMu.Unlock()
+	return len(s.statting)
+}
+
+// diskMode is a disk's mode as log lines show it: ro or rw.
+func diskMode(readWrite bool) string {
+	if readWrite {
+		return "rw"
+	}
+	return "ro"
 }
 
 // waitReady waits until j's agent answers Ping, failing as soon as the VM
