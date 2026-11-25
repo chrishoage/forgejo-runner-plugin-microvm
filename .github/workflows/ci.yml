@@ -2,6 +2,7 @@
 #
 # Each job runs one `just` recipe inside the dev shell, so CI runs exactly what
 # `just check` runs locally. Separate jobs show which rule failed at a glance.
+# The release workflow calls it on a tagged commit (docs/conventions.md, CI).
 name: CI
 
 on:
@@ -9,6 +10,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The release workflow, on a pushed v* tag. A called workflow sees its
+  # caller's event: a push of the tag, which neither cancels nor purges.
+  workflow_call:
 
 permissions:
   contents: read
@@ -93,7 +97,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-nix
       # The PR's own commits (base..head, not the merge ref GitHub checks
-      # out), or the commits a push to main added.
+      # out), the commits a push to main added, or a pushed tag's commit.
       - name: Check commit messages
         env:
           EVENT: ${{ github.event_name }}
@@ -105,7 +109,7 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             range="$PR_BASE..$PR_HEAD"
           elif [ "$PUSH_BEFORE" = 0000000000000000000000000000000000000000 ]; then
-            range="$PUSH_AFTER~1..$PUSH_AFTER" # a new branch: its tip
+            range="$PUSH_AFTER~1..$PUSH_AFTER" # a new branch or tag: its tip
           else
             range="$PUSH_BEFORE..$PUSH_AFTER"
           fi

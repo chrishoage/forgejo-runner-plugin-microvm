@@ -96,6 +96,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 ## CI
 
 - **GitHub Actions on `ubuntu-24.04`,** triggered by every pull request, whatever its base, and by pushes to `main`. Running on PRs with any base gives stacked PRs checks too.
+- **`ci.yml` is also callable (`workflow_call`), and the release workflow calls it on the tagged commit** (`docs/development.md`, Releasing). A called workflow sees its caller's event, a push of the tag, so its concurrency group never cancels it, `setup-nix` doesn't purge (that is for pushes to `main`), and the `commits` job checks the tagged commit, as it checks the tip of any new ref. The `pull_request` and `push` triggers are unchanged.
 - **Nix comes from `cachix/install-nix-action`.** The Nix store is cached with `nix-community/cache-nix-action`, which uses the Actions cache and needs no account or secret. Both steps live in `.github/actions/setup-nix`.
   - The cache key is the hash of `flake.nix` and `flake.lock`.
   - Pushes to `main` purge older entries once a new one is saved, so stale stores don't crowd out the repo's cache quota. PR runs never purge, so a PR that changes the flake can't delete `main`'s entry.
