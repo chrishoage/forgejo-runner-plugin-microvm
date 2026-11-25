@@ -88,9 +88,8 @@ func parseMountinfo(t *testing.T, listing string) map[string]guestMount {
 // the agent's mounts with their options, the agent and its boot config in
 // /.runner-microvm, the act path, tool cache and temp directory with modes
 // 0777, 0777 and 1777, and the agent's own environment holds nothing from
-// the host's. It is the one kvm test in cmd that runs alone, not in
-// parallel: t.Setenv, which puts the marker in the plugin's environment,
-// refuses a parallel test.
+// the host's. It runs alone, not in parallel: t.Setenv, which puts the
+// marker in the plugin's environment, refuses a parallel test.
 func TestGuestSetup(t *testing.T) {
 	base, host := baseImage(t)
 	img := imageWithout(t, base, "tmp", "var/run", "opt")
