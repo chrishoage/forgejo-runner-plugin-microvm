@@ -158,7 +158,7 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 			// The next job need not wait for this one's Remove. A
 			// kill that failed is tried again at Remove, which then
 			// releases.
-			s.memory.Release(j.id)
+			s.admission.Release(j.id)
 		}
 		j.startErr = err
 		s.log.Error("start failed", "env", j.id, "err", err)
@@ -429,25 +429,21 @@ func (s *Server) admit(ctx context.Context, j *job, p *progress) error {
 	}
 	stop := context.AfterFunc(s.drainCtx, func() { cancel(context.Cause(s.drainCtx)) }) //nolint:contextcheck // the drain only cancels the wait's own context, derived from ctx
 	defer stop()
-	begin := time.Now()
-	waited := false
-	err := s.memory.Admit(waitCtx, j.id, need, func(w admission.Wait) {
-		waited = true
-		s.log.Info("waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "free_mib", w.FreeMiB, "cap_mib", w.CapMiB, "ahead", w.Ahead)
-		p.lineUntil(waitCtx, "waiting for memory: needs %d MiB, %d of %d MiB free; %d ahead", w.NeedMiB, w.FreeMiB, w.CapMiB, w.Ahead)
+	err := s.admission.Admit(waitCtx, j.id, nil, need, admission.Observer{
+		Waiting: func(w admission.Wait) {
+			s.log.Info("waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "free_mib", w.FreeMiB, "cap_mib", w.CapMiB, "ahead", w.Ahead)
+			p.lineUntil(waitCtx, "waiting for memory: needs %d MiB, %d of %d MiB free; %d ahead", w.NeedMiB, w.FreeMiB, w.CapMiB, w.Ahead)
+		},
+		Waited: func(w admission.Wait, took time.Duration, err error) {
+			if err != nil {
+				s.log.Info("stopped waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "took", took.Round(time.Millisecond), "err", err)
+				return
+			}
+			s.log.Info("got memory", "env", j.id, "need_mib", w.NeedMiB, "took", took.Round(time.Millisecond))
+			p.line("got memory after %s", seconds(took))
+		},
 	})
-	took := time.Since(begin)
-	if err != nil {
-		if waited {
-			s.log.Info("stopped waiting for memory", "env", j.id, "need_mib", need, "took", took.Round(time.Millisecond), "err", err)
-		}
-		return err
-	}
-	if waited {
-		s.log.Info("got memory", "env", j.id, "need_mib", need, "took", took.Round(time.Millisecond))
-		p.line("got memory after %s", seconds(took))
-	}
-	return nil
+	return err
 }
 
 // waitReady waits until j's agent answers Ping, failing as soon as the VM
