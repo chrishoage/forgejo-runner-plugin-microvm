@@ -15,21 +15,35 @@ import (
 	"time"
 )
 
-// The built plugin's check exits 0 on a valid config file and 1 on an
-// invalid one, printing the error; with no subcommand it prints its usage
-// and exits 2. check needs no payload, so the plugin is built without one.
-func TestBuiltPluginCheck(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
+// versionVar is the variable `just release-assets` sets the version in,
+// with -ldflags -X.
+const versionVar = module + "/internal/plugin.version"
+
+// buildPluginWithoutPayload builds runner-microvm into dir without its
+// payload, which neither check nor version needs, passing ldflags on to the
+// linker, and returns its path.
+func buildPluginWithoutPayload(t *testing.T, dir, ldflags string) string {
+	t.Helper()
 	bin := filepath.Join(dir, "runner-microvm")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", bin, module+"/cmd/runner-microvm")
+	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-ldflags="+ldflags,
+		"-o", bin, module+"/cmd/runner-microvm")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	build.WaitDelay = 10 * time.Second
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build the plugin: %v\n%s", err, out)
 	}
+	return bin
+}
+
+// The built plugin's check exits 0 on a valid config file and 1 on an
+// invalid one, printing the error; version prints dev, since the build
+// doesn't set it; with no subcommand it prints its usage and exits 2.
+func TestBuiltPluginCheck(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bin := buildPluginWithoutPayload(t, dir, "")
 	valid := filepath.Join(dir, "valid.yaml")
 	invalid := filepath.Join(dir, "invalid.yaml")
 	if err := os.WriteFile(valid, []byte("state_dir: "+dir+"/state\nmax_memory_mib: 0\n"), 0o600); err != nil {
@@ -47,6 +61,7 @@ func TestBuiltPluginCheck(t *testing.T) {
 	}{
 		{[]string{"check"}, valid, 0, "config " + valid + ": valid\n", ""},
 		{[]string{"check"}, invalid, 1, "", "config " + invalid + `: line 3: profile "big": cpus: must be from 1 to 255, not 256`},
+		{[]string{"version"}, valid, 0, "dev\n", ""},
 		{nil, valid, 2, "", "usage: runner-microvm <command>"},
 	} {
 		code, stdout, stderr := runBin(t, bin, tc.file, tc.args...)
@@ -54,6 +69,19 @@ func TestBuiltPluginCheck(t *testing.T) {
 			t.Errorf("%q with %s: exit %d, stdout %q, stderr %q; want %d, %q and %q",
 				tc.args, tc.file, code, stdout, stderr, tc.code, tc.out, tc.inErr)
 		}
+	}
+}
+
+// A build that sets the version variable with -ldflags -X, as `just
+// release-assets` does, prints that version, so renaming the variable
+// can't silently leave every release saying dev.
+func TestBuiltPluginVersion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bin := buildPluginWithoutPayload(t, dir, "-X "+versionVar+"=1.2.3")
+	code, stdout, stderr := runBin(t, bin, filepath.Join(dir, "missing.yaml"), "version")
+	if code != 0 || stdout != "1.2.3\n" || stderr != "" {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and \"1.2.3\\n\"", code, stdout, stderr)
 	}
 }
 
