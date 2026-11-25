@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# forgejo-runner's config file beside runner-microvm, on one host (the
+# operator guide, docs/operating.md). Only the parts that concern the plugin
+# are set here; every other key is forgejo-runner's own, as its
+# `forgejo-runner generate-config` documents. The runner's registration (a
+# .runner file, or a server.connections entry with no labels of its own)
+# comes from Forgejo, as forgejo-runner's documentation describes.
+log:
+  level: info
+
+runner:
+  # How many jobs the runner hands the plugin at once. The plugin's
+  # max_memory_mib, not this, is what caps the VMs' memory.
+  capacity: 2
+  # Labels routed to the plugin: <runner label>:<plugins key>://<image>,
+  # then optionally ;profile=<name>, a profile the plugin's config file
+  # defines (docs/configuration.md, Labels). microvm names no profile, so its
+  # jobs get the plugin's default profile.
+  labels:
+    - microvm:runner-microvm://docker.io/library/alpine:3.24
+
+cache:
+  enabled: true
+  # The address jobs reach the runner's cache at: one of this host's
+  # addresses that the VMs can reach, never loopback (127.0.0.1, localhost),
+  # since a VM can't reach the host's loopback. Left empty, the runner picks
+  # the address of its default route. 192.0.2.10 stands in for yours.
+  host: 192.0.2.10
+
+plugins:
+  # The key is the labels' scheme, runner-microvm above. address is the
+  # plugin's listen socket, its listen key; options is not used.
+  runner-microvm:
+    address: unix:///run/runner-microvm/runner-microvm.sock
