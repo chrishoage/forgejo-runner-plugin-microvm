@@ -382,8 +382,10 @@ func checkMounts(mounts []*jobv1.Mount) error {
 // source can change since; libkrun is handed the open file, so the file
 // checked, and locked, is the file attached. The open never blocks, so a
 // FIFO put at the source can't hang the job, and nor does the lock: a disk
-// in use fails at once (until #10's queue), so the order the disks are
-// locked in can't deadlock two jobs.
+// in use fails at once, so the order the disks are locked in can't deadlock
+// two jobs. The plugin's disk queues admit its own jobs to a disk only once
+// every conflicting holder's job process group is reaped, so only a holder
+// outside the plugin makes a disk in use here.
 //
 // Each file is close-on-exec, so mkfs never holds a lock; only the VM
 // child, which gets the files as fd 5 and up, does. The lock belongs to

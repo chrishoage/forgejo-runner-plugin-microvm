@@ -66,24 +66,29 @@ func (a *flushAgent) flushes() int {
 	return a.calls
 }
 
-// storageProfiles are a profile for each shape of storage: none, read-only
-// only, a read-write mount and a read-write disk. Their sources are never
-// opened: the fake job process ignores them.
-var storageProfiles = config.Profiles{
-	"none": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1},
-	"ro": {
-		CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
-		Mounts: []config.Mount{{Source: "/srv/tools", Target: "/tools"}},
-		Disks:  []config.Disk{{Source: "/srv/ro.ext4", Target: "/ro"}},
-	},
-	"rw-mount": {
-		CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
-		Mounts: []config.Mount{{Source: "/srv/tools", Target: "/tools"}, {Source: "/srv/data", Target: "/data", ReadWrite: true}},
-	},
-	"rw-disk": {
-		CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
-		Disks: []config.Disk{{Source: "/srv/ro.ext4", Target: "/ro"}, {Source: "/srv/rw.ext4", Target: "/data", ReadWrite: true}},
-	},
+// storageProfiles returns a profile for each shape of storage: none,
+// read-only only, a read-write mount and a read-write disk. Each disk's
+// source is an empty file of t's, which admission reads the key of; the
+// fake job process opens no source.
+func storageProfiles(t *testing.T) config.Profiles {
+	t.Helper()
+	ro, rw := diskFile(t, "ro.ext4"), diskFile(t, "rw.ext4")
+	return config.Profiles{
+		"none": {CPUs: 1, MemoryMiB: 512, ScratchGiB: 1},
+		"ro": {
+			CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
+			Mounts: []config.Mount{{Source: "/srv/tools", Target: "/tools"}},
+			Disks:  []config.Disk{{Source: ro, Target: "/ro"}},
+		},
+		"rw-mount": {
+			CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
+			Mounts: []config.Mount{{Source: "/srv/tools", Target: "/tools"}, {Source: "/srv/data", Target: "/data", ReadWrite: true}},
+		},
+		"rw-disk": {
+			CPUs: 1, MemoryMiB: 512, ScratchGiB: 1,
+			Disks: []config.Disk{{Source: ro, Target: "/ro"}, {Source: rw, Target: "/data", ReadWrite: true}},
+		},
+	}
 }
 
 // flushServer returns a server on the fakes, whose job processes serve
@@ -94,7 +99,7 @@ func flushServer(t *testing.T, agent *flushAgent, timeout time.Duration) (*Serve
 	launcher := &fakeLauncher{agent: agent}
 	srv := newTestServer(t, &fakeCache{}, launcher)
 	srv.cfg.FlushTimeout = timeout
-	srv.SetProfiles(storageProfiles)
+	srv.SetProfiles(storageProfiles(t))
 	log := &logBuffer{}
 	srv.log = slog.New(slog.NewTextHandler(log, nil))
 	return srv, launcher, log

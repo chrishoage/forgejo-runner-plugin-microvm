@@ -38,7 +38,7 @@ The plugin's cap on the memory of every running VM, across all jobs (`max_memory
 _Avoid_: VM slot
 
 **Admission**:
-A job's taking of what it needs before its VMs boot, at Start: its share of the memory budget and, once the disk queues land, its disks. A job that can't have them yet waits, in arrival order, and is never admitted in part.
+A job's taking of what it needs before its VMs boot, at Start: its disks and its share of the memory budget. A job that can't have them yet waits, in arrival order, and is never admitted in part.
 _Avoid_: scheduling, reservation
 
 **Wait**:
@@ -158,6 +158,10 @@ _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin pro
 **Disk lock**:
 A job process's hold on a disk, which the VM child it is attached to shares, until that VM child has exited: exclusive for a read-write disk, shared for a read-only one. Any number of VMs can read a disk at once, but a writer excludes every other user, readers included.
 _Avoid_: lease, reservation
+
+**Disk queue**:
+The arrival-order line of jobs that want one disk, readers and writers alike. Readers next to each other in the line share the disk; a writer has it alone, and readers behind a waiting writer wait for it. One file is one disk queue, whatever path names it.
+_Avoid_: lock (the disk lock is the job process's hold, which the queue precedes)
 
 **Flush**:
 Writing everything a VM holds for its read-write mounts and disks through to the host, and leaving each read-write disk clean, just before its job ends normally. A VM that is killed is never flushed, so its last writes may be lost.

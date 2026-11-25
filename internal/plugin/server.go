@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math"
 	"os"
@@ -142,6 +143,15 @@ type Server struct {
 	// doesn't wait for a Remove still tearing its job down.
 	removals sync.WaitGroup
 
+	// statDisk reads a disk's source for its queue's key: os.Stat, which
+	// a test replaces with one that hangs, as on a dead mount.
+	statDisk func(string) (fs.FileInfo, error)
+	// statting holds each disk source with a stat in flight, which leaves
+	// it when that stat returns, however long after its Start ended:
+	// statMu guards it.
+	statMu   sync.Mutex
+	statting map[string]struct{}
+
 	// admission is the memory budget and the disk queues, which each job
 	// is admitted to at Start and released from once its job process group
 	// is reaped (QUE-1, QUE-3, QUE-7).
@@ -249,6 +259,7 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 		log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles,
 		drained: make(chan struct{}), health: hs, newID: newID,
 		admission: admission.New(cfg.MaxMemoryMiB), drainCtx: drainCtx, startDrain: startDrain,
+		statDisk: os.Stat, statting: map[string]struct{}{},
 	}, nil
 }
 
