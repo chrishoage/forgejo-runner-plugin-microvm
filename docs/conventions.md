@@ -104,6 +104,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 - **A new push to a PR cancels its older run; runs on `main` are never cancelled,** so every push to `main` is checked and saves its cache.
 - **The jobs are `lint`, `generate`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
 - **Every Action is pinned to a commit digest, with its version as a comment.** Renovate keeps the digests current.
+- **The release workflow, `release.yml`, runs on a pushed `v*` tag:** it calls `ci.yml` on the tagged commit, then publishes the release once every CI job has passed (`docs/development.md`, Releasing). Nothing on `main`'s CI decides whether a push is a release.
 - **The `kvm` job also runs `just test-kvm`,** the only tier that boots VMs (see `docs/development.md`, KVM in CI).
 - **CI never runs Forgejo.** End-to-end runs use the local harness (`docs/development.md`, The local harness).
 

@@ -91,6 +91,15 @@ bump version="":
     gh pr create --base main --head "$branch" --title "chore(release): v$version" --body "$notes"
     git switch -
 
+# Release: tag HEAD v<the VERSION file> and push the tag, which runs the
+# release workflow. Git refuses a tag that exists; nothing else is checked.
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="v$(cat VERSION)"
+    git tag -a "$tag" -m "$tag"
+    git push origin "refs/tags/$tag"
+
 # Apply the formatters (gofumpt, goimports).
 fmt:
     golangci-lint fmt
