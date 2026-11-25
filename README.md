@@ -1,6 +1,13 @@
 # runner-microvm
 
-`runner-microvm` is a backend plugin for [forgejo-runner](https://code.forgejo.org/forgejo/runner) that runs each job in microVMs of its own. It is in early development and does nothing useful yet.
+`runner-microvm` is a backend plugin for [forgejo-runner](https://code.forgejo.org/forgejo/runner) that runs each job in microVMs of its own. It is in early development.
+
+## Install
+
+A release is one x86_64 Linux binary, `runner-microvm-<version>-linux-amd64`, with `SHA256SUMS` and a build provenance attestation, on this repository's [releases](https://github.com/chrishoage/forgejo-runner-plugin-microvm/releases). The host also needs KVM, libkrun and libkrunfw.
+
+- [`docs/operating.md`](docs/operating.md), the operator guide: what the host needs, installing and verifying the binary, running it beside forgejo-runner, and what it doesn't do.
+- [`docs/configuration.md`](docs/configuration.md): every key of the plugin's config file, and the runner labels that route jobs to it.
 
 ## Development
 
