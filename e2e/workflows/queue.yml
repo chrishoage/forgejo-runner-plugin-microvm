@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Queueing epic's exit check: two parallel jobs on the microvm-big label,
+# whose profile's memory_mib equals the harness's max_memory_mib, so the
+# plugin runs them one after the other: the second's Start waits for memory
+# until the first is removed, then boots, and both go green. `just e2e run
+# queue` checks that the plugin logged the wait (docs/development.md, The
+# local harness).
+name: queue
+
+on:
+  workflow_dispatch:
+
+jobs:
+  first:
+    runs-on: microvm-big
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: sleep 5
+  second:
+    runs-on: microvm-big
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - run: sleep 5
