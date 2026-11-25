@@ -151,5 +151,6 @@ jobs:
       # Asserts the library minimums and builds the dev shell.
       - run: nix flake check
       # Every test, with the `kvm` tag and the payload embedded. -v lists
-      # each test's result, so the log shows the root cases ran.
+      # each test's result, so the log shows the root cases ran, and the
+      # Start time tests' times (VM-11).
       - run: nix develop -c just test-kvm -v

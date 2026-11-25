@@ -187,15 +187,7 @@ func TestWorkflowsAsRoot(t *testing.T) {
 	needRoot(t)
 	image := readImage(t)
 	p := startRootPluginWith(t, buildPlugin(t), testProfiles)
-	// sudo's child is the plugin.
-	procs := descendants(p.pid)
-	if len(procs) == 0 {
-		t.Fatal("sudo has no child")
-	}
-	if uid := strings.Fields(procStatus(t, procs[0].pid)["Uid"]); len(uid) < 2 || uid[1] != "0" {
-		t.Fatalf("the plugin, %d (%s), runs as uid %v, not root", procs[0].pid, procs[0].comm, uid)
-	}
-	t.Logf("the plugin, %d (%s), runs as root", procs[0].pid, procs[0].comm)
+	p.wantRoot(t)
 	t.Run("echo", func(t *testing.T) {
 		log, err := runWorkflowOn(t, p, filepath.Join(workflows, "echo.yml"), map[string]string{"microvm": image})
 		if err != nil {
@@ -207,6 +199,20 @@ func TestWorkflowsAsRoot(t *testing.T) {
 		workflowChecks["echo"](t, log, image)
 	})
 	t.Run("profile", func(t *testing.T) { profileAndReload(t, p) })
+}
+
+// wantRoot fails t unless sudo's child, the root plugin p started, runs
+// with an effective uid of 0.
+func (p *plugin) wantRoot(t *testing.T) {
+	t.Helper()
+	procs := descendants(p.pid)
+	if len(procs) == 0 {
+		t.Fatal("sudo has no child")
+	}
+	if uid := strings.Fields(procStatus(t, procs[0].pid)["Uid"]); len(uid) < 2 || uid[1] != "0" {
+		t.Fatalf("the plugin, %d (%s), runs as uid %v, not root", procs[0].pid, procs[0].comm, uid)
+	}
+	t.Logf("the plugin, %d (%s), runs as root", procs[0].pid, procs[0].comm)
 }
 
 // profileAndReload runs a workflow on the big profile on p and checks its
