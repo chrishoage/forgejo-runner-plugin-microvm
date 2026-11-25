@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# A pushed v* tag (`just release`) becomes a GitHub release: every CI job runs
+# again on the tagged commit, then one job publishes the binary, SHA256SUMS,
+# their provenance attestation and the generated notes
+# (docs/development.md, Releasing).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  # The same checks as every PR, on this exact commit: no earlier run is
+  # trusted. Its jobs' permissions can't exceed what this job grants.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      actions: write
+
+  # Needs `ci`, so it runs only once every CI job has passed.
+  publish:
+    needs: ci
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the attestation with a short-lived Sigstore certificate
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the previous v* tag and the commits since, for the notes
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - name: Build the binary and SHA256SUMS
+        env:
+          TAG: ${{ github.ref_name }}
+        run: nix develop -c just release-assets "${TAG#v}"
+      # Outside the dev shell, so through the runner's own glibc and its
+      # loader at /lib64, as on an operator's host: CI tests only a job binary
+      # with the Nix store's loader (docs/development.md, Releasing).
+      - name: Run the release's job binary on the host's glibc
+        run: internal/payload/runner-microvm-job version
+      # Keyless: `gh attestation verify` checks it, with no key to manage.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Generate the notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: nix develop -c just release-notes "$TAG" > "$RUNNER_TEMP/notes.md"
+      # One call, so the release is never visible without its files.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
