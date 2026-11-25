@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/admission"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
@@ -117,13 +118,13 @@ const (
 	tailBytes = 4 << 10
 )
 
-// Start pulls the job's image, starts its job process, which boots the VM,
-// waits until the agent answers Ping, and ends with StartComplete carrying
-// the image's environment (PROTO-8). Before that it sends a progress line
-// for the image, the VM and the total (PROTO-9). A failed Start kills the
-// job process and waits until its group is reaped.
-//
-// SHORTCUT(#10): no queue or memory budget: every Start boots at once.
+// Start pulls the job's image, waits for the job's admission, starts its job
+// process, which boots the VM, waits until the agent answers Ping, and ends
+// with StartComplete carrying the image's environment (PROTO-8). Before that
+// it sends a progress line for the image, the wait if there is one, the VM
+// and the total (PROTO-9). A failed Start kills the job process, waits until
+// its group is reaped, and then releases the job's admission; when the kill
+// fails, the job keeps its admission until its Remove reaps the group.
 func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.BackendPlugin_StartServer) error {
 	j, err := s.lookup(req.GetEnvironmentId())
 	if err != nil {
@@ -151,7 +152,14 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 	}
 	if err != nil {
 		// The job process and its VM are gone before Start returns.
-		err = errors.Join(err, s.stop(context.WithoutCancel(ctx), j))
+		reaped, stopErr := s.stop(context.WithoutCancel(ctx), j)
+		err = errors.Join(err, stopErr)
+		if reaped {
+			// The next job need not wait for this one's Remove. A
+			// kill that failed is tried again at Remove, which then
+			// releases.
+			s.memory.Release(j.id)
+		}
 		j.startErr = err
 		s.log.Error("start failed", "env", j.id, "err", err)
 		return startError(ctx, stream.Context(), err)
@@ -224,8 +232,9 @@ func awaitDelivery(ctx, streamCtx context.Context, send func() error) error {
 }
 
 // startError is the status a failed Start returns: the call's own context's
-// code once it ended, whether the runner or Remove ended it; Internal for
-// the plugin's own bug; else FailedPrecondition. The image, the VM's boot,
+// code once it ended, whether the runner or Remove ended it; Unavailable when
+// the drain ended its wait for admission; Internal for the plugin's own bug;
+// else FailedPrecondition. The image, the VM's boot,
 // its agent, its scratch disk or a disk is the job's or the operator's to
 // fix, and never Unavailable, which the runner reads as the plugin being
 // gone. ctx derives from streamCtx, the stream's own context, and Go ends a
@@ -237,6 +246,9 @@ func startError(ctx, streamCtx context.Context, err error) error {
 		if c.Err() != nil {
 			return status.FromContextError(c.Err()).Err()
 		}
+	}
+	if errors.Is(err, errShuttingDown) {
+		return errShuttingDown
 	}
 	if errors.As(err, new(*bugError)) {
 		return status.Error(codes.Internal, err.Error())
@@ -260,18 +272,22 @@ type progress struct {
 }
 
 // line sends one progress line of format and args.
-func (p *progress) line(format string, args ...any) {
+func (p *progress) line(format string, args ...any) { p.lineUntil(p.ctx, format, args...) }
+
+// lineUntil sends a line as line does, but gives up on it as soon as ctx,
+// derived from p.ctx, ends.
+func (p *progress) lineUntil(ctx context.Context, format string, args ...any) {
 	if p.stalled {
 		return
 	}
 	text := fmt.Sprintf("[runner-microvm %s] %s\n", seconds(time.Since(p.begin)), fmt.Sprintf(format, args...))
-	err := await(p.ctx, func() error {
+	err := await(ctx, func() error {
 		return p.stream.Send(&pluginv1alpha.StartOutput{Output: &pluginv1alpha.StartOutput_Data{Data: &pluginv1alpha.DataChunk{
 			Stream: pluginv1alpha.DataChunk_STDOUT, Data: []byte(text),
 		}}})
 	})
 	if err != nil {
-		p.stalled = p.ctx.Err() != nil
+		p.stalled = ctx.Err() != nil
 		p.log.Warn("a progress line was not sent", "err", err)
 	}
 }
@@ -308,6 +324,9 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 		return imagecache.Image{}, fmt.Errorf("image %s: %w", j.image, err)
 	}
 	p.line("image %s ready (%s, %d layers) in %s", j.image, img.Digest, len(img.Layers), seconds(time.Since(pulling)))
+	if err := s.admit(ctx, j, p); err != nil {
+		return imagecache.Image{}, err
+	}
 	boot := &agentv1.BootConfig{
 		LayerDir:      guestLayerDir,
 		LayerTag:      layerTag,
@@ -390,6 +409,45 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 	}
 	p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
 	return img, nil
+}
+
+// admit admits j, which is locked, to the memory budget, once its image is
+// ready and before its job process starts, waiting in arrival order while it
+// doesn't fit (QUE-2). A wait sends a progress line and logs a line when it
+// starts and when it ends; a job admitted at once does neither (QUE-8). The
+// wait ends early only with ctx, or with the drain, which fails it with
+// errShuttingDown (QUE-6), even while its waiting line's send blocks: that
+// send gives up when the wait ends.
+func (s *Server) admit(ctx context.Context, j *job, p *progress) error {
+	need := jobMemoryMiB(j.profile)
+	waitCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if s.drainCtx.Err() != nil {
+		// AfterFunc would end the wait only once it had begun: a Start
+		// during the drain must never begin one.
+		cancel(context.Cause(s.drainCtx)) //nolint:contextcheck // the drain only cancels the wait's own context, derived from ctx
+	}
+	stop := context.AfterFunc(s.drainCtx, func() { cancel(context.Cause(s.drainCtx)) }) //nolint:contextcheck // the drain only cancels the wait's own context, derived from ctx
+	defer stop()
+	begin := time.Now()
+	waited := false
+	err := s.memory.Admit(waitCtx, j.id, need, func(w admission.Wait) {
+		waited = true
+		s.log.Info("waiting for memory", "env", j.id, "need_mib", w.NeedMiB, "free_mib", w.FreeMiB, "cap_mib", w.CapMiB, "ahead", w.Ahead)
+		p.lineUntil(waitCtx, "waiting for memory: needs %d MiB, %d of %d MiB free; %d ahead", w.NeedMiB, w.FreeMiB, w.CapMiB, w.Ahead)
+	})
+	took := time.Since(begin)
+	if err != nil {
+		if waited {
+			s.log.Info("stopped waiting for memory", "env", j.id, "need_mib", need, "took", took.Round(time.Millisecond), "err", err)
+		}
+		return err
+	}
+	if waited {
+		s.log.Info("got memory", "env", j.id, "need_mib", need, "took", took.Round(time.Millisecond))
+		p.line("got memory after %s", seconds(took))
+	}
+	return nil
 }
 
 // waitReady waits until j's agent answers Ping, failing as soon as the VM

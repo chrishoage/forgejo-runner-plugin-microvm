@@ -422,8 +422,8 @@ func (d *decoder) decode(c *Config, data []byte) bool {
 // checkMemory fails each profile the file defines whose memory_mib is more
 // than a max_memory_mib that is set and valid: no job on it could ever run.
 // The implicit default profile isn't checked: the file doesn't define it.
-// Nothing refuses a job on it yet; #10's admission check will, at Create
-// (Admission, docs/architecture.md).
+// A job on it that needs more is refused at Create, with
+// FailedPrecondition (Admission, docs/architecture.md).
 //
 // At a reload, the limit is the running plugin's: a max_memory_mib the file
 // changes applies only at a restart.

@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/admission"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
@@ -73,6 +74,9 @@ type Config struct {
 	// LogLevel is the log level every job process, VM child and agent
 	// follows, the plugin's own: debug, info, warn or error.
 	LogLevel string
+	// MaxMemoryMiB caps the memory of every running VM, across all jobs
+	// (max_memory_mib); 0 means no cap (QUE-1).
+	MaxMemoryMiB uint64
 	// KeepJobLogs makes Remove move each job's job logs to
 	// <state>/logs/<id>/ rather than delete them (LOG-3).
 	KeepJobLogs bool
@@ -137,6 +141,15 @@ type Server struct {
 	// backstop took out of the table, which Close waits for: gRPC's Stop
 	// doesn't wait for a Remove still tearing its job down.
 	removals sync.WaitGroup
+
+	// memory is the memory budget, which each job is admitted to at Start
+	// and released from once its job process group is reaped (QUE-1,
+	// QUE-7).
+	memory *admission.Budget
+	// drainCtx ends when the drain begins, with errShuttingDown as its
+	// cause, ending every Start's wait for admission.
+	drainCtx   context.Context
+	startDrain context.CancelCauseFunc
 
 	// warnedIgnored is set by the first Create that carries a request field
 	// the plugin ignores, which logs the one warning naming them.
@@ -231,9 +244,11 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 	hs := health.NewServer()
 	hs.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 	hs.SetServingStatus(pluginv1alpha.BackendPlugin_ServiceDesc.ServiceName, healthv1.HealthCheckResponse_SERVING)
+	drainCtx, startDrain := context.WithCancelCause(context.Background())
 	return &Server{
 		log: log, cfg: cfg, runtime: rt, jobs: map[string]*job{}, profiles: cfg.Profiles,
 		drained: make(chan struct{}), health: hs, newID: newID,
+		memory: admission.New(cfg.MaxMemoryMiB), drainCtx: drainCtx, startDrain: startDrain,
 	}, nil
 }
 
@@ -242,7 +257,8 @@ func NewServer(log *slog.Logger, cfg Config) (*Server, error) {
 var errShuttingDown = status.Error(codes.Unavailable, "runner-microvm is shutting down")
 
 // Drain starts the drain: health turns NOT_SERVING, and every later Create
-// fails with Unavailable, while every job already created is served as
+// fails with Unavailable, as does every Start still waiting for admission or
+// that would begin waiting, while every job already created is served as
 // usual until it is removed. Drained closes once no job is left. A second
 // Drain does nothing more.
 func (s *Server) Drain() {
@@ -251,6 +267,7 @@ func (s *Server) Drain() {
 	s.draining = true
 	s.checkDrained()
 	s.mu.Unlock()
+	s.startDrain(errShuttingDown)
 	if first {
 		// Every status it has turns NOT_SERVING, and stays so.
 		s.health.Shutdown()
@@ -348,8 +365,11 @@ func (s *Server) Capabilities(context.Context, *pluginv1alpha.CapabilitiesReques
 }
 
 // Create picks the job's image and profile from the label argument and
-// returns the job's environment id, paths and platform. It boots nothing
-// (PROTO-3). The job keeps a copy of its profile for its whole life.
+// returns the job's environment id, paths and platform. It boots nothing and
+// waits for nothing: a job waits for admission at Start (PROTO-3). A job
+// that needs more than the memory budget on its own fails with
+// FailedPrecondition, since it could never be admitted (QUE-1). The job
+// keeps a copy of its profile for its whole life.
 func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
 	// During a drain nothing else about the request matters; add checks
 	// again, under the table's lock, for a drain that begins meanwhile.
@@ -373,6 +393,11 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	prof, err := s.lookupProfile(l.profile, req.GetLabelArg())
 	if err != nil {
 		return nil, err
+	}
+	// The request is well formed; only the operator can make room for it.
+	if need := jobMemoryMiB(prof); !s.memory.Fits(need) {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"the job needs %d MiB of memory, more than max_memory_mib, %d MiB: it could never run", need, s.memory.Cap())
 	}
 	image := req.GetImage()
 	if image == "" {
@@ -446,6 +471,11 @@ func (s *Server) isDraining() bool {
 	defer s.mu.Unlock()
 	return s.draining
 }
+
+// jobMemoryMiB is a job's need from the memory budget: the sum of memory_mib
+// over its VMs. Today a job has one VM, the job's container (PROTO-6);
+// services will add theirs.
+func jobMemoryMiB(p config.Profile) uint64 { return uint64(p.MemoryMiB) }
 
 // lookupProfile returns a copy of the profile name names, or fails with
 // InvalidArgument naming arg, the label argument, when there is none
@@ -710,8 +740,13 @@ func (s *Server) remove(ctx context.Context, j *job) error {
 	j.removed = true
 	s.flush(ctx, j)
 	// The kill can't be left half done: it returns once the group is
-	// reaped, moments after SIGKILL.
-	err := s.stop(context.WithoutCancel(ctx), j)
+	// reaped, moments after SIGKILL. Only then is the guest's memory free;
+	// a kill that fails leaves the VM perhaps running, so the job keeps
+	// its memory, for good: nothing removes it again.
+	reaped, err := s.stop(context.WithoutCancel(ctx), j)
+	if reaped {
+		s.memory.Release(j.id)
+	}
 	kept := s.keepJobLogs(ctx, j.id)
 	err = errors.Join(err,
 		s.cfg.Cache.Release(context.WithoutCancel(ctx), j.id),
@@ -783,25 +818,26 @@ func readWriteStorage(p config.Profile) bool {
 
 // stop closes j's agent connection and kills its job process, if any, and
 // waits until its process group is reaped and its watcher has returned.
-// j.mu is held.
-func (s *Server) stop(ctx context.Context, j *job) error {
-	var err error
+// It reports whether the group is reaped: a kill that fails keeps the job
+// process, so the job's next teardown kills it again. j.mu is held.
+func (s *Server) stop(ctx context.Context, j *job) (reaped bool, err error) {
 	if j.agent != nil {
 		err = j.agent.Close()
 		j.agent = nil
 	}
 	if j.proc != nil {
-		killErr := s.cfg.Launcher.Kill(ctx, j.proc)
+		if killErr := s.cfg.Launcher.Kill(ctx, j.proc); killErr != nil {
+			return false, errors.Join(err, killErr)
+		}
 		j.proc = nil
-		if killErr == nil && j.watched != nil {
+		if j.watched != nil {
 			// The job process is gone, so its events end, and the
 			// watcher with them.
 			<-j.watched
 			j.watched = nil
 		}
-		err = errors.Join(err, killErr)
 	}
-	return err
+	return true, err
 }
 
 func (s *Server) jobStateDir(id string) string {

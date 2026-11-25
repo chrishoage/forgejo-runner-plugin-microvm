@@ -264,6 +264,7 @@ func run(ctx context.Context, log *slog.Logger, cfg *config.Config, hup, term <-
 		LibkrunLogLevel: cfg.LibkrunLogLevel,
 		LogLevel:        cfg.LogLevel,
 		KeepJobLogs:     cfg.KeepJobLogs,
+		MaxMemoryMiB:    cfg.MaxMemoryMiB,
 		JobBinary:       jobBinary,
 		MkfsExt4:        mkfs,
 		Agent:           agent,

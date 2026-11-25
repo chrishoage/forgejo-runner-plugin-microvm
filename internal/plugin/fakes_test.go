@@ -223,6 +223,8 @@ type fakeLauncher struct {
 	running map[*joblaunch.Process]*fakeProcess
 	byJob   map[string]*fakeProcess
 	kills   int
+	// killFails is how many Kills to come fail, killing nothing.
+	killFails int
 }
 
 type fakeProcess struct {
@@ -338,9 +340,14 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 
 func (l *fakeLauncher) Kill(_ context.Context, p *joblaunch.Process) error {
 	l.mu.Lock()
+	l.kills++
+	if l.killFails > 0 {
+		l.killFails--
+		l.mu.Unlock()
+		return errors.New("kill failed")
+	}
 	fp, ok := l.running[p]
 	delete(l.running, p)
-	l.kills++
 	l.mu.Unlock()
 	if !ok {
 		return errors.New("Kill of a process the launcher never started, or twice")
