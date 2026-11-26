@@ -33,6 +33,11 @@ type Image struct {
 	User string
 	// WorkingDir is the image config's WORKDIR, empty when it sets none.
 	WorkingDir string
+	// Entrypoint is the image config's ENTRYPOINT, nil when it sets none.
+	// It and Cmd make a service's command: Entrypoint followed by Cmd.
+	Entrypoint []string
+	// Cmd is the image config's CMD, nil when it sets none.
+	Cmd []string
 	// LinkDir is the VM's layer link directory, <cache>/jobs/<id>/<n>/:
 	// hard links to exactly the layers of the VM's image.
 	LinkDir string
