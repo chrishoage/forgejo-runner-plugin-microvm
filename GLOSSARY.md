@@ -107,6 +107,10 @@ The VM a job's steps run in, booted from the job's image; always the first VM in
 One entry of a workflow's `services:`, run as a VM of its job, on the job network, with the shape of the job's profile.
 _Avoid_: sidecar, service container (except when quoting the workflow)
 
+**Health check**:
+A service's image's `HEALTHCHECK`, run by its VM's agent on Docker's timing until the service is healthy or unhealthy. Start waits for every service's to pass.
+_Avoid_: probe, readiness probe, liveness check
+
 **Agent**:
 The program injected into every VM that prepares it at boot, runs commands and copies files in and out, or runs its service once the plugin asks it to start it. It is up when it answers Ping. The job's steps run through the job's container's agent.
 _Avoid_: guest daemon, init

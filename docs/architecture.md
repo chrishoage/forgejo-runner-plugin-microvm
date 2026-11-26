@@ -128,6 +128,7 @@ The job binary and the agent are embedded in `runner-microvm`, so there is one f
   |---|---|
   | `Ping` | answers once the agent is up |
   | `StartService` | starts a service's VM's service, with the service's `env`, and returns once its process has started |
+  | `Health` | returns a service's health, none, starting, healthy or unhealthy, and its last check's output |
 - **Every VM has the same 30 s, from the job process's launch, to be ready: its agent to answer Ping and, for a service's, `StartService` to return. The plugin redials every 10 ms at first, at most every 100 ms, each attempt bounded by 500 ms, and stops waiting at once if any VM of the job exits.** Boot takes about 2 s; 30 s leaves room on a loaded host. Until the agent listens, libkrun accepts and drops each connection, hence the quick redials. Start then fails naming the VM and the timeout, with the console and VM log tails. One bound for both calls, not a second for `StartService`: the service's start is part of its VM's boot.
 
 ### Ending a job: the whole process group, reaped
@@ -431,6 +432,19 @@ A service's VM runs its image's command, the way Docker runs a container (#147).
 - **When the command exits, the agent logs `service exited`, with `argv0` and `exit_code` or `signal`, and exits with its exit code, or `128+n` for signal `n`, as Exec reports one (GST-7).** libkrun's init is PID 1 and the agent its workload, so the VM stops when the agent does, and the job process reports its `VMExited` with the agent's exit code, which libkrun passes on (One job process runs all of a job's VMs, above). The agent stops serving as it exits, which cancels every call in flight.
 - **When the agent can't listen, it exits 1 with no service started; when its listener fails, it kills the service's process group and reaps the service, if it runs, before it exits,** so it never leaves the command running in a VM nothing can reach.
 - **Exec and Copy still go only to the job's container's agent.** The plugin protocol's Exec and Copy name only the job.
+
+## A service's health check
+
+A service whose image declares a `HEALTHCHECK` is ready only once it is healthy, as under forgejo-runner's Docker backend, which waits for every service's health before the first step and fails the job on unhealthy (#151). The agent in the service's VM runs the check, and the plugin asks it at Start (The plugin talks to the agent directly, above).
+
+- **The check comes from the image config's `Healthcheck` only, which the boot config's service carries as the image sets it.** Today, because the plugin protocol passes no service `options`, `--health-cmd` never reaches the plugin.
+- **The agent applies Docker's rules, so they live in one place:** an absent or empty `Test`, or `["NONE"]`, is no check; `["CMD", args…]` runs `args`; `["CMD-SHELL", cmd]` runs `/bin/sh -c cmd`; any other kind is no check, logged as a `warn`, as Docker ignores it. An unset, zero or negative interval, timeout, start period or start interval takes Docker's default (30 s, 30 s, none, 5 s), and retries below 1 take 3. Workflows written for the Docker backend wait the same.
+- **The check runs as the service's command does (A service's command, above): as the image's `USER`, in its `WORKDIR`, with the service's environment, the image's with `StartService`'s `env` laid over it, in a process group of its own, which a timeout kills.** Its stdout and stderr go to the VM's console, in the job logs, and its last 4 KiB, as much as Docker keeps, are kept for Health. A check that can't start fails, naming its program and never the `PATH` (LOG-2), and a background child that keeps its output open can't hold it past its exit (200 ms, as Exec's).
+- **The agent starts the checks when `StartService` starts the service, never at boot, so their timing is measured from the service's start, as Docker's is.** Before then, `Health` answers starting for a service with a check.
+- **On Docker's timing:** the first check one interval in force after the service started, each next one an interval in force after the last ended; the interval in force is the start interval while the service is starting within its start period, else the interval. A check that exits 0 passes; any other exit, a failure to start, or its timeout fails it.
+- **A failure during the start period doesn't count. The service is healthy at its first pass, and unhealthy after `retries` counted failures in a row.**
+- **Checks stop once the service is healthy or unhealthy.** Nothing reads health after Start, and the Docker backend's wait ends there too. They also stop, a running one killed, whenever the agent exits.
+- **The agent protocol's `Health` returns the state (none, starting, healthy or unhealthy) and the last check's output.** A call keeps the agent's protocol request-and-answer, like Ping. A VM without a service, or a service without a check, answers none. It carries nothing of the check's timing: the plugin asks every 1 s, whatever the interval (The plugin talks to the agent directly, above), so the timing is the agent's alone.
 
 ## Copying files
 
@@ -803,7 +817,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 | `internal/job` | the job process; dispatches `vm` to the VM child | `job/internal/...`, `logging`, `secret`, the job protocol | `cmd/runner-microvm-job` |
 | `internal/job/internal/jobnet` | the job network (gvisor-tap-vsock) | `logging` | `job` only (compiler-enforced) |
 | `internal/job/internal/vm` | the VM child: libkrun via purego | `logging`, the VM child spec | `job` only (compiler-enforced) |
-| `internal/agent` | the agent: boot mounts, the guest's network, a service's command, Exec, CopyIn, CopyOut, Flush | `logging`, `secret`, the agent protocol | `cmd/runner-microvm-agent`; `plugin`'s tests, only to read the boot root's boot config as the agent does |
+| `internal/agent` | the agent: boot mounts, the guest's network, a service's command and health check, Exec, CopyIn, CopyOut, Flush, Health | `logging`, `secret`, the agent protocol | `cmd/runner-microvm-agent`; `plugin`'s tests, only to read the boot root's boot config as the agent does |
 | `internal/logging` | slog setup | none | all three programs |
 | `internal/secret` | the self-redacting secret type | none | all three programs |
 
@@ -837,7 +851,7 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
 | Package | Between | Carries |
 |---|---|---|
 | `plugin.v1alpha` (the runner's) | runner ↔ plugin (gRPC) | Capabilities, Create, Start, Exec, CopyIn, CopyOut, Remove |
-| `runnermicrovm.agent.v1` | plugin ↔ agent (gRPC) | readiness, starting a service, Exec, CopyIn, CopyOut, the read-write flush; the agent's boot config |
+| `runnermicrovm.agent.v1` | plugin ↔ agent (gRPC) | readiness, starting a service, Exec, CopyIn, CopyOut, a service's health, the read-write flush; the agent's boot config |
 | `runnermicrovm.job.v1` | plugin ↔ job process (control channel) | the job spec in, status events out |
 | `runnermicrovm.vm.v1` | job process → VM child | the VM child spec |
 

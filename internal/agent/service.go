@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +45,8 @@ type serviceStart struct {
 	image          *agentv1.Image
 	svc            *agentv1.Service
 	stdout, stderr *os.File
+	// check is the image's health check, by Docker's rules; nil for none.
+	check *healthCheck
 	// called is closed once the first StartService has started the
 	// service, or failed to; result then says which.
 	called chan struct{}
@@ -54,14 +57,22 @@ type serviceStart struct {
 	tried, stopped bool
 	running        *service
 	err            error
+	// health is the running service's health; endHealth ends its checks.
+	health    *health
+	endHealth func()
 }
 
 func newServiceStart(log *slog.Logger, root string, image *agentv1.Image, svc *agentv1.Service, stdout, stderr *os.File) *serviceStart {
-	return &serviceStart{log: log, root: root, image: image, svc: svc, stdout: stdout, stderr: stderr, called: make(chan struct{})}
+	check, ignored := newHealthCheck(svc.GetHealthcheck())
+	if ignored != "" {
+		log.Warn("ignoring the image's health check, of a kind Docker ignores too", "kind", ignored)
+	}
+	return &serviceStart{log: log, root: root, image: image, svc: svc, stdout: stdout, stderr: stderr, check: check, called: make(chan struct{})}
 }
 
 // start starts the service with env, once, for the call whose context is
-// ctx; its error is the call's status.
+// ctx, and its health checks with it, which run with the same env, timed
+// from the service's start; its error is the call's status.
 func (st *serviceStart) start(ctx context.Context, env secret.Env) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -78,7 +89,41 @@ func (st *serviceStart) start(ctx context.Context, env secret.Env) error {
 		return status.Error(codes.FailedPrecondition, st.err.Error())
 	}
 	st.log.Info("service started", "argv0", st.running.argv0)
+	st.health = newHealth(st.check, st.running.started)
+	if st.check != nil {
+		// The checks outlive the call, as the service does.
+		st.endHealth = monitorHealth(context.WithoutCancel(ctx), st.log, st.health, commandChecker(st.root, st.image, env, st.check.argv, st.stdout))
+	}
 	return nil
+}
+
+// healthResponse is Health's answer: the running service's health, or,
+// before it starts, starting when it has a check and none when it hasn't.
+func (st *serviceStart) healthResponse() *agentv1.HealthResponse {
+	st.mu.Lock()
+	h := st.health
+	st.mu.Unlock()
+	if h == nil {
+		h = newHealth(st.check, time.Time{})
+	}
+	return h.response()
+}
+
+// endChecks stops any later StartService from starting the service, and
+// ends its health checks, killing a check still running, once they have
+// returned. A nil st has none.
+func (st *serviceStart) endChecks() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	st.stopped = true
+	end := st.endHealth
+	st.endHealth = nil
+	st.mu.Unlock()
+	if end != nil {
+		end()
+	}
 }
 
 // result returns the service the first StartService started, or why it
@@ -104,6 +149,8 @@ func (st *serviceStart) stop() *service {
 // service is a service's command, which StartService started.
 type service struct {
 	argv0 string
+	// started is when the command started.
+	started time.Time
 	// cancel kills the command's process group.
 	cancel context.CancelFunc
 	// done is closed once the command has exited and been reaped; then
@@ -145,7 +192,7 @@ func startService(ctx context.Context, root string, image *agentv1.Image, argv [
 		}
 		return nil, fmt.Errorf("service %s: %w", argv[0], err)
 	}
-	s := &service{argv0: argv[0], cancel: cancel, done: make(chan struct{})}
+	s := &service{argv0: argv[0], started: time.Now(), cancel: cancel, done: make(chan struct{})}
 	go func() {
 		s.err = cmd.Wait()
 		s.state = cmd.ProcessState

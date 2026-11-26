@@ -10,6 +10,8 @@ syntax = "proto3";
 // vsock port its boot config names, and the VM is up when it answers Ping.
 package runnermicrovm.agent.v1;
 
+import "google/protobuf/duration.proto";
+
 // AgentService prepares a VM at boot, starts its service, runs commands
 // inside it and copies files in and out. The job's steps run through the job's
 // container's agent.
@@ -49,6 +51,12 @@ service AgentService {
   // ext4 clean. The disks stay frozen: the VM is killed right after. It
   // fails with FailedPrecondition, naming each disk it could not freeze.
   rpc Flush(FlushRequest) returns (FlushResponse);
+
+  // Health returns the health of the VM's service, by its image's
+  // HEALTHCHECK, which the agent runs from the moment the service starts
+  // until it is healthy or unhealthy. The plugin calls it at Start, after
+  // StartService, until the service is no longer starting.
+  rpc Health(HealthRequest) returns (HealthResponse);
 }
 
 message PingRequest {}
@@ -122,6 +130,31 @@ message CopyOutResponse {
 message FlushRequest {}
 
 message FlushResponse {}
+
+message HealthRequest {}
+
+message HealthResponse {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // The VM has no service, or its service no health check: the image
+    // sets none, an empty test, NONE, or a kind of test Docker ignores.
+    STATE_NONE = 1;
+    // The check has neither passed yet nor failed retries times in a row
+    // outside its start period.
+    STATE_STARTING = 2;
+    // The check has passed once; the agent runs it no more.
+    STATE_HEALTHY = 3;
+    // The check failed retries times in a row outside its start period;
+    // the agent runs it no more.
+    STATE_UNHEALTHY = 4;
+  }
+  State state = 1;
+  // The last check's output, stdout and stderr together, its last 4 KiB,
+  // or why it failed without any: it timed out, or could not start. Empty
+  // before the first check. What the service's check prints is the
+  // guest's: the plugin cuts it to size again.
+  string output = 2;
+}
 
 // BootConfig is everything the agent needs to prepare the guest before it
 // serves: its root filesystem, mounts, disks, network, the image's defaults
@@ -198,6 +231,36 @@ message Service {
   // service's environment's PATH, or in image.default_path when it sets
   // none, as an Exec's command is. The agent refuses an empty argv.
   repeated string argv = 1;
+  // The image's HEALTHCHECK, as the image sets it; absent when it sets
+  // none. The agent runs it as it runs the command: as the image's user,
+  // in its working directory, with the service's environment: the image's
+  // with StartService's laid over it.
+  Healthcheck healthcheck = 3;
+}
+
+// Healthcheck is an image config's HEALTHCHECK, as the image sets it. The
+// agent applies Docker's rules to it: what a test means, and what a zero
+// field defaults to.
+message Healthcheck {
+  // Empty or ["NONE"]: no check. ["CMD", args…] runs args, as the
+  // service's command is run; ["CMD-SHELL", command] runs /bin/sh -c
+  // command. Any other kind is ignored, as Docker ignores it: no check.
+  repeated string test = 1;
+  // How long after a check the next one runs, once the start period is
+  // over; zero or absent: 30 s.
+  google.protobuf.Duration interval = 2;
+  // How long a check may run before it is killed and fails; zero or
+  // absent: 30 s.
+  google.protobuf.Duration timeout = 3;
+  // How long after the service starts a failed check doesn't count; zero
+  // or absent: none.
+  google.protobuf.Duration start_period = 4;
+  // How long after a check the next one runs during the start period;
+  // zero or absent: 5 s.
+  google.protobuf.Duration start_interval = 5;
+  // How many failed checks in a row, outside the start period, make the
+  // service unhealthy; zero or less: 3.
+  int32 retries = 6;
 }
 
 // GuestDir is a directory the agent creates in the job's root when the image

@@ -3,8 +3,8 @@
 // Package agent is the agent that runs inside every VM: it makes the guest's
 // boot mounts, configures its network, hostname and name resolution from its
 // boot config, then serves the agent protocol's Ping, StartService, Exec,
-// CopyIn, CopyOut and Flush; once StartService has started the boot
-// config's service, until the service exits.
+// CopyIn, CopyOut, Flush and Health; once StartService has started the boot
+// config's service, and its image's health check, until the service exits.
 //
 // The agent binary may depend only on the standard library, grpc, protobuf,
 // vishvananda/netlink, moby/sys/user, this package, internal/logging,
@@ -129,6 +129,8 @@ func run(log *slog.Logger, cfg *agentv1.BootConfig, g guest) int {
 	if cfg.GetService() != nil {
 		start = newServiceStart(log, g.root, cfg.GetImage(), cfg.GetService(), g.stdout, g.stderr)
 		called = start.called
+		// The health checks end with the agent, whichever way it ends.
+		defer start.endChecks()
 	}
 	gs := newGRPCServer(&server{log: log, image: cfg.GetImage(), root: g.root, rwDisks: rwDisks, service: start})
 	served := make(chan error, 1)
@@ -190,6 +192,22 @@ func stopWithin(gs *grpc.Server, grace time.Duration) {
 	}
 }
 
+// monitorHealth runs h's checks with run in a goroutine of its own, until
+// ctx ends at the latest, and returns the function that ends them: it kills
+// a check still running and waits until the goroutine has returned.
+func monitorHealth(ctx context.Context, log *slog.Logger, h *health, run checker) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.monitor(ctx, run, log)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // serve serves s on lis until lis fails.
 func serve(lis net.Listener, s *server) error {
 	return serveOn(newGRPCServer(s), lis)
@@ -223,8 +241,8 @@ type server struct {
 	root string
 	// rwDisks are the read-write disks boot mounted, which Flush freezes.
 	rwDisks []rwDisk
-	// service is the boot config's service, which StartService starts;
-	// nil for a VM without one.
+	// service is the boot config's service, which StartService starts,
+	// and whose health Health answers; nil for a VM without one.
 	service *serviceStart
 	// flusher is Flush's kernel; nil is the real one.
 	flusher flusher
@@ -244,4 +262,13 @@ type server struct {
 // has started.
 func (s *server) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
 	return &agentv1.PingResponse{}, nil
+}
+
+// Health answers with the service's health: none for a VM without a
+// service, or a service without a check.
+func (s *server) Health(context.Context, *agentv1.HealthRequest) (*agentv1.HealthResponse, error) {
+	if s.service == nil {
+		return &agentv1.HealthResponse{State: agentv1.HealthResponse_STATE_NONE}, nil
+	}
+	return s.service.healthResponse(), nil
 }
