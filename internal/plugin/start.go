@@ -11,8 +11,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -119,11 +122,13 @@ const (
 	tailBytes = 4 << 10
 )
 
-// Start pulls the job's image, waits for the job's admission to its disks
-// and memory, starts its job process, which boots the VM, waits until the
-// agent answers Ping, and ends with StartComplete carrying the image's
-// environment (PROTO-8). Before that it sends a progress line for the image,
-// each wait if there is one, the VM and the total (PROTO-9). A failed Start
+// Start pulls the image of every VM of the job, the job's container and
+// each service, waits for the job's admission to its disks and memory,
+// starts its job process, which boots every VM, waits until every VM is
+// ready (waitReady), and ends with StartComplete carrying the job's
+// container's image's environment (PROTO-8). Before that it sends a
+// progress line for each image, each wait if there is one, each VM and the
+// total (PROTO-9). A failed Start
 // kills the job process, waits until its group is reaped, and then releases
 // the job's admission, its disks and memory together; when the kill fails,
 // the job keeps its admission until its Remove reaps the group.
@@ -163,7 +168,7 @@ func (s *Server) Start(req *pluginv1alpha.StartRequest, stream pluginv1alpha.Bac
 			s.admission.Release(j.id)
 		}
 		j.startErr = err
-		s.log.Error("start failed", "env", j.id, "err", err)
+		s.log.Error("start failed", "env", j.id, "err", withoutOutput(err))
 		return startError(ctx, stream.Context(), err)
 	}
 	j.ready.Store(true)
@@ -305,84 +310,90 @@ func (e *bugError) Error() string { return e.err.Error() }
 
 func (e *bugError) Unwrap() error { return e.err }
 
+// jobVM is one VM of a job as Start boots it: the job's container, at index
+// 0, or one of its services.
+type jobVM struct {
+	index int
+	// name is the VM's name on the job network, in /etc/hosts, log lines
+	// and messages; hostname its kernel's hostname, a DNS label.
+	name, hostname string
+	// ref is the image the VM runs.
+	ref string
+	// service is the service the VM runs, nil for the job's container.
+	service *service
+	// img is its image, once acquired.
+	img imagecache.Image
+}
+
+// vms returns j's VMs, in the job spec's order: the job's container, then
+// each service as the runner listed it.
+func (j *job) vms() []*jobVM {
+	vms := []*jobVM{{index: 0, name: j.hostname, hostname: j.hostname, ref: j.image}}
+	for i := range j.services {
+		svc := &j.services[i]
+		vms = append(vms, &jobVM{index: i + 1, name: svc.name, hostname: svc.hostname, ref: svc.image, service: svc})
+	}
+	return vms
+}
+
+// vmName is the name of VM index of j: the job's container's hostname, or
+// a service's name.
+func (j *job) vmName(index int) string {
+	if index > 0 && index <= len(j.services) {
+		return j.services[index-1].name
+	}
+	return j.hostname
+}
+
+// what names vm in a message's cause: nothing for the job's container,
+// whose image is the job's, `service <name>: ` for a service.
+func (vm *jobVM) what() string {
+	if vm.service == nil {
+		return ""
+	}
+	return "service " + vm.name + ": "
+}
+
 // boot does Start's work on j, which is locked, sending its progress to p,
 // and returns the job's container's image. On error, j.proc and j.agent may
 // be set: the caller stops them.
 func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Image, error) {
-	vmState := filepath.Join(s.jobStateDir(j.id), "0")
-	vmRuntime := filepath.Join(s.cfg.Dirs.Runtime, j.id, "0")
-	for _, d := range []string{vmState, vmRuntime} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return imagecache.Image{}, err
+	vms := j.vms()
+	for _, vm := range vms {
+		for _, d := range []string{s.vmStateDir(j.id, vm.index), s.vmRuntimeDir(j.id, vm.index)} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				return imagecache.Image{}, err
+			}
 		}
 	}
-	addr, mac, err := vmAddress(0)
-	if err != nil {
-		return imagecache.Image{}, &bugError{err}
+	if err := s.acquireImages(ctx, j, vms, p); err != nil {
+		return imagecache.Image{}, err
 	}
-	pulling := time.Now()
-	img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: 0, Ref: j.image, ForcePull: j.profile.ForcePull})
-	if err != nil {
-		return imagecache.Image{}, fmt.Errorf("image %s: %w", j.image, err)
-	}
-	p.line("image %s ready (%s, %d layers) in %s", j.image, img.Digest, len(img.Layers), seconds(time.Since(pulling)))
 	if err := s.admit(ctx, j, p); err != nil {
 		return imagecache.Image{}, err
 	}
-	boot := &agentv1.BootConfig{
-		LayerDir:      guestLayerDir,
-		LayerTag:      layerTag,
-		Layers:        img.Layers,
-		ScratchDevice: scratchDevice,
-		ScratchPaths:  j.profile.ScratchPaths,
-		Network:       bootNetwork(addr),
-		Hostname:      j.hostname,
-		Image:         &agentv1.Image{Env: img.Env, User: img.User, WorkingDir: img.WorkingDir, DefaultPath: defaultPath},
-		Hosts:         []*agentv1.Host{{Name: j.hostname, Address: addr.String()}},
-		VsockPort:     agentPort,
-		LogLevel:      s.cfg.LogLevel,
+	// Every VM's /etc/hosts names every VM of the job, by its name.
+	hosts := make([]*agentv1.Host, len(vms))
+	for i, vm := range vms {
+		addr, _, err := vmAddress(vm.index)
+		if err != nil {
+			return imagecache.Image{}, &bugError{err}
+		}
+		hosts[i] = &agentv1.Host{Name: vm.name, Address: addr.String()}
 	}
-	for _, d := range guestDirs {
-		boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
-	}
-	// Each mount is a share of its own, under a tag only its position
-	// names; the job process checks its source again before the VM starts
-	// (STO-1, STO-2, STO-5).
-	var mounts []*jobv1.Mount
-	for i, m := range j.profile.Mounts {
-		mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
-		boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
-	}
-	// Each disk is attached under a block id only its position names, which
-	// the agent finds it by; the job process opens its source before the
-	// VM starts (STO-1, STO-4).
-	var disks []*jobv1.Disk
-	for i, d := range j.profile.Disks {
-		disks = append(disks, &jobv1.Disk{Source: d.Source, BlockId: diskBlockID(i), ReadWrite: d.ReadWrite})
-		boot.Disks = append(boot.Disks, &agentv1.Disk{BlockId: diskBlockID(i), Target: d.Target, ReadWrite: d.ReadWrite})
-	}
-	root := filepath.Join(vmState, "root")
-	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
-		return imagecache.Image{}, fmt.Errorf("boot root %s: %w", root, err)
-	}
-	vm := &jobv1.VM{
-		Name:             j.hostname,
-		Cpus:             j.profile.CPUs,
-		MemoryMib:        j.profile.MemoryMiB,
-		ScratchDisk:      filepath.Join(vmState, "scratch.ext4"),
-		ScratchSizeBytes: j.profile.ScratchBytes(),
-		VmLog:            filepath.Join(vmState, vmLogName),
-		Console:          filepath.Join(vmState, consoleName),
-		AgentSocket:      filepath.Join(vmRuntime, "agent.sock"),
-		AgentPort:        agentPort,
-		RootDir:          root,
-		LayerDir:         img.LinkDir,
-		LayerTag:         layerTag,
-		Mounts:           mounts,
-		Disks:            disks,
-		GuestAddress:     addr.String(),
-		GuestMac:         mac.String(),
-		Boot:             boot,
+	specVMs := make([]*jobv1.VM, len(vms))
+	for i, vm := range vms {
+		// A VM's own hostname maps to its own address, as Docker's does, when
+		// it isn't its name.
+		own := hosts
+		if vm.hostname != vm.name {
+			own = append(slices.Clone(hosts), &agentv1.Host{Name: vm.hostname, Address: hosts[i].GetAddress()})
+		}
+		v, err := s.vmSpec(j, vm, own)
+		if err != nil {
+			return imagecache.Image{}, err
+		}
+		specVMs[i] = v
 	}
 	booting := time.Now()
 	proc, err := s.cfg.Launcher.Launch(ctx, &jobv1.Spec{
@@ -393,24 +404,198 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 		LogLevel:        s.cfg.LogLevel,
 		MkfsExt4:        s.cfg.MkfsExt4,
 		Network:         jobNetwork(),
-		Vms:             []*jobv1.VM{vm},
+		Vms:             specVMs,
 	}, filepath.Join(s.jobStateDir(j.id), jobLogName))
 	if err != nil {
 		return imagecache.Image{}, fmt.Errorf("job process: %w", err)
 	}
 	j.proc = proc
-	// The agent socket's path can outgrow connect's 107 bytes, so it is
-	// dialled through the runtime directory.
-	agent, err := agentclient.New(s.runtime.path(j.id + "/0/agent.sock"))
-	if err != nil {
-		return imagecache.Image{}, &bugError{err}
+	// Start dials every VM's agent, and keeps only the job's container's:
+	// Exec and Copy name only the job. The agent socket's path can outgrow
+	// connect's 107 bytes, so it is dialled through the runtime directory.
+	agents := make([]*agentclient.Client, len(vms))
+	defer func() {
+		for _, a := range agents[1:] {
+			if a != nil {
+				_ = a.Close()
+			}
+		}
+	}()
+	for i, vm := range vms {
+		a, err := agentclient.New(s.runtime.path(j.id + "/" + strconv.Itoa(vm.index) + "/agent.sock"))
+		if err != nil {
+			return imagecache.Image{}, &bugError{err}
+		}
+		agents[i] = a
+		if i == 0 {
+			j.agent = a
+		}
 	}
-	j.agent = agent
-	if err := s.waitReady(ctx, j, vm); err != nil {
+	if err := s.waitReady(ctx, j, specVMs, agents, p, booting); err != nil {
 		return imagecache.Image{}, err
 	}
-	p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
-	return img, nil
+	return vms[0].img, nil
+}
+
+// vmStateDir is the state directory of VM index of the job id,
+// <state>/jobs/<id>/<n>/, and vmRuntimeDir its runtime directory,
+// <runtime>/<id>/<n>/: named by the VM's index, never its name, which a
+// workflow chooses.
+func (s *Server) vmStateDir(id string, index int) string {
+	return filepath.Join(s.jobStateDir(id), strconv.Itoa(index))
+}
+
+func (s *Server) vmRuntimeDir(id string, index int) string {
+	return filepath.Join(s.cfg.Dirs.Runtime, id, strconv.Itoa(index))
+}
+
+// acquireImages acquires the image of every VM of j at once, before the
+// wait for admission, so a bad reference or a registry error fails at once;
+// the image cache's plugin-wide limit bounds their pulls together. It sends
+// each image's progress line as it is ready. A service's image with no
+// command, neither an Entrypoint nor a Cmd, fails it too. The first failure
+// cancels the other Acquires, and is returned once every one has returned,
+// naming its service.
+func (s *Server) acquireImages(ctx context.Context, j *job, vms []*jobVM, p *progress) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type acquired struct {
+		vm   *jobVM
+		img  imagecache.Image
+		took time.Duration
+		err  error
+	}
+	results := make(chan acquired, len(vms))
+	for _, vm := range vms {
+		go func() {
+			begin := time.Now()
+			img, err := s.cfg.Cache.Acquire(ctx, imagecache.Request{Job: j.id, VM: vm.index, Ref: vm.ref, ForcePull: j.profile.ForcePull})
+			if err == nil && vm.service != nil {
+				err = checkCommand(img)
+			}
+			results <- acquired{vm, img, time.Since(begin), err}
+		}()
+	}
+	var first error
+	for range vms {
+		r := <-results
+		if r.err != nil {
+			if first == nil {
+				first = fmt.Errorf("%simage %s: %w", r.vm.what(), r.vm.ref, r.err)
+				cancel()
+			}
+			continue
+		}
+		r.vm.img = r.img
+		if first != nil {
+			continue
+		}
+		if r.vm.service == nil {
+			p.line("image %s ready (%s, %d layers) in %s", r.vm.ref, r.img.Digest, len(r.img.Layers), seconds(r.took))
+		} else {
+			p.line("image %s ready for service %s (%s, %d layers) in %s", r.vm.ref, r.vm.name, r.img.Digest, len(r.img.Layers), seconds(r.took))
+		}
+	}
+	return first
+}
+
+// checkCommand fails unless img has a command a service can run: its
+// Entrypoint followed by its Cmd, with a program to start. The plugin
+// protocol passes a service no command of its own, and forgejo-runner's
+// Docker backend fails such a service too.
+func checkCommand(img imagecache.Image) error {
+	argv := serviceArgv(img)
+	switch {
+	case len(argv) == 0:
+		return errors.New("it has neither an Entrypoint nor a Cmd, so the service has no command to run")
+	case argv[0] == "":
+		return errors.New("its command, its Entrypoint followed by its Cmd, starts with an empty program name")
+	}
+	return nil
+}
+
+// serviceArgv is a service's command from its image: the Entrypoint
+// followed by the Cmd, as Docker runs it.
+func serviceArgv(img imagecache.Image) []string {
+	return append(slices.Clone(img.Entrypoint), img.Cmd...)
+}
+
+// vmSpec returns the job spec's entry for vm of j, every VM of the job
+// named in hosts, and makes its boot root. Every VM has the shape of j's
+// profile: its CPUs, memory, scratch size and scratch paths. Only the job's
+// container gets the profile's mounts and disks, which are the job's
+// storage: a read-write disk can't be attached to two VMs of one job, and
+// a service has no use for the job's caches. A service's boot config
+// carries its command, never its own environment, whose values may be
+// secrets, which must not appear in host files (LOG-2): StartService
+// carries that.
+func (s *Server) vmSpec(j *job, vm *jobVM, hosts []*agentv1.Host) (*jobv1.VM, error) {
+	addr, mac, err := vmAddress(vm.index)
+	if err != nil {
+		return nil, &bugError{err}
+	}
+	img := vm.img
+	boot := &agentv1.BootConfig{
+		LayerDir:      guestLayerDir,
+		LayerTag:      layerTag,
+		Layers:        img.Layers,
+		ScratchDevice: scratchDevice,
+		ScratchPaths:  j.profile.ScratchPaths,
+		Network:       bootNetwork(addr),
+		Hostname:      vm.hostname,
+		Image:         &agentv1.Image{Env: img.Env, User: img.User, WorkingDir: img.WorkingDir, DefaultPath: defaultPath},
+		Hosts:         hosts,
+		VsockPort:     agentPort,
+		LogLevel:      s.cfg.LogLevel,
+	}
+	var mounts []*jobv1.Mount
+	var disks []*jobv1.Disk
+	if svc := vm.service; svc != nil {
+		boot.Service = &agentv1.Service{Argv: serviceArgv(img)}
+	} else {
+		// The directories steps expect.
+		for _, d := range guestDirs {
+			boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
+		}
+		// Each mount is a share of its own, under a tag only its position
+		// names; the job process checks its source again before the VM
+		// starts (STO-1, STO-2, STO-5).
+		for i, m := range j.profile.Mounts {
+			mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
+			boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
+		}
+		// Each disk is attached under a block id only its position names,
+		// which the agent finds it by; the job process opens its source
+		// before the VM starts (STO-1, STO-4).
+		for i, d := range j.profile.Disks {
+			disks = append(disks, &jobv1.Disk{Source: d.Source, BlockId: diskBlockID(i), ReadWrite: d.ReadWrite})
+			boot.Disks = append(boot.Disks, &agentv1.Disk{BlockId: diskBlockID(i), Target: d.Target, ReadWrite: d.ReadWrite})
+		}
+	}
+	state := s.vmStateDir(j.id, vm.index)
+	root := filepath.Join(state, "root")
+	if err := makeBootRoot(root, s.cfg.Agent, boot); err != nil {
+		return nil, fmt.Errorf("boot root %s: %w", root, err)
+	}
+	return &jobv1.VM{
+		Name:             vm.name,
+		Cpus:             j.profile.CPUs,
+		MemoryMib:        j.profile.MemoryMiB,
+		ScratchDisk:      filepath.Join(state, "scratch.ext4"),
+		ScratchSizeBytes: j.profile.ScratchBytes(),
+		VmLog:            filepath.Join(state, vmLogName),
+		Console:          filepath.Join(state, consoleName),
+		AgentSocket:      filepath.Join(s.vmRuntimeDir(j.id, vm.index), "agent.sock"),
+		AgentPort:        agentPort,
+		RootDir:          root,
+		LayerDir:         img.LinkDir,
+		LayerTag:         layerTag,
+		Mounts:           mounts,
+		Disks:            disks,
+		GuestAddress:     addr.String(),
+		GuestMac:         mac.String(),
+		Boot:             boot,
+	}, nil
 }
 
 // admit admits j, which is locked, to its disks and then the memory budget,
@@ -428,7 +613,7 @@ func (s *Server) admit(ctx context.Context, j *job, p *progress) error {
 	if err != nil {
 		return err
 	}
-	need := jobMemoryMiB(j.profile)
+	need := jobMemoryMiB(j.profile, j.services)
 	waitCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	if s.drainCtx.Err() != nil {
@@ -555,38 +740,99 @@ func diskMode(readWrite bool) string {
 	return "ro"
 }
 
-// waitReady waits until j's agent answers Ping, failing as soon as the VM
-// exits or the job process fails, or after the ready timeout (VM-8).
-func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
+// waitReady waits until every VM of j, vms in the job spec's order and
+// agents their clients, is ready, sending each VM's progress line as it is,
+// timed from booting: the job's container once its agent answers Ping, a
+// service's VM once its agent has answered Ping and then StartService, sent
+// once, with the service's env, has started its command. It fails as soon
+// as any VM exits or the job process fails, naming the VM, once a service's
+// command can't start, quoting the agent, or once the ready timeout, which
+// bounds the Pings and StartServices together, passes before every VM is
+// ready (VM-8).
+func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents []*agentclient.Client, p *progress, booting time.Time) error {
 	readyCtx, cancel := context.WithTimeout(ctx, s.cfg.ReadyTimeout)
 	defer cancel()
-	ready := make(chan error, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ready <- j.agent.WaitReady(readyCtx)
-	}()
-	// The goroutine always ends, once readyCtx does at the latest.
-	defer func() { cancel(); <-done }()
+	type answer struct {
+		i int
+		// pinged says the agent answered Ping, so err, if any, is
+		// StartService's.
+		pinged bool
+		err    error
+	}
+	answers := make(chan answer, len(agents))
+	// starting[i] is set once VM i's StartService is sent.
+	starting := make([]atomic.Bool, len(agents))
+	var wg sync.WaitGroup
+	for i, a := range agents {
+		wg.Go(func() {
+			err := a.WaitReady(readyCtx)
+			if err != nil || !isService(vms[i]) {
+				answers <- answer{i, false, err}
+				return
+			}
+			starting[i].Store(true)
+			// Never sent again: a second call fails, and the service
+			// would start once anyway.
+			answers <- answer{i, true, a.StartService(readyCtx, j.services[i-1].env.Reveal())}
+		})
+	}
+	// Every goroutine ends, once readyCtx does at the latest.
+	defer func() { cancel(); wg.Wait() }()
+	// answered[i] is set once VM i's answer is read.
+	ready, answered := make([]bool, len(vms)), make([]bool, len(vms))
+	left := len(vms)
 	// Once the job process has exited, its events still to come say why:
 	// they end when the launcher reaches the end of its stdout, which no
 	// process is left to hold open, so they are read to their end before
-	// the exit is reported.
+	// the exit is reported. It names the first VM not yet ready.
 	events, exited := j.proc.Events, j.proc.Exited
 	exitedErr := func() error {
-		return fmt.Errorf("VM %s: its job process exited during boot%s", vm.GetName(), vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())))
+		vm := vms[slices.Index(ready, false)]
+		return &outputError{fmt.Sprintf("VM %s: its job process exited during boot", vm.GetName()), vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())), isService(vm)}
 	}
+	// A StartService whose connection failed is how the plugin first sees
+	// a service's VM die: lost is that failure, reported once the VM's exit
+	// hasn't come within the lost agent grace.
+	var lost error
+	var lostC <-chan time.Time
 	for {
 		select {
-		case err := <-ready:
-			if err == nil {
-				return nil
+		case a := <-answers:
+			vm := vms[a.i]
+			answered[a.i] = true
+			if a.err == nil {
+				ready[a.i] = true
+				p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
+				if left--; left == 0 {
+					return nil
+				}
+				continue
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("VM %s: the agent did not answer within %v%s", vm.GetName(), s.cfg.ReadyTimeout,
-				vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())))
+			output := vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole()))
+			switch {
+			case !a.pinged:
+				summary := fmt.Sprintf("VM %s: the agent did not answer within %v", vm.GetName(), s.cfg.ReadyTimeout)
+				return &outputError{summary, output, isService(vm)}
+			// gRPC ends a call at its deadline on its own, through the
+			// server's grpc-timeout or the stream's reset, so its
+			// DeadlineExceeded can come before readyCtx reports its end.
+			// The agent never sends that code itself.
+			case readyCtx.Err() != nil || status.Code(a.err) == codes.DeadlineExceeded:
+				summary := fmt.Sprintf("VM %s: the agent did not start its service within %v", vm.GetName(), s.cfg.ReadyTimeout)
+				return &outputError{summary, output, true}
+			case status.Code(a.err) == codes.FailedPrecondition:
+				return &outputError{serviceNotStarted(vm, a.err), output, true}
+			case lost == nil:
+				lost = &outputError{fmt.Sprintf("VM %s: the agent's connection failed as it started its service: %v", vm.GetName(), a.err), output, true}
+				timer := time.NewTimer(s.cfg.LostAgentGrace)
+				defer timer.Stop()
+				lostC = timer.C
+			}
+		case <-lostC:
+			return lost
 		case ev, ok := <-events:
 			if !ok {
 				if exited == nil {
@@ -596,7 +842,25 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 				continue
 			}
 			if x := ev.GetVmExited(); x != nil {
-				return errors.New(vmExited(vm.GetName()+" exited during boot", x))
+				i := int(x.GetVm())
+				if i < 0 || i >= len(vms) {
+					return &bugError{fmt.Errorf("the job process reported VM %d exited, in a job of %d VMs", i, len(vms))}
+				}
+				// The agent answers a command that can't start before it
+				// exits, and its answer says why the VM did: it wins over
+				// the exit it caused. The call ends with readyCtx at the
+				// latest, and at once as the VM's socket closes.
+				if starting[i].Load() && !answered[i] {
+					for a := range answers {
+						if a.i == i {
+							if status.Code(a.err) == codes.FailedPrecondition && readyCtx.Err() == nil {
+								return &outputError{serviceNotStarted(vms[i], a.err), vmOutput(x.GetLogTail(), x.GetConsoleTail()), true}
+							}
+							break
+						}
+					}
+				}
+				return vmExited(vms[i].GetName()+" exited during boot", x, isService(vms[i]))
 			}
 			// The reason names the cause first: the job network, the
 			// scratch disk, a disk or the VM, or, for the plugin's own
@@ -614,6 +878,22 @@ func (s *Server) waitReady(ctx context.Context, j *job, vm *jobv1.VM) error {
 			exited = nil
 		}
 	}
+}
+
+// maxAgentMessage is how much of an agent's error message a Start's error
+// quotes: the guest sends it, so its size is never taken on trust.
+const maxAgentMessage = 1 << 10
+
+// serviceNotStarted is the summary of a failed Start whose service's VM, vm,
+// answered StartService with err, the agent's FailedPrecondition: the VM's
+// name, the service's, and the agent's message, which names only the
+// command's argv[0] and why, never a value of its env (LOG-2).
+func serviceNotStarted(vm *jobv1.VM, err error) string {
+	msg := status.Convert(err).Message()
+	if len(msg) > maxAgentMessage {
+		msg = msg[:maxAgentMessage]
+	}
+	return fmt.Sprintf("VM %s: its service did not start: %s", vm.GetName(), strings.ToValidUTF8(msg, ""))
 }
 
 // lostAgentGrace is how long a call whose agent failed, and is gone, waits
@@ -649,8 +929,16 @@ func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCaus
 				events = nil
 				continue
 			}
-			if x := ev.GetVmExited(); x != nil && x.GetVm() == 0 {
-				gone(vmExitedError(j.hostname, x))
+			if x := ev.GetVmExited(); x != nil {
+				if x.GetVm() == 0 {
+					gone(vmExitedError(j.hostname, x))
+				} else if j.gone.Err() == nil && j.ctx.Err() == nil {
+					// A service that stops doesn't end the job, as under
+					// Docker: a step fails against it. Once the job's
+					// container is gone, the job process stops the rest.
+					s.log.Warn("a service's VM exited; the job runs on", "env", j.id, "vm", j.vmName(int(x.GetVm())),
+						"exit_code", x.GetExitCode())
+				}
 			}
 			if f := ev.GetFailed(); f != nil {
 				gone(status.Errorf(codes.FailedPrecondition, "VM %s: its job process failed: %s", j.hostname, f.GetReason()))
@@ -668,13 +956,57 @@ func (s *Server) watch(j *job, p *joblaunch.Process, markGone context.CancelCaus
 // its last output, as a failed Start's error does. It is not Unavailable,
 // which the runner reads as the plugin being gone.
 func vmExitedError(name string, x *jobv1.VMExited) error {
-	return status.Error(codes.FailedPrecondition, vmExited(name+" exited", x))
+	return status.Error(codes.FailedPrecondition, vmExited(name+" exited", x, false).Error())
 }
 
-// vmExited is the message for VM x, which what names: `VM <what>
-// (<code>)`, then the VM's last output from x's tails.
-func vmExited(what string, x *jobv1.VMExited) string {
-	return fmt.Sprintf("VM %s (%d)%s", what, x.GetExitCode(), vmOutput(x.GetLogTail(), x.GetConsoleTail()))
+// vmExited is the error for VM x, which what names: `VM <what> (<code>)`,
+// then the VM's last output from x's tails; service says the VM is a
+// service's (outputError).
+func vmExited(what string, x *jobv1.VMExited, service bool) *outputError {
+	return &outputError{fmt.Sprintf("VM %s (%d)", what, x.GetExitCode()), vmOutput(x.GetLogTail(), x.GetConsoleTail()), service}
+}
+
+// isService says whether vm runs one of the job's services, not the job's
+// container.
+func isService(vm *jobv1.VM) bool { return vm.GetBoot().GetService() != nil }
+
+// outputError is a failure that quotes what a VM wrote: summary says what
+// failed (the VM's name, what happened, its exit code), and output is the
+// VM's last output after it, such as vmOutput's tails. Its message is both,
+// and goes to the runner, which masks the job's secrets in what it shows.
+// The plugin's own log masks nothing, so when service is set it shows only
+// summary (withoutOutput): a service's output is produced under its env,
+// which may carry the workflow's secrets. The job's container's output, the
+// kernel's and the agent's, which LOG-2 keeps free of them, stays in the
+// log, which then says why it failed to boot.
+type outputError struct {
+	summary, output string
+	service         bool
+}
+
+func (e *outputError) Error() string { return e.summary + e.output }
+
+// withoutOutput is err's message for the plugin's log: each service's
+// outputError in err's tree, through Unwrap, is cut to its summary.
+func withoutOutput(err error) string {
+	msg := err.Error()
+	var walk func(error)
+	walk = func(err error) {
+		switch e := err.(type) { //nolint:errorlint // walks the tree itself, to find every outputError, not the first
+		case *outputError:
+			if e.service && e.output != "" {
+				msg = strings.ReplaceAll(msg, e.Error(), e.summary)
+			}
+		case interface{ Unwrap() error }:
+			walk(e.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, e := range e.Unwrap() {
+				walk(e)
+			}
+		}
+	}
+	walk(err)
+	return msg
 }
 
 // vmOutput formats a VM's last output for an error: the last tailLines

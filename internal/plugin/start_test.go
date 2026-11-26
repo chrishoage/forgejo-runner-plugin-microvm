@@ -5,6 +5,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -379,6 +380,32 @@ func TestVMOutput(t *testing.T) {
 	} {
 		if got := vmOutput(tt.log, tt.console); got != tt.want {
 			t.Errorf("%s: vmOutput = %q, want %q", name, got, tt.want)
+		}
+	}
+}
+
+// withoutOutput cuts every service's outputError in an error's tree to its
+// summary, wrapped or joined, and leaves the rest of the message, the job's
+// container's output included, as it is.
+func TestWithoutOutput(t *testing.T) {
+	t.Parallel()
+	a := &outputError{"VM a (1)", "\nconsole:\nthe-secret", true}
+	b := &outputError{"VM b: the agent did not answer within 1s", "\nVM log:\nthe-secret", true}
+	job := &outputError{"VM job (1)", "\nconsole:\nthe-reason", false}
+	for name, tt := range map[string]struct {
+		err  error
+		want string
+	}{
+		"bare":         {a, "VM a (1)"},
+		"wrapped":      {fmt.Errorf("boot: %w", a), "boot: VM a (1)"},
+		"joined":       {errors.Join(a, errors.New("kill failed")), "VM a (1)\nkill failed"},
+		"two":          {errors.Join(fmt.Errorf("x: %w", a), b), "x: VM a (1)\nVM b: the agent did not answer within 1s"},
+		"no output":    {&outputError{"VM c (0)", "", true}, "VM c (0)"},
+		"job's":        {errors.Join(job, a), "VM job (1)\nconsole:\nthe-reason\nVM a (1)"},
+		"other errors": {errors.New("disk /d is in use"), "disk /d is in use"},
+	} {
+		if got := withoutOutput(tt.err); got != tt.want {
+			t.Errorf("%s: withoutOutput = %q, want %q", name, got, tt.want)
 		}
 	}
 }

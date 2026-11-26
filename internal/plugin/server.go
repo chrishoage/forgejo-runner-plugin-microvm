@@ -30,6 +30,7 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	pluginv1alpha "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/plugin/v1alpha"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
 )
 
 // Name is the plugin's name in Capabilities.
@@ -169,6 +170,25 @@ type Server struct {
 	newID func() (string, error)
 }
 
+// service is one of a job's services, as Create took it from the request.
+type service struct {
+	// key is the service's key in the workflow's services:, which messages
+	// quote.
+	key string
+	// name is its VM's name on the job network: key by the Docker
+	// backend's alias rule (serviceName).
+	name string
+	// hostname is its VM's kernel's hostname: name made a DNS label
+	// (dnsName).
+	hostname string
+	// image is the image its VM runs.
+	image string
+	// env is the service's own environment, laid over its image's. It may
+	// carry secrets, so it never shows in a log line or a host file: only
+	// its VM's StartService reveals it.
+	env secret.Env
+}
+
 // job is one job in the table, from Create to Remove.
 type job struct {
 	id    string
@@ -179,6 +199,9 @@ type job struct {
 	// hostname is the job's container's name on the job network: the
 	// runner's name for the job made DNS-safe (GST-12).
 	hostname string
+	// services are the workflow's services, in the order the runner lists
+	// them: VM i+1 of the job runs services[i].
+	services []service
 	// profileName names the profile the job's label picked, and profile is
 	// the job's copy of it, taken at Create: a later change of the config
 	// never changes it (CFG-7).
@@ -391,12 +414,6 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	// before that warns without it.
 	var env string
 	defer func() { s.warnIgnored(req, env) }()
-	if len(req.GetServices()) > 0 {
-		// The request is well formed; the plugin can't run services until
-		// the protocol carries per-service VM options (PROTO-6).
-		return nil, status.Error(codes.Unimplemented,
-			"runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM")
-	}
 	l, err := parseLabel(req.GetLabelArg())
 	if err != nil {
 		return nil, err
@@ -405,11 +422,6 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	if err != nil {
 		return nil, err
 	}
-	// The request is well formed; only the operator can make room for it.
-	if need := jobMemoryMiB(prof); !s.admission.Fits(need) {
-		return nil, status.Errorf(codes.FailedPrecondition,
-			"the job needs %d MiB of memory, more than max_memory_mib, %d MiB: it could never run", need, s.admission.Cap())
-	}
 	image := req.GetImage()
 	if image == "" {
 		image = l.image
@@ -417,16 +429,26 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	if image == "" {
 		return nil, status.Error(codes.InvalidArgument, "no image: neither the label nor the job's container: names one")
 	}
+	hostname := dnsName(req.GetName())
+	services, err := jobServices(req.GetName(), hostname, req.GetServices())
+	if err != nil {
+		return nil, err
+	}
+	// The request is well formed; only the operator can make room for it.
+	if need := jobMemoryMiB(prof, services); !s.admission.Fits(need) {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"the job needs %d MiB of memory, more than max_memory_mib, %d MiB: it could never run", need, s.admission.Cap())
+	}
 	// A missing or zero timeout sets no backstop.
 	timeout := req.GetEnvironmentTimeout().AsDuration()
 	// The backstop outlives Create, and its removal is never cancelled.
-	j, err := s.add(context.WithoutCancel(ctx), image, dnsName(req.GetName()), l.profile, prof, timeout)
+	j, err := s.add(context.WithoutCancel(ctx), image, hostname, services, l.profile, prof, timeout)
 	if err != nil {
 		return nil, err
 	}
 	env = j.id
 	s.log.Info("created", "env", j.id, "name", req.GetName(), "label", req.GetLabelArg(), "hostname", j.hostname, "image", image,
-		"profile", j.profileName,
+		"services", servicesAttr(services), "profile", j.profileName,
 		"environment_timeout", timeout,
 		"cpus", j.profile.CPUs, "memory_mib", j.profile.MemoryMiB, "scratch_gib", j.profile.ScratchGiB,
 		"scratch_paths", j.profile.ScratchPaths, "mounts", mountsAttr(j.profile.Mounts), "disks", disksAttr(j.profile.Disks), "force_pull", j.profile.ForcePull)
@@ -442,11 +464,68 @@ func (s *Server) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (
 	}, nil
 }
 
+// maxServices is the most services a job may have: the job network
+// addresses maxVMs VMs, the job's container being one.
+const maxServices = maxVMs - 1
+
+// jobServices returns the services of a job whose runner's name is jobName,
+// its container's hostname hostname, each named by the Docker backend's
+// alias rule (serviceName), its hostname that name made a DNS label, in
+// the order the runner lists them. More than maxServices fail with
+// FailedPrecondition: the request is well formed, but no setting can make
+// it run. A service with no name or no image fails with InvalidArgument:
+// the runner skips a service whose image is empty, so one reaching the
+// plugin is malformed. So do two VMs of the job with one name,
+// the job's container's hostname included, naming both: one name in
+// /etc/hosts can't reach two VMs.
+func jobServices(jobName, hostname string, reqs []*pluginv1alpha.ServiceContainer) ([]service, error) {
+	if len(reqs) > maxServices {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"the job has %d services, more than the %d a job network holds beside the job's container", len(reqs), maxServices)
+	}
+	// Each name taken, by the key it came from; the job's container's
+	// hostname is taken by no key.
+	taken := map[string]*string{hostname: nil}
+	out := make([]service, 0, len(reqs))
+	for _, r := range reqs {
+		key := r.GetName()
+		if key == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "a service has no name (its image is %q)", r.GetImage())
+		}
+		if r.GetImage() == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "service %q has no image", key)
+		}
+		name := serviceName(key)
+		if other, ok := taken[name]; ok {
+			if other == nil {
+				return nil, status.Errorf(codes.InvalidArgument,
+					"service %q and the job's container (job %q) both have the name %q on the job network", key, jobName, name)
+			}
+			return nil, status.Errorf(codes.InvalidArgument,
+				"services %q and %q both have the name %q on the job network", *other, key, name)
+		}
+		taken[name] = &key
+		out = append(out, service{key: key, name: name, hostname: dnsName(name), image: r.GetImage(), env: secret.EnvOf(r.GetEnv())})
+	}
+	return out, nil
+}
+
+// servicesAttr formats a job's services for a log line, as name=image,
+// comma-separated: never their environment, which may carry secrets.
+func servicesAttr(svcs []service) string {
+	parts := make([]string, len(svcs))
+	for i, svc := range svcs {
+		parts[i] = svc.name + "=" + svc.image
+	}
+	return strings.Join(parts, ",")
+}
+
 // warnIgnored logs one warning, at the first Create that carries any of
 // them, naming the request fields req carries that the plugin ignores:
 // backend_options (the runner's per-label options, which the config file
 // covers), cap_add and cap_drop (set only by forgejo-runner exec; steps run
-// as root with every capability, in a VM of their own). env is the job's
+// as root with every capability, in a VM of their own), and a service's
+// ports (services are reached by name only, by design). env is the job's
 // environment id, or empty when the Create failed before it had one.
 func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest, env string) {
 	var fields []string
@@ -458,6 +537,9 @@ func (s *Server) warnIgnored(req *pluginv1alpha.CreateRequest, env string) {
 	}
 	if len(req.GetCapDrop()) > 0 {
 		fields = append(fields, "cap_drop")
+	}
+	if slices.ContainsFunc(req.GetServices(), func(svc *pluginv1alpha.ServiceContainer) bool { return len(svc.GetPorts()) > 0 }) {
+		fields = append(fields, "ports")
 	}
 	if len(fields) == 0 || !s.warnedIgnored.CompareAndSwap(false, true) {
 		return
@@ -483,10 +565,16 @@ func (s *Server) isDraining() bool {
 	return s.draining
 }
 
-// jobMemoryMiB is a job's need from the memory budget: the sum of memory_mib
-// over its VMs. Today a job has one VM, the job's container (PROTO-6);
-// services will add theirs.
-func jobMemoryMiB(p config.Profile) uint64 { return uint64(p.MemoryMiB) }
+// jobMemoryMiB is the need from the memory budget of a job on profile p
+// with services: the sum of memory_mib over its VMs, each of which, the
+// job's container and every service, has the profile's.
+func jobMemoryMiB(p config.Profile, services []service) uint64 {
+	need := uint64(p.MemoryMiB)
+	for range services {
+		need += uint64(p.MemoryMiB)
+	}
+	return need
+}
 
 // lookupProfile returns a copy of the profile name names, or fails with
 // InvalidArgument naming arg, the label argument, when there is none
@@ -506,11 +594,11 @@ func (s *Server) lookupProfile(name, arg string) (config.Profile, error) {
 }
 
 // add puts a new job in the table, under a fresh environment id, with its
-// image, its hostname and its copy of the profile name names, and, for a
+// image, its hostname, its services and its copy of the profile name names, and, for a
 // timeout above 0, its backstop, which removes it with ctx. During a drain
 // it fails with Unavailable, so no job enters the table once the drain has
 // begun.
-func (s *Server) add(ctx context.Context, image, hostname, name string, prof config.Profile, timeout time.Duration) (*job, error) {
+func (s *Server) add(ctx context.Context, image, hostname string, services []service, name string, prof config.Profile, timeout time.Duration) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.draining {
@@ -525,7 +613,10 @@ func (s *Server) add(ctx context.Context, image, hostname, name string, prof con
 			continue
 		}
 		jobCtx, cancel := context.WithCancel(context.Background())
-		j := &job{id: id, image: image, created: time.Now(), hostname: hostname, profileName: name, profile: prof, ctx: jobCtx, cancel: cancel, mu: newJobLock()}
+		j := &job{
+			id: id, image: image, created: time.Now(), hostname: hostname, services: services, profileName: name, profile: prof,
+			ctx: jobCtx, cancel: cancel, mu: newJobLock(),
+		}
 		if timeout > 0 {
 			// It runs only once add has released s.mu.
 			j.backstop = time.AfterFunc(saturatingAdd(timeout, s.cfg.BackstopDelay), func() { s.removeForgotten(ctx, j, timeout) })

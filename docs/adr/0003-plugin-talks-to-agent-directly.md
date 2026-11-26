@@ -9,6 +9,6 @@ The plugin dials each VM's agent over the unix socket libkrun maps to the guest'
 
 ## Consequences
 
-- A VM is ready when its agent answers Ping, which the plugin learns by dialling the agent, not from a job process event. Today the job's container is the only VM, because the plugin protocol passes no VM options for services, so its agent is the only one dialled.
+- A VM's agent is up when it answers Ping, and the job's container is then ready; a service's VM is ready once the plugin's `StartService` to its agent succeeds. The plugin learns both by calling the agent, not from a job process event. Start dials every VM's agent, the job's container's and each service's, and keeps only the job's container's afterwards, since Exec and Copy name only the job.
 - Each VM's agent socket lives in `<runtime>/<id>/<n>/`, where the plugin can reach it, while the job process owns the VM behind it. The plugin's Exec and Copy go to the job's container's agent, because the plugin protocol's Exec and Copy name only the job, not a VM.
 - The epic's "job process ↔ agent protocol" is the plugin ↔ agent protocol.

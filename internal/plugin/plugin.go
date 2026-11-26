@@ -20,9 +20,8 @@ type ImageCache interface {
 	// Acquire returns req.Ref's image for the VM at index req.VM of req.Job,
 	// pulling and converting whatever the cache lacks, and creates that VM's
 	// layer link directory, <cache>/jobs/<id>/<n>/, keyed by the index, never
-	// the VM's name. Each VM gets its own Image, since each may bring its own
-	// image. Today only VM 0, the job's container, acquires one, because the
-	// plugin protocol passes no VM options for services.
+	// the VM's name. Each VM gets its own Image, since each service brings
+	// its own image. Start acquires every VM's at once.
 	Acquire(ctx context.Context, req imagecache.Request) (imagecache.Image, error)
 	// Release deletes the layer link directories of every VM of job at once,
 	// so their layers can be evicted. A job with none is not an error. It
