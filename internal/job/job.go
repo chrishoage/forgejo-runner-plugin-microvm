@@ -89,6 +89,10 @@ func Main(args []string) int {
 // this much too (PROTO-10, VM-8).
 const tailBytes = 4 << 10
 
+// maxVMs is the most VMs a job has: the job network's /24 gives the gateway
+// .1 and VM n .(2+n), up to .254.
+const maxVMs = 253
+
 // maxSpec bounds the job spec read from the control channel.
 const maxSpec = 1 << 20
 
@@ -135,10 +139,11 @@ func killGroup() {
 func killSelf() { _ = unix.Kill(os.Getpid(), unix.SIGKILL) }
 
 // Run is the job process: it reads the job spec from in, starts the job
-// network and attaches every VM to it, reports NetworkUp, runs its VM in a
-// VM child, and writes status events to out until the VM child exits. A VM
-// never boots before its switch serves its socket. Cancelling ctx kills the
-// VM child. live is the liveness pipe, which each VM child gets as its fd 3.
+// network and attaches every VM to it, reports NetworkUp, runs each VM in a
+// VM child of its own, all at once, and writes status events to out until
+// every VM child has exited (runVMs). A VM never boots before its switch
+// serves its socket. Cancelling ctx kills every VM child. live is the
+// liveness pipe, which each VM child gets as its fd 3.
 //
 // Every child, each VM child and mkfs, is forked with Pdeathsig SIGKILL
 // from a locked OS thread of Run's own, which lives until Run returns, by
@@ -158,8 +163,8 @@ func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *th
 	if err := (protodelim.UnmarshalOptions{MaxSize: maxSpec}).UnmarshalFrom(bufio.NewReader(in), spec); err != nil {
 		return failBug(out, fmt.Errorf("read the job spec: %w", err))
 	}
-	if n := len(spec.GetVms()); n != 1 {
-		return failBug(out, fmt.Errorf("the job spec has %d VMs; a job has exactly one, the job's container", n))
+	if n := len(spec.GetVms()); n < 1 || n > maxVMs {
+		return failBug(out, fmt.Errorf("the job spec has %d VMs; a job has 1 to %d, the job's container first", n, maxVMs))
 	}
 	// The plugin always sets it: any other value is its bug.
 	if err := logging.SetLevel(level, spec.GetLogLevel()); err != nil {
@@ -183,18 +188,7 @@ func run(ctx context.Context, in io.Reader, out io.Writer, live *os.File, th *th
 	if err := send(out, &jobv1.Event{Event: &jobv1.Event_NetworkUp{NetworkUp: &jobv1.NetworkUp{}}}); err != nil {
 		return err
 	}
-	v := spec.GetVms()[0]
-	code, err := runVM(ctx, spec, v, links[0], live, th, out, log)
-	if err != nil {
-		return fail(out, err)
-	}
-	log.Info("VM exited", "vm", v.GetName(), "exit_code", code)
-	return send(out, &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
-		Vm:          0,
-		ExitCode:    code,
-		ConsoleTail: tail(v.GetConsole()),
-		LogTail:     tail(v.GetVmLog()),
-	}}})
+	return runVMs(ctx, spec, links, live, th, out, log)
 }
 
 // startNetwork starts the spec's job network and attaches each of its VMs,
@@ -252,62 +246,207 @@ func networkConfig(spec *jobv1.Spec) (jobnet.Config, error) {
 	return cfg, nil
 }
 
-// runVM starts VM 0's VM child on th, with the liveness pipe live as its
-// fd 3 and link, its VM's end of its frame socket, as its fd 4, reports
-// VMStarted, and waits for it to exit. It returns the VM child's exit code,
-// 128+n when signal n ended it.
-//
-// Its error names the cause first, as Start's error shows it (PROTO-10): a
-// mount or a disk, by its source, the scratch disk, whose path names its
-// VM's directory, or the VM.
-func runVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
-	if err := checkMounts(v.GetMounts()); err != nil {
-		return 0, err
-	}
-	disks, err := openDisks(v.GetDisks())
-	if err != nil {
-		return 0, err
-	}
-	// The job process holds its VM's disks until the VM child has exited.
-	defer closeAll(disks)
-	if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
-		return 0, fmt.Errorf("scratch disk: %s: %w", v.GetScratchDisk(), err)
-	}
-	code, err := startVM(ctx, spec, v, link, live, disks, th, out, log)
-	if err != nil {
-		return 0, fmt.Errorf("VM %s: %w", v.GetName(), err)
-	}
-	return code, nil
+// preparedVM is one of the job's VMs ready for its VM child: its mounts
+// checked, its disks open and locked, and its scratch disk made.
+type preparedVM struct {
+	index int
+	vm    *jobv1.VM
+	// link is its VM's end of its frame socket.
+	link *os.File
+	// disks[i] is vm.Disks[i]'s file.
+	disks []*os.File
 }
 
-// startVM is runVM once the VM's disks are open, disks[i] being
-// v.Disks[i]'s file, and its scratch disk is made.
-func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.File, disks []*os.File, th *thread, out io.Writer, log *slog.Logger) (int32, error) {
+// vmExit is how one VM child ended: its exit code, 128+n when signal n
+// ended it, or the error its wait returned.
+type vmExit struct {
+	index int
+	code  int32
+	err   error
+}
+
+// runVMs runs the job's VMs, links[i] being VM i's end of its frame socket:
+// it prepares each VM in the spec's order, then starts every VM child, each
+// on th with the liveness pipe live as its fd 3 and its link as its fd 4,
+// reporting each one's VMStarted, and reports each one's VMExited as it
+// exits, until every VM child has exited and been waited for.
+//
+// A VM other than the job's container exiting doesn't end the job. The
+// job's container exiting does: runVMs kills the other VM children, reports
+// each one's VMExited once it is reaped, and returns. A VM that can't be
+// prepared fails the job before any VM child starts; one whose VM child
+// can't start fails it once the VM children already started are killed and
+// reaped, with no VMExited for them, so Failed is the plugin's first word on
+// why. A send nobody reads kills every VM child too.
+//
+// Failed's reason names the cause first, as Start's error shows it
+// (PROTO-10): a mount or a disk, by its source, the scratch disk, whose path
+// names its VM's directory, or the VM.
+func runVMs(ctx context.Context, spec *jobv1.Spec, links []*os.File, live *os.File, th *thread, out io.Writer, log *slog.Logger) error {
+	vms, err := prepareVMs(ctx, spec, links, th)
+	if err != nil {
+		return fail(out, err)
+	}
+	// The job process holds each VM's disks until its VM child has exited.
+	// Closing a VM's files again does nothing.
+	defer func() {
+		for _, v := range vms {
+			closeAll(v.disks)
+		}
+	}()
+	exits := make(chan vmExit, len(vms))
+	cmds := make([]*exec.Cmd, len(vms))
+	running := 0
+	var startErr, sendErr error
+	for i, v := range vms {
+		cmd, err := startVM(ctx, spec, v, live, th, log)
+		if err != nil {
+			startErr = fmt.Errorf("VM %s: %w", v.vm.GetName(), err)
+			break
+		}
+		cmds[i] = cmd
+		running++
+		go func() { exits <- waitVM(i, cmd) }()
+		err = send(out, &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{
+			Vm: uint32(i), Pid: int32(cmd.Process.Pid), //nolint:gosec // G115: an index is below maxVMs, and a pid fits in an int32
+		}}})
+		if err != nil {
+			// Nobody reads the control channel: the job is of no use.
+			sendErr = err
+			break
+		}
+	}
+	if startErr != nil || sendErr != nil {
+		killAll(cmds)
+		for ; running > 0; running-- {
+			closeAll(vms[(<-exits).index].disks)
+		}
+		if startErr != nil {
+			return fail(out, startErr)
+		}
+		return sendErr
+	}
+	var waitErr error
+	for ; running > 0; running-- {
+		x := <-exits
+		closeAll(vms[x.index].disks)
+		v := vms[x.index].vm
+		switch {
+		case waitErr != nil || sendErr != nil:
+			// The job is ending: the rest are only reaped.
+			continue
+		case x.err != nil:
+			waitErr = fmt.Errorf("VM %s: %w", v.GetName(), x.err)
+			killAll(cmds)
+			continue
+		}
+		log.Info("VM exited", "vm", v.GetName(), "index", x.index, "exit_code", x.code)
+		err := send(out, &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
+			Vm:          uint32(x.index), //nolint:gosec // G115: an index is below maxVMs
+			ExitCode:    x.code,
+			ConsoleTail: tail(v.GetConsole()),
+			LogTail:     tail(v.GetVmLog()),
+		}}})
+		if err != nil {
+			sendErr = err
+			killAll(cmds)
+			continue
+		}
+		if x.index == 0 && running > 1 {
+			log.Info("the job's container exited; stopping the job's other VMs", "vms", running-1)
+			killAll(cmds)
+		}
+	}
+	if waitErr != nil {
+		return fail(out, waitErr)
+	}
+	return sendErr
+}
+
+// prepareVMs prepares each of the spec's VMs, in its order, links[i] being
+// VM i's end of its frame socket: it checks the VM's mounts, opens and locks
+// its disks, and makes its scratch disk. On error it closes every disk it
+// opened, which releases their locks.
+func prepareVMs(ctx context.Context, spec *jobv1.Spec, links []*os.File, th *thread) (vms []*preparedVM, err error) {
+	defer func() {
+		if err != nil {
+			for _, v := range vms {
+				closeAll(v.disks)
+			}
+			vms = nil
+		}
+	}()
+	for i, v := range spec.GetVms() {
+		if err := checkMounts(v.GetMounts()); err != nil {
+			return vms, err
+		}
+		disks, err := openDisks(v.GetDisks())
+		if err != nil {
+			return vms, err
+		}
+		vms = append(vms, &preparedVM{index: i, vm: v, link: links[i], disks: disks})
+		if err := createScratchDisk(ctx, th, spec.GetMkfsExt4(), v.GetScratchDisk(), v.GetScratchSizeBytes()); err != nil {
+			return vms, fmt.Errorf("scratch disk: %s: %w", v.GetScratchDisk(), err)
+		}
+	}
+	return vms, nil
+}
+
+// killAll kills each VM child that has started. One that has exited
+// already is left alone.
+func killAll(cmds []*exec.Cmd) {
+	for _, cmd := range cmds {
+		if cmd != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+}
+
+// waitVM waits for VM index's VM child, cmd, to exit.
+func waitVM(index int, cmd *exec.Cmd) vmExit {
+	err := cmd.Wait()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		return vmExit{index: index, err: err}
+	}
+	ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if ws.Signaled() {
+		return vmExit{index: index, code: 128 + int32(ws.Signal())} //nolint:gosec // G115: a signal number is below 65
+	}
+	return vmExit{index: index, code: int32(ws.ExitStatus())} //nolint:gosec // G115: an exit status is 0 to 255
+}
+
+// startVM starts v's VM child on th, with the liveness pipe live as its
+// fd 3, its link as its fd 4 and its disks as fd 5 and up, and returns it
+// running. Once it has started, only the VM child holds v's link.
+func startVM(ctx context.Context, spec *jobv1.Spec, v *preparedVM, live *os.File, th *thread, log *slog.Logger) (*exec.Cmd, error) {
+	vm := v.vm
 	childSpec, err := specFile(&vmv1.Spec{
 		LibDir:          spec.GetLibDir(),
 		LibkrunLogLevel: spec.GetLibkrunLogLevel(),
 		LogLevel:        spec.GetLogLevel(),
-		Cpus:            v.GetCpus(),
-		MemoryMib:       v.GetMemoryMib(),
-		RootDir:         v.GetRootDir(),
-		ScratchDisk:     v.GetScratchDisk(),
-		LayerDir:        v.GetLayerDir(),
-		LayerTag:        v.GetLayerTag(),
-		Mounts:          childMounts(v.GetMounts()),
-		Disks:           childDisks(v.GetDisks()),
-		Console:         v.GetConsole(),
-		AgentSocket:     v.GetAgentSocket(),
-		AgentPort:       v.GetAgentPort(),
-		GuestMac:        v.GetGuestMac(),
-		Boot:            v.GetBoot(),
+		Cpus:            vm.GetCpus(),
+		MemoryMib:       vm.GetMemoryMib(),
+		RootDir:         vm.GetRootDir(),
+		ScratchDisk:     vm.GetScratchDisk(),
+		LayerDir:        vm.GetLayerDir(),
+		LayerTag:        vm.GetLayerTag(),
+		Mounts:          childMounts(vm.GetMounts()),
+		Disks:           childDisks(vm.GetDisks()),
+		Console:         vm.GetConsole(),
+		AgentSocket:     vm.GetAgentSocket(),
+		AgentPort:       vm.GetAgentPort(),
+		GuestMac:        vm.GetGuestMac(),
+		Boot:            vm.GetBoot(),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("VM child spec: %w", err)
+		return nil, fmt.Errorf("VM child spec: %w", err)
 	}
+	// The VM child has its own copies once it has started.
 	defer func() { _ = childSpec.Close() }()
-	vmLog, err := os.OpenFile(v.GetVmLog(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	vmLog, err := os.OpenFile(vm.GetVmLog(), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return 0, fmt.Errorf("VM log: %w", err)
+		return nil, fmt.Errorf("VM log: %w", err)
 	}
 	defer func() { _ = vmLog.Close() }()
 	// The VM child stays in the job process's group, so killing the group
@@ -320,34 +459,16 @@ func startVM(ctx context.Context, spec *jobv1.Spec, v *jobv1.VM, link, live *os.
 	cmd.Stdout, cmd.Stderr = vmLog, vmLog
 	// fd 3 is the liveness pipe, fd 4 its VM's end of the frame socket,
 	// and fd 5 and up its disks, in order.
-	cmd.ExtraFiles = append([]*os.File{live, link}, disks...)
+	cmd.ExtraFiles = append([]*os.File{live, v.link}, v.disks...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if err := th.do(ctx, cmd.Start); err != nil {
-		return 0, fmt.Errorf("start the VM child: %w", err)
+		return nil, fmt.Errorf("start the VM child: %w", err)
 	}
 	// Only the VM child holds the VM's end now, so once it exits the
 	// switch's writes to it fail instead of filling its buffer.
-	_ = link.Close()
-	log.Info("VM started", "vm", v.GetName(), "pid", cmd.Process.Pid)
-	err = send(out, &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{
-		Vm: 0, Pid: int32(cmd.Process.Pid), //nolint:gosec // G115: a pid fits in an int32
-	}}})
-	if err != nil {
-		// Nobody reads the control channel: the VM is of no use.
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return 0, err
-	}
-	err = cmd.Wait()
-	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) {
-		return 0, err
-	}
-	ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	if ws.Signaled() {
-		return 128 + int32(ws.Signal()), nil //nolint:gosec // G115: a signal number is below 65
-	}
-	return int32(ws.ExitStatus()), nil //nolint:gosec // G115: an exit status is 0 to 255
+	_ = v.link.Close()
+	log.Info("VM started", "vm", vm.GetName(), "index", v.index, "pid", cmd.Process.Pid)
+	return cmd, nil
 }
 
 // checkMounts checks each mount's source again, before the VM child starts:
