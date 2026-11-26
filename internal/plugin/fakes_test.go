@@ -84,8 +84,13 @@ func newTestServer(t *testing.T, cache *fakeCache, launcher *fakeLauncher) *Serv
 type fakeCache struct {
 	// dir is the cache directory; newTestServer sets it.
 	dir string
-	// err fails Acquire.
-	err error
+	// err fails Acquire; refErr fails the Acquire of an image by its
+	// reference.
+	err    error
+	refErr map[string]error
+	// commandless are the references whose image has neither an
+	// Entrypoint nor a Cmd; every other image has both.
+	commandless map[string]bool
 	// block makes Acquire send its job on entered, then wait for its
 	// context, or for release to close when it is set.
 	block   bool
@@ -126,6 +131,9 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 	if c.err != nil {
 		return imagecache.Image{}, c.err
 	}
+	if err := c.refErr[req.Ref]; err != nil {
+		return imagecache.Image{}, err
+	}
 	link := filepath.Join(c.dir, "jobs", req.Job, strconv.Itoa(req.VM))
 	if err := os.MkdirAll(link, 0o700); err != nil {
 		return imagecache.Image{}, err
@@ -135,15 +143,21 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 			return imagecache.Image{}, err
 		}
 	}
-	return imagecache.Image{
+	img := imagecache.Image{
 		Digest:     "sha256:0",
 		Env:        []string{"PATH=/usr/bin:/bin", "A=b=c"},
 		User:       "builder:staff",
 		WorkingDir: "/src",
+		Entrypoint: []string{"entrypoint.sh"},
+		Cmd:        []string{"serve", "--port", "6379"},
 		LinkDir:    link,
 		Layers:     []string{"0.erofs", "1.erofs"},
 		Pulled:     1,
-	}, nil
+	}
+	if c.commandless[req.Ref] {
+		img.Entrypoint, img.Cmd = nil, nil
+	}
+	return img, nil
 }
 
 func (c *fakeCache) Release(_ context.Context, job string) error {
@@ -166,6 +180,9 @@ const (
 	// The VM exits during boot, with the tails of bootConsole and
 	// bootLog.
 	exitsDuringBoot
+	// Every VM but the last boots and its agent answers; the last, a
+	// service's, exits during boot, as exitsDuringBoot.
+	lastExitsDuringBoot
 	// The VM never answers; its console and VM log files hold
 	// bootConsole and bootLog.
 	hangs
@@ -216,6 +233,12 @@ type fakeLauncher struct {
 	err   error
 	does  behaviour
 	agent agentv1.AgentServiceServer
+	// vmAgents, when it has one for a VM's index, is that VM's agent in
+	// place of agent.
+	vmAgents map[int]agentv1.AgentServiceServer
+	// bootOutput makes each VM whose agent is served write bootConsole and
+	// bootLog to its console and VM log files, in place of nothing.
+	bootOutput bool
 
 	mu      sync.Mutex
 	specs   []*jobv1.Spec
@@ -231,24 +254,33 @@ type fakeProcess struct {
 	events chan *jobv1.Event
 	exited chan struct{}
 	once   sync.Once
+	// agents are the agents it serves, VM 0's first.
+	agents []*fakeServedAgent
+}
+
+// fakeServedAgent is a fake VM's agent, served on its agent socket.
+type fakeServedAgent struct {
 	gs     *grpc.Server
 	served chan struct{}
 	// dir is the agent socket's directory, which the fake binds through.
 	dir *sockDir
 }
 
-// end ends the fake job process: its agent goes, then, after the events
+// stop stops serving a, and waits until it has.
+func (a *fakeServedAgent) stop() {
+	a.gs.Stop()
+	<-a.served
+}
+
+// end ends the fake job process: its agents go, then, after the events
 // last says, its events end and it exits, as a job process does.
 func (p *fakeProcess) end(last ...*jobv1.Event) {
 	p.once.Do(func() {
-		if p.gs != nil {
-			p.gs.Stop()
-			<-p.served
-		}
-		// The listener unlinks its socket through the directory, so the
-		// directory closes after it.
-		if p.dir != nil {
-			_ = p.dir.Close()
+		for _, a := range p.agents {
+			a.stop()
+			// The listener unlinks its socket through the directory, so
+			// the directory closes after it.
+			_ = a.dir.Close()
 		}
 		for _, ev := range last {
 			p.events <- ev
@@ -266,41 +298,33 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 	if l.err != nil {
 		return nil, l.err
 	}
-	events := make(chan *jobv1.Event, 4)
+	// As many events as the job launcher buffers.
+	events := make(chan *jobv1.Event, 2+2*len(spec.GetVms()))
 	fp := &fakeProcess{events: events, exited: make(chan struct{})}
 	p := &joblaunch.Process{Events: events, Exited: fp.exited}
 	switch l.does {
-	case boots:
-		// Like the job process and its VM child, it writes the job
-		// process log and the VM's scratch disk, VM log and console.
-		vm := spec.GetVms()[0]
-		for _, f := range []string{logPath, vm.GetScratchDisk(), vm.GetVmLog(), vm.GetConsole()} {
-			if err := os.WriteFile(f, nil, 0o600); err != nil {
+	case boots, lastExitsDuringBoot:
+		if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+			return nil, err
+		}
+		vms := spec.GetVms()
+		if l.does == lastExitsDuringBoot {
+			vms = vms[:len(vms)-1]
+		}
+		for i, vm := range vms {
+			a, err := l.serveAgent(ctx, i, vm)
+			if err != nil {
+				fp.end()
 				return nil, err
 			}
+			fp.agents = append(fp.agents, a)
+			events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Vm: uint32(i), Pid: 42}}}
 		}
-		// Like the VM child, it binds the agent socket relative to its
-		// directory, as the full path can outgrow bind's 107 bytes.
-		sock := spec.GetVms()[0].GetAgentSocket()
-		dir, err := openSockDir(filepath.Dir(sock))
-		if err != nil {
-			return nil, err
+		if l.does == lastExitsDuringBoot {
+			events <- &jobv1.Event{Event: &jobv1.Event_VmExited{VmExited: &jobv1.VMExited{
+				Vm: uint32(len(vms)), ExitCode: 1, ConsoleTail: bootConsole, LogTail: bootLog[len(bootLog)-4096:],
+			}}}
 		}
-		lis, err := new(net.ListenConfig).Listen(ctx, "unix", dir.path(filepath.Base(sock)))
-		if err != nil {
-			_ = dir.Close()
-			return nil, err
-		}
-		fp.dir = dir
-		agent := l.agent
-		if agent == nil {
-			agent = &fakeAgent{}
-		}
-		fp.gs = grpc.NewServer()
-		agentv1.RegisterAgentServiceServer(fp.gs, agent)
-		fp.served = make(chan struct{})
-		go func() { defer close(fp.served); _ = fp.gs.Serve(lis) }()
-		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
 	case exitsDuringBoot:
 		// The job process's tails are the files' last 4 KiB.
 		events <- &jobv1.Event{Event: &jobv1.Event_VmStarted{VmStarted: &jobv1.VMStarted{Pid: 42}}}
@@ -336,6 +360,44 @@ func (l *fakeLauncher) Launch(ctx context.Context, spec *jobv1.Spec, logPath str
 	l.running[p] = fp
 	l.byJob[spec.GetJob()] = fp
 	return p, nil
+}
+
+// serveAgent does what the VM child of vm, at index in the job spec, and its agent do once the agent
+// listens: it writes the VM's scratch disk, VM log and console, and serves
+// l's agent on the VM's agent socket, bound relative to its directory, as
+// the full path can outgrow bind's 107 bytes.
+func (l *fakeLauncher) serveAgent(ctx context.Context, index int, vm *jobv1.VM) (*fakeServedAgent, error) {
+	for _, f := range []string{vm.GetScratchDisk(), vm.GetVmLog(), vm.GetConsole()} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			return nil, err
+		}
+	}
+	if l.bootOutput {
+		if err := writeBootOutput(vm); err != nil {
+			return nil, err
+		}
+	}
+	sock := vm.GetAgentSocket()
+	dir, err := openSockDir(filepath.Dir(sock))
+	if err != nil {
+		return nil, err
+	}
+	lis, err := new(net.ListenConfig).Listen(ctx, "unix", dir.path(filepath.Base(sock)))
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	agent := l.agent
+	if a := l.vmAgents[index]; a != nil {
+		agent = a
+	}
+	if agent == nil {
+		agent = &fakeAgent{}
+	}
+	a := &fakeServedAgent{gs: grpc.NewServer(), served: make(chan struct{}), dir: dir}
+	agentv1.RegisterAgentServiceServer(a.gs, agent)
+	go func() { defer close(a.served); _ = a.gs.Serve(lis) }()
+	return a, nil
 }
 
 func (l *fakeLauncher) Kill(_ context.Context, p *joblaunch.Process) error {
@@ -377,11 +439,25 @@ func (l *fakeLauncher) breakAgent(t *testing.T, id string) {
 	l.mu.Lock()
 	fp := l.byJob[id]
 	l.mu.Unlock()
-	if fp == nil || fp.gs == nil {
+	if fp == nil || len(fp.agents) == 0 {
 		t.Fatalf("no agent of %s was served", id)
 	}
-	fp.gs.Stop()
-	<-fp.served
+	fp.agents[0].stop()
+}
+
+// exitVM makes VM i of the job id's job process exit on its own, as a
+// service's VM does: its agent's connection breaks, then the job process
+// reports ev, and the job process and its other VMs run on.
+func (l *fakeLauncher) exitVM(t *testing.T, id string, i int, ev *jobv1.Event) {
+	t.Helper()
+	l.mu.Lock()
+	fp := l.byJob[id]
+	l.mu.Unlock()
+	if fp == nil || len(fp.agents) <= i {
+		t.Fatalf("no agent of VM %d of %s was served", i, id)
+	}
+	fp.agents[i].stop()
+	fp.events <- ev
 }
 
 // report makes the job process of the job id report ev while its agent
@@ -419,6 +495,11 @@ type fakeAgent struct {
 
 func (*fakeAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
 	return &agentv1.PingResponse{}, nil
+}
+
+// StartService starts nothing, and succeeds.
+func (*fakeAgent) StartService(context.Context, *agentv1.StartServiceRequest) (*agentv1.StartServiceResponse, error) {
+	return &agentv1.StartServiceResponse{}, nil
 }
 
 // Exec writes its argv and working directory to stdout, its env's A to

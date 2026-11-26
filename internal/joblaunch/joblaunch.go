@@ -26,10 +26,8 @@ import (
 
 // Process is the plugin's handle on one running job process.
 //
-// The caller may stop reading Events at any time, for example after the job's
-// container's VMStarted, once it dials that VM's agent to learn when it
-// answers Ping; today the job's container is the only VM, because the plugin
-// protocol passes no VM options for services. The launcher
+// The caller may stop reading Events at any time, for example once every
+// VM of the job is ready. The launcher
 // reads the job process's stdout to its end whether or not anyone reads
 // Events, so Exited and Kill never wait on the caller.
 type Process struct {

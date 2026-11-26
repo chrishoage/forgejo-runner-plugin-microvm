@@ -1,6 +1,6 @@
 # runner-microvm
 
-A backend plugin for forgejo-runner that runs each job's VMs as microVMs: the job's container and, once the plugin protocol can configure them, its services.
+A backend plugin for forgejo-runner that runs each job's VMs as microVMs: the job's container and its services.
 
 ## Jobs and the runner
 
@@ -27,10 +27,10 @@ The plugin's own removal of a job the runner has not removed by the job's enviro
 _Avoid_: reaper (reaping is of processes), expiry
 
 **Label**:
-A runner label routed to the plugin, naming an image and optionally a profile. Today it is the only way a job chooses its VM, because the plugin protocol passes no per-job VM options.
+A runner label routed to the plugin, naming an image and optionally a profile. Today it is the only way a job chooses the shape of its VMs, because the plugin protocol passes no per-job or per-service VM options.
 
 **Profile**:
-A named VM shape (CPUs, memory, scratch size, mounts, disks) that an operator defines. Today a label selects it, and it is the only source of a VM's shape and storage, applied only to the job's container, because the plugin protocol passes no per-job or per-service VM options.
+A named VM shape (CPUs, memory, scratch size, scratch paths, mounts, disks) that an operator defines. Today a label selects it, and it is the only source of a VM's shape and storage, because the plugin protocol passes no per-job or per-service VM options. The job's container takes all of it; each service takes its shape (CPUs, memory, scratch size and scratch paths, and `force_pull`) but not its mounts or disks, which are the job's storage.
 _Avoid_: flavour, template, size
 
 **Memory budget**:
@@ -103,6 +103,10 @@ _Avoid_: sandbox, container (except in "the job's container"), guest (except for
 **Job's container**:
 The VM a job's steps run in, booted from the job's image; always the first VM in the job spec, index 0. Each service is another VM of the same job, on the same job network.
 
+**Service**:
+One entry of a workflow's `services:`, run as a VM of its job, on the job network, with the shape of the job's profile.
+_Avoid_: sidecar, service container (except when quoting the workflow)
+
 **Agent**:
 The program injected into every VM that prepares it at boot, runs commands and copies files in and out, or runs its service once the plugin asks it to start it. It is up when it answers Ping. The job's steps run through the job's container's agent.
 _Avoid_: guest daemon, init
@@ -149,10 +153,10 @@ A VM's view of the image cache, holding exactly the layers of that VM's image.
 The small read-only directory a VM boots from, holding the agent and its boot config, and the bottom layer of the VM's root filesystem.
 
 **Mount**:
-A host directory shared into a VM. Today only the label's profile names mounts, for the job's container, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
+A host directory shared into a VM. Today only the label's profile names mounts, for the job's container and never a service, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 
 **Disk**:
-A host file attached to a VM as a block device. Today only the label's profile names disks, for the job's container, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
+A host file attached to a VM as a block device. Today only the label's profile names disks, for the job's container and never a service, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin protocol doesn't pass it today.
 
 **Disk lock**:

@@ -101,6 +101,38 @@ func TestStartFailedCarriesEnv(t *testing.T) {
 	}
 }
 
+// A failed Start's line keeps a service VM's error's summary, the VM's
+// name and exit code, and leaves out its log and console tails, which the
+// runner gets: a service's console holds its own output, produced under its
+// env, and the plugin's log masks nothing.
+func TestStartFailedLogsNoVMOutput(t *testing.T) {
+	t.Parallel()
+	c, log := loggedServer(t, &fakeCache{}, &fakeLauncher{does: lastExitsDuringBoot}, slog.LevelInfo)
+	id := createWithServices(t, c, "build", svc("cache", "redis:8"))
+	const marker = "console line 25"
+	_, err := start(testContext(t), c, id)
+	if !strings.Contains(status.Convert(err).Message(), marker) {
+		t.Errorf("Start = %v; want the service's console tail, %q", err, marker)
+	}
+	wantLine(t, log.String(), "start failed", regexp.QuoteMeta(`err="VM cache exited during boot (1)"`))
+	if strings.Contains(log.String(), marker) || strings.Contains(log.String(), "log line 10") {
+		t.Errorf("the plugin's log has the VM's output:\n%s", log.String())
+	}
+}
+
+// A failed Start's line keeps the job's container's log and console tails:
+// its console holds only the kernel's and the agent's output, which LOG-2
+// keeps free of secrets, and they say why it failed to boot.
+func TestStartFailedLogsTheJobsContainerOutput(t *testing.T) {
+	t.Parallel()
+	c, log := loggedServer(t, &fakeCache{}, &fakeLauncher{does: exitsDuringBoot}, slog.LevelInfo)
+	id := create(t, c)
+	if _, err := start(testContext(t), c, id); err == nil {
+		t.Fatal("Start succeeded")
+	}
+	wantLine(t, log.String(), "start failed", regexp.QuoteMeta(`err="VM job exited during boot (1)\nVM log:\n`), "log line 10", "console line 25")
+}
+
 // At debug, each Exec, CopyIn and CopyOut logs one line carrying env=,
 // argv[0] for an Exec, never another argument or any environment, and the
 // path for a copy, each with its exit code or bytes copied and its time.

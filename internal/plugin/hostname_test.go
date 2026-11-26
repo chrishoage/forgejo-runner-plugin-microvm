@@ -35,3 +35,26 @@ func TestDNSName(t *testing.T) {
 		}
 	}
 }
+
+// A service's key becomes its name by the Docker backend's alias rule:
+// lower case, each character outside a-z0-9- one `_`, with no cut.
+func TestServiceName(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 100)
+	for _, tc := range []struct{ desc, key, want string }{
+		{"already a name", "redis", "redis"},
+		{"upper case and a dot", "My.DB", "my_db"},
+		{"underscores are kept", "my_db", "my_db"},
+		{"hyphens are kept", "-a--b-", "-a--b-"},
+		{"each character, not each run", "a  b./c", "a__b__c"},
+		{"no length cut", long, long},
+		{"non-ASCII, one _ each", "Ünï ジョ", "_n____"},
+		{"non-ASCII upper case is not lowered", "ÀB", "_b"},
+		{"invalid UTF-8, one _ per byte", "a\xff\xfeb", "a__b"},
+		{"empty", "", ""},
+	} {
+		if got := serviceName(tc.key); got != tc.want {
+			t.Errorf("%s: serviceName(%q) = %q, want %q", tc.desc, tc.key, got, tc.want)
+		}
+	}
+}

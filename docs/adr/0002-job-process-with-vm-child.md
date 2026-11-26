@@ -9,7 +9,7 @@ Each job runs in its own job process, which owns the job's network, disk locks a
 
 ## Consequences
 
-- Each job has host processes of its own beside the shared plugin: the job process and one VM child for each of its VMs. Today a job has one VM, the job's container, because the plugin protocol passes no VM options for services, so it has two.
+- Each job has host processes of its own beside the shared plugin: the job process and one VM child for each of its VMs. A job has one VM for its container and one for each service, so a job without services has two.
 - The job binary has two entry points, the job process and `vm`. Nothing ever execs `os.Executable()`: the binary's path always comes from the spec, so a test binary can't recurse.
 - Each VM child's inputs are inherited: its spec on stdin, the liveness pipe on fd 3, its VM's end of the job network socket on fd 4 and each of its VM's read-write disks' locked file from fd 5. The disk lock lasts as long as any process that can write the disk.
 - A VM child is not the plugin's child, so the plugin is a child subreaper (`PR_SET_CHILD_SUBREAPER`): it inherits each VM child whose job process dies and reaps it. A job's disks are freed only once its whole process group, VM children included, has exited and been reaped, so the next job on a disk never finds it still locked by a dying VM child.

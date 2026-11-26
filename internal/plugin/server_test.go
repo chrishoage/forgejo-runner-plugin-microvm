@@ -149,32 +149,6 @@ func TestRunnerArch(t *testing.T) {
 	}
 }
 
-// A job with services is well formed, but the plugin can't run them yet, so
-// Create fails with Unimplemented (PROTO-6), whatever else the request
-// holds, and adds no job.
-func TestCreateRefusesServices(t *testing.T) {
-	t.Parallel()
-	srv := newTestServer(t, &fakeCache{}, &fakeLauncher{})
-	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
-	services := []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}}
-	const want = "runner-microvm does not run services: the plugin protocol passes no options to configure a service's VM"
-	for name, req := range map[string]*pluginv1alpha.CreateRequest{
-		"label image":     {LabelArg: testImage, Services: services},
-		"container image": {LabelArg: ";", Image: testImage, Services: services},
-		"no image":        {Services: services},
-	} {
-		_, err := c.Create(testContext(t), req)
-		if status.Code(err) != codes.Unimplemented || status.Convert(err).Message() != want {
-			t.Errorf("%s: Create = %v; want Unimplemented: %s", name, err, want)
-		}
-	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	if n := len(srv.jobs); n != 0 {
-		t.Errorf("%d jobs in the table after refused Creates", n)
-	}
-}
-
 // A job's container: image is the one it boots, in place of the label's;
 // without one, the label's (PROTO-4). The label's profile applies either
 // way.
@@ -227,9 +201,14 @@ func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
 		{"backend_options", &pluginv1alpha.CreateRequest{BackendOptions: map[string]string{"flavour": "big"}}, "backend_options"},
 		{"cap_add", &pluginv1alpha.CreateRequest{CapAdd: []string{"NET_ADMIN"}}, "cap_add"},
 		{"cap_drop", &pluginv1alpha.CreateRequest{CapDrop: []string{"CHOWN"}}, "cap_drop"},
-		{"all three", &pluginv1alpha.CreateRequest{
+		// Services are reached by name only, by design.
+		{"ports", &pluginv1alpha.CreateRequest{Services: []*pluginv1alpha.ServiceContainer{
+			{Name: "web", Image: "nginx"}, {Name: "db", Image: "postgres", Ports: []string{"5432:5432"}},
+		}}, "ports"},
+		{"all four", &pluginv1alpha.CreateRequest{
 			BackendOptions: map[string]string{"flavour": "big"}, CapAdd: []string{"NET_ADMIN"}, CapDrop: []string{"CHOWN"},
-		}, "backend_options,cap_add,cap_drop"},
+			Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres", Ports: []string{"5432"}}},
+		}, "backend_options,cap_add,cap_drop,ports"},
 		// A refused Create still carries them: they do nothing either way.
 		{"refused", &pluginv1alpha.CreateRequest{CapAdd: []string{"NET_ADMIN"}, Services: []*pluginv1alpha.ServiceContainer{{Name: "db"}}}, "cap_add"},
 	} {
@@ -253,6 +232,7 @@ func TestCreateWarnsOnceOfIgnoredFields(t *testing.T) {
 			}
 			second := &pluginv1alpha.CreateRequest{
 				LabelArg: testImage, BackendOptions: map[string]string{"k": "v"}, CapAdd: []string{"SYS_ADMIN"}, CapDrop: []string{"ALL"},
+				Services: []*pluginv1alpha.ServiceContainer{{Name: "cache", Image: "redis", Ports: []string{"6379"}}},
 			}
 			if _, err := c.Create(testContext(t), second); err != nil {
 				t.Fatal(err)

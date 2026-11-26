@@ -162,12 +162,12 @@ func (x *Spec) GetLogLevel() string {
 // VM is one of the job's VMs, run by one VM child.
 type VM struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The VM's name, unique within the spec: its hostname and its name in
-	// every VM's BootConfig.hosts, log lines and Failed reasons. It is never a
-	// path component or a cache key: a service's name would be its key in the
-	// workflow, which the workflow chooses and which may be `job` or `0`, made
-	// DNS-safe by the same rule. The job's container's name is the job's name
-	// made DNS-safe, or `job` (GST-12).
+	// The VM's name, unique within the spec: its name in every VM's
+	// BootConfig.hosts, log lines and Failed reasons. It is never a path
+	// component or a cache key: a service's name is its key in the workflow,
+	// which the workflow chooses and which may be `job` or `0`, by the Docker
+	// backend's alias rule, which keeps `_`. The job's container's name is the
+	// job's name made DNS-safe, or `job` (GST-12), and is its hostname too.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// The VM's shape (VM-4).
 	Cpus      uint32 `protobuf:"varint,2,opt,name=cpus,proto3" json:"cpus,omitempty"`

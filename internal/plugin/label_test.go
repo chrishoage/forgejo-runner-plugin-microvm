@@ -192,8 +192,7 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 // its target and the flag (STO-1, STO-2, STO-3). The job's copy,
 // taken at Create, shares nothing with the profiles a reload swaps. Only the
 // operator chooses them: backend options naming volumes or mounts add none,
-// and a workflow's services, which could carry their own, fail Create
-// (STO-11).
+// and a service's VM gets none (STO-11).
 func TestStartSharesTheProfilesMounts(t *testing.T) {
 	t.Parallel()
 	launcher := &fakeLauncher{}
@@ -226,12 +225,21 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 	if want := []string{"mount0 /opt/tools rw=false", "mount1 /var/lib/docker/data rw=true"}; !slices.Equal(mounted, want) {
 		t.Errorf("boot config mounts %q, want %q", mounted, want)
 	}
-	// A job with services fails Create, so no service brings storage of its
-	// own (STO-11).
-	if _, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
+	// A service's VM gets none of the profile's mounts, which are the
+	// job's storage, and no storage of its own (STO-11).
+	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{
 		LabelArg: testImage + ";profile=tools", Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}},
-	}); status.Code(err) != codes.Unimplemented {
-		t.Errorf("Create with services = %v; want Unimplemented", err)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start(testContext(t), c, resp.GetEnvironmentId()); err != nil {
+		t.Fatal(err)
+	}
+	vms := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()
+	if len(vms[0].GetMounts()) != 2 || len(vms[1].GetMounts()) != 0 || len(vms[1].GetBoot().GetMounts()) != 0 {
+		t.Errorf("with a service: the job's container's mounts %v, the service's %v and %v; want only the job's container's two",
+			vms[0].GetMounts(), vms[1].GetMounts(), vms[1].GetBoot().GetMounts())
 	}
 	// A profile without mounts shares none.
 	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage})

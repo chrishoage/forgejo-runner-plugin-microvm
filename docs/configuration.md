@@ -69,7 +69,7 @@ Read at startup only (see Reload, above).
 
 ## Profiles
 
-`profiles` maps a profile's name to its keys. A label picks a profile; the profile is the VM's shape and storage.
+`profiles` maps a profile's name to its keys. A label picks a profile; the profile is the shape of every VM of the job, the job's container and each of its services, and the job's container's storage.
 
 - **A name matches `[a-z0-9][a-z0-9_-]*`.** Any other name could never appear in a label.
 - **A label without `;profile=` uses the profile named `default`.** When the file defines no `default`, it is every built-in value; `;profile=default` gets the same.
@@ -88,20 +88,21 @@ Read at startup only (see Reload, above).
 
   The decoder expands merges itself; an error in a merged key names the line it is written on and the profile it was merged into. A mapping that merges itself fails, and so do merges that expand to more than 100,000 keys. A key outside the known ones, such as Compose's `x-` keys, is not a place to keep an anchor: put it on a profile.
 - **When `max_memory_mib` is set, a profile whose `memory_mib`, its own or the built-in value, is more than it stops startup,** naming both values: no job on it could ever run. The implicit `default` isn't checked, since the file doesn't define it; a job on it that needs more fails at Create.
+- **A job with services needs the profile's `memory_mib` once for each VM:** the job's container and each service. One whose need is more than `max_memory_mib` fails at Create, naming the need.
 
 ## Profile keys
 
-Reloaded on `SIGHUP`. A key left out takes its built-in value.
+Reloaded on `SIGHUP`. A key left out takes its built-in value. A job's services take `cpus`, `memory_mib`, `scratch_gib`, `scratch_paths` and `force_pull` from the job's profile, as its container does, but not `mounts` or `disks`, which are the job's storage: a read-write disk can't be attached to two VMs.
 
 | Key | Built-in value | Meaning | Valid values |
 |---|---|---|---|
-| `cpus` | `2` | The VM's vCPUs | an integer from 1 to 255 |
-| `memory_mib` | `1024` | The VM's memory, in MiB, and the job's share of the memory budget | an integer from 1 to 4294967295 |
-| `scratch_gib` | `10` | The size of the scratch disk, fresh for every job, that holds every change the job makes to the VM's root filesystem | an integer from 1 to 8589934591 |
-| `scratch_paths` | `[]` | Guest directories kept on the scratch disk instead of the overlay: each starts empty at every boot, hiding what the image has there | a list of guest paths (below), each listed once |
-| `mounts` | `[]` | Host directories shared into the VM | a list of entries (below); each source an existing directory |
-| `disks` | `[]` | Host files attached to the VM as block devices, each mounted at its target | a list of entries (below); each source an existing regular file |
-| `force_pull` | `false` | `true` looks the image's tag up in the registry on every Start, even when the image cache holds it; a registry error then fails the Start | a boolean (see [General rules](#general-rules)) |
+| `cpus` | `2` | Each VM's vCPUs, a service's too | an integer from 1 to 255 |
+| `memory_mib` | `1024` | Each VM's memory, in MiB, a service's too; the job's share of the memory budget is this once for each of its VMs | an integer from 1 to 4294967295 |
+| `scratch_gib` | `10` | The size of each VM's scratch disk, a service's too, fresh for every job, that holds every change the job makes to the VM's root filesystem | an integer from 1 to 8589934591 |
+| `scratch_paths` | `[]` | Guest directories kept on the scratch disk instead of the overlay, in each VM, a service's too: each starts empty at every boot, hiding what the image has there | a list of guest paths (below), each listed once |
+| `mounts` | `[]` | Host directories shared into the job's container, never a service | a list of entries (below); each source an existing directory |
+| `disks` | `[]` | Host files attached to the job's container as block devices, each mounted at its target; never to a service | a list of entries (below); each source an existing regular file |
+| `force_pull` | `false` | `true` looks each image's tag up in the registry on every Start, a service's too, even when the image cache holds it; a registry error then fails the Start | a boolean (see [General rules](#general-rules)) |
 
 - **`0` is invalid for `cpus`, `memory_mib` and `scratch_gib`:** leave the key out to get the built-in value.
 - **The upper limits are only the ones past which the VM can't work:** 255 vCPUs and `memory_mib` within a 32-bit count, libkrun's own fields, and a scratch size whose byte count fits a signed 64-bit integer. There is no minimum memory: a VM too small to boot fails Start with its console.
