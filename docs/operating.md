@@ -1,6 +1,6 @@
 # Operator guide
 
-How to install a release of `runner-microvm` beside forgejo-runner on one host and run jobs in it. Follow the sections in order on a fresh host. The plugin's config file has its own reference, [`configuration.md`](configuration.md), which this guide links to rather than repeats; the words it uses are the glossary's ([`GLOSSARY.md`](../GLOSSARY.md)). Why each behaviour is as it is lives in [`architecture.md`](architecture.md).
+How to install a release of `runner-microvm` beside forgejo-runner on one host and run jobs in it. On NixOS, use the flake's module instead: [`nixos.md`](nixos.md). Follow the sections in order on a fresh host. The plugin's config file has its own reference, [`configuration.md`](configuration.md), which this guide links to rather than repeats; the words it uses are the glossary's ([`GLOSSARY.md`](../GLOSSARY.md)). Why each behaviour is as it is lives in [`architecture.md`](architecture.md).
 
 The commands are for a Debian or Ubuntu host and run as root where they start with `sudo`. The names used throughout are examples: the plugin runs as the user `runner-microvm`, the runner as `forgejo-runner`, release `0.1.0`.
 
@@ -169,5 +169,5 @@ What a profile shares with its VMs is described in [`configuration.md`](configur
 - **Services.** A job that declares `services:` fails at Create: forgejo-runner's plugin protocol passes nothing to configure a service's VM.
 - **arm64,** or any architecture but x86_64.
 - **Egress filtering** (Network, above).
-- **Packages, service units and install tooling:** a release is one binary; how it is installed and supervised is yours.
+- **Packages, service units and install tooling, except on NixOS:** a release is one binary; how it is installed and supervised is yours. On NixOS the flake's module does it ([`nixos.md`](nixos.md)).
 - **A memory limit for the plugin's own process** is not part of this guide; `max_memory_mib` caps the VMs' memory ([`configuration.md`](configuration.md#plugin-level-keys)).

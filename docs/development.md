@@ -59,11 +59,11 @@ nix develop -c just package       # nix build .#default: the flake's packages.de
 nix develop -c just vendor-hash   # rewrite nix/package.nix's vendorHash for go.mod and go.sum
 ```
 
-- **The flake's `packages.x86_64-linux.default` is `runner-microvm`, built by `nix/package.nix` with `buildGo126Module`, the dev shell's Go,** for NixOS hosts. Its version is the `VERSION` file's, so a package built from `main` between releases carries the last release's version, unlike `just build`'s `dev`: a flake has no tag to read.
+- **The flake's `packages.x86_64-linux.default` is `runner-microvm`, built by `nix/package.nix` with `buildGo126Module`, the dev shell's Go,** for NixOS hosts and the NixOS module (`docs/nixos.md`). Its version is the `VERSION` file's, so a package built from `main` between releases carries the last release's version, unlike `just build`'s `dev`: a flake has no tag to read, so `docs/nixos.md` tells users to pin a release tag.
 - **Its build phase is `just plugin`, the recipe `build` and `release-assets` share,** with the version set and an empty loader, so the job binary keeps Go's default: the Nix store's glibc, the one the flake's libkrun is linked against (Building and the payload, above). The package's closure holds that glibc, because the embedded job binary names it. The derivation runs no tests: `just test` and `just test-kvm` do.
-- **It carries the library directory it is meant for, `passthru.libDir`: the flake's libkrun and libkrunfw.** The package itself doesn't reference the libraries; a config file's `lib_dir` naming that directory does.
+- **It carries the library directory it is meant for, `passthru.libDir`: the flake's libkrun and libkrunfw.** The package itself doesn't reference the libraries; the module's config file, whose built-in `lib_dir` names that directory, does.
 - **`vendorHash` is the hash of the Go modules the build downloads, so it changes whenever `go.mod` or `go.sum` do, and only then.** Nix builds have no network, except fixed-output derivations, whose hash is declared in advance; Renovate can't run Nix to refresh it (`docs/conventions.md`, Renovate). `just vendor-hash` rewrites it with nix-update, from the dev shell: a commit that changes `go.mod` or `go.sum` runs it and includes the new hash. (Flagged decision: rejected committing `vendor/`, 46 MB, and a bot or self-hosted Renovate, which needs a write token.)
-- **`just package` is part of `just check` and CI's `package` job,** so a stale `vendorHash` or a broken derivation fails the PR that causes it.
+- **`just package` is part of `just check` and CI's `package` job,** so a stale `vendorHash` or a broken derivation fails the PR that causes it. It also builds the flake's `module` check: the NixOS module's unit, and `runner-microvm check` run on the config file the module writes (`docs/architecture.md`, The NixOS module's unit).
 
 ## Releasing
 

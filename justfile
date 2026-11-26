@@ -220,9 +220,10 @@ check-libs:
     done
     exit "$status"
 
-# Build the Nix package, packages.default: fails on a stale vendorHash.
+# Build the Nix package, packages.default, which fails on a stale vendorHash,
+# and the NixOS module's check.
 package:
-    nix build .#default --no-link -L
+    nix build .#default .#checks.x86_64-linux.module --no-link -L
 
 # Rewrite nix/package.nix's vendorHash for the current go.mod and go.sum, with
 # nix-update. The flake's source is put in the store first: nix-update reads
