@@ -19,6 +19,7 @@ Durable decisions live here, not in this file or in issues.
 - `GLOSSARY.md`: the project's vocabulary; use its terms.
 - `docs/configuration.md`: the config file reference, the one place its keys are listed; its examples are `docs/examples/config-*.yaml`.
 - `docs/development.md`: how the project is built, the toolchain and the dev shell.
+- `docs/nixos.md`: the flake's NixOS module and package, for operators.
 - `docs/conventions.md`: the definition of done, commits and merging, the PR template, SPDX headers, lint, dependency licenses, Renovate.
 - `docs/adr/`: decisions that are hard to reverse.
 - `docs/agents/`: how agent skills use the issue tracker, triage labels and domain docs.

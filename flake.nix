@@ -65,9 +65,33 @@
         buildGoModule = pkgs.buildGo126Module;
         inherit libdir;
       };
+
+      # A minimal NixOS system with the module, for its check below.
+      moduleSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.default
+          {
+            boot.isContainer = true;
+            system.stateVersion = "26.05";
+            services.runner-microvm = {
+              enable = true;
+              settings.profiles.default.cpus = 2;
+            };
+          }
+        ];
+      };
     in
     {
       packages.${system}.default = runner-microvm;
+
+      # services.runner-microvm (docs/nixos.md), with the package built here.
+      nixosModules.default =
+        { lib, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.runner-microvm.package = lib.mkDefault self.packages.${system}.default;
+        };
 
       devShells.${system}.default = pkgs.mkShell {
         packages = [
@@ -122,6 +146,18 @@
 
       checks.${system} = {
         devShell = self.devShells.${system}.default;
+
+        # The module evaluates, its unit builds, and the plugin's own check
+        # accepts the config file it writes.
+        module =
+          let
+            inherit (moduleSystem) config;
+          in
+          pkgs.runCommand "module" { } ''
+            test -e ${config.systemd.units."runner-microvm.service".unit}
+            RUNNER_MICROVM_CONFIG=${config.environment.etc."runner-microvm/config.yaml".source} \
+              ${lib.getExe config.services.runner-microvm.package} check > $out
+          '';
         libVersions =
           assert atLeastMinimum "libkrun";
           assert atLeastMinimum "libkrunfw";
