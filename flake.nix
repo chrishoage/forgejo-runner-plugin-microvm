@@ -60,8 +60,15 @@
         };
         govulncheck = pkgs.govulncheck.override { buildGoLatestModule = pkgs.buildGo126Module; };
       };
+
+      runner-microvm = pkgs.callPackage ./nix/package.nix {
+        buildGoModule = pkgs.buildGo126Module;
+        inherit libdir;
+      };
     in
     {
+      packages.${system}.default = runner-microvm;
+
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           go
@@ -71,6 +78,9 @@
           goTools.govulncheck
           libdir
           pkgs.cocogitto
+          # nix-update, for `just vendor-hash` (docs/development.md, The
+          # Nix package).
+          pkgs.nix-update
           # gh, for `just bump`'s version PR (docs/development.md, Releasing).
           pkgs.gh
           # git for the commit check, for act/runner's action clones in the

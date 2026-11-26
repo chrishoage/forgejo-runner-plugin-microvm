@@ -102,7 +102,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
   - The cache key is the hash of `flake.nix` and `flake.lock`.
   - Pushes to `main` purge older entries once a new one is saved, so stale stores don't crowd out the repo's cache quota. PR runs never purge, so a PR that changes the flake can't delete `main`'s entry.
 - **A new push to a PR cancels its older run; runs on `main` are never cancelled,** so every push to `main` is checked and saves its cache.
-- **The jobs are `lint`, `generate`, `test`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
+- **The jobs are `lint`, `generate`, `test`, `package`, `licenses`, `vuln` and `commits`.** Each runs `nix develop -c just <recipe>`. Separate jobs show which rule failed at a glance.
 - **Every Action is pinned to a commit digest, with its version as a comment.** Renovate keeps the digests current.
 - **The release workflow, `release.yml`, runs on a pushed `v*` tag:** it calls `ci.yml` on the tagged commit, then publishes the release once every CI job has passed (`docs/development.md`, Releasing). Nothing on `main`'s CI decides whether a push is a release.
 - **The `kvm` job also runs `just test-kvm`,** the only tier that boots VMs (see `docs/development.md`, KVM in CI).
@@ -118,6 +118,7 @@ golangci-lint v2 from the dev shell, configured in `.golangci.yml`. `just lint` 
 ### What it updates
 
 - **Go modules, with `go mod tidy` after every update and import paths rewritten on major bumps** (`gomodTidy`, `gomodUpdateImportPaths`). The protocol test imports the runner from `code.forgejo.org/forgejo/runner/v13/...`, and a major bump changes that path.
+- **A Go module update fails CI's `package` job until its `vendorHash` is refreshed:** the Mend-hosted app runs no commands (`postUpgradeTasks` needs an `allowedCommands` list that repository config can't set), so it can't run Nix. The maintainer or an agent runs `nix develop -c just vendor-hash` on the PR's branch, folds the change into Renovate's commit (`git commit --amend`) and force-pushes. The red check is the signal not to approve the PR yet; once it is green and approved, platform automerge merges it. Renovate no longer rebases a branch someone else pushed to: if `main` moves and the PR conflicts, tick its rebase checkbox, and refresh the hash again (`docs/development.md`, The Nix package).
 - **Modules pinned to pseudo-versions, go-erofs and continuity (for `tarconv`, which is unreleased), are updated as digests,** to the latest commit of their default branch, in the same automerging Go group. A pseudo-version has no release to wait for, and CI is the gate.
 - **Not gvisor (`gvisor.dev/gvisor`) on its own:** it follows the version gvisor-tap-vsock requires, raised by `go mod tidy` when gvisor-tap-vsock updates. Its pseudo-version would otherwise be updated as a digest to the newest commit of gvisor's default branch, the Bazel tree that `go get` can't build (only its generated `go` branch can), and off the commit gvisor-tap-vsock was built against; a red bump would hold the automerging Go group behind it.
 - **Not the `go` directive in `go.mod`:** a Go minor bump is a deliberate change of `go.mod` and the flake together, and patch releases arrive through `flake.lock` (see `docs/development.md`).

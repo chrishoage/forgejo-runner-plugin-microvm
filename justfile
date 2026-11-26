@@ -220,8 +220,19 @@ check-libs:
     done
     exit "$status"
 
+# Build the Nix package, packages.default: fails on a stale vendorHash.
+package:
+    nix build .#default --no-link -L
+
+# Rewrite nix/package.nix's vendorHash for the current go.mod and go.sum, with
+# nix-update. The flake's source is put in the store first: nix-update reads
+# the flake from there, and doesn't copy it itself.
+vendor-hash:
+    nix flake archive > /dev/null
+    nix-update --flake --version=skip default
+
 # Everything a PR must pass.
-check: build lint check-generated test licenses vuln lint-commits
+check: build lint check-generated test licenses vuln package lint-commits
 
 # The local harness: `just e2e up`, `just e2e run`, `just e2e down`
 # (docs/development.md, The local harness).
