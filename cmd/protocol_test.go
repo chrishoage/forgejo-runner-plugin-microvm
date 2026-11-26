@@ -40,18 +40,21 @@ const (
 	stepOut   = "hello from runner-microvm e2e"
 )
 
-// The profile the plugin under test defines besides the implicit default,
-// and its shape.
+// The profiles the plugin under test defines besides the implicit default,
+// and their shapes: big, and small, 256 MiB, for the jobs with services,
+// whose every VM has their profile's memory.
 const (
 	bigProfile    = "big"
 	bigCPUs       = 3
 	bigMemoryMiB  = 1536
 	bigScratchGiB = 4
+
+	smallProfile = "small"
 )
 
 // testProfiles is the profiles section of the plugin's config file.
-var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: %d\n    scratch_gib: %d\n",
-	bigProfile, bigCPUs, bigMemoryMiB, bigScratchGiB)
+var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: %d\n    scratch_gib: %d\n  %s:\n    cpus: 1\n    memory_mib: 256\n    scratch_gib: 2\n",
+	bigProfile, bigCPUs, bigMemoryMiB, bigScratchGiB, smallProfile)
 
 // TestWorkflows is the protocol test: it runs every workflow in
 // e2e/workflows/, one subtest each, through forgejo-runner's own job
@@ -67,7 +70,7 @@ var testProfiles = fmt.Sprintf("profiles:\n  %s:\n    cpus: %d\n    memory_mib: 
 func TestWorkflows(t *testing.T) {
 	t.Parallel()
 	image := readImage(t)
-	labels := map[string]string{"microvm": image, "microvm-big": image + ";profile=" + bigProfile}
+	labels := map[string]string{"microvm": image, "microvm-big": image + ";profile=" + bigProfile, "microvm-small": image + ";profile=" + smallProfile}
 	files, err := filepath.Glob(filepath.Join(workflows, "*.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +138,12 @@ var workflowChecks = map[string]func(t *testing.T, log, image string){
 			if !want.MatchString(log) {
 				t.Errorf("the job log does not match %s", want)
 			}
+		}
+	},
+	// Its step reached the redis service by its name.
+	"services": func(t *testing.T, log, _ string) {
+		if !strings.Contains(log, "redis replied: +PONG +OK") {
+			t.Error("the job log does not show redis's reply to the step's PING")
 		}
 	},
 	"big":  func(t *testing.T, log, _ string) { wantShape(t, log, bigCPUs, bigMemoryMiB, bigScratchGiB) },
@@ -354,6 +363,8 @@ func planExecutor(t *testing.T, p *plugin, workflow string, images map[string]st
 			RefType:         "branch",
 		},
 		ActionCacheDir: t.TempDir(),
+		// As the harness's run sets it on the job's repository.
+		Vars: map[string]string{"REDIS_IMAGE": readImageFile(t, "redis-image")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +378,13 @@ func planExecutor(t *testing.T, p *plugin, workflow string, images map[string]st
 // readImage returns the image e2e/image pins.
 func readImage(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../e2e/image")
+	return readImageFile(t, "image")
+}
+
+// readImageFile returns the image the one-line file e2e/<name> pins.
+func readImageFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("../e2e", name))
 	if err != nil {
 		t.Fatal(err)
 	}

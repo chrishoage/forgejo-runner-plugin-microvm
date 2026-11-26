@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Services epic's exit check: a step reaches a redis service by its name
+# with a plain TCP PING and gets +PONG. The service's image is the one
+# e2e/redis-image pins, as the REDIS_IMAGE variable: the harness's run sets
+# it on the job's repository, and the protocol test passes it to the runner,
+# since a workflow file can't read another file. It runs on microvm-small,
+# whose profile is 256 MiB, so its two VMs, the job's container and the
+# service, take 512 MiB.
+name: services
+
+on:
+  workflow_dispatch:
+
+jobs:
+  redis:
+    runs-on: microvm-small
+    services:
+      redis:
+        image: ${{ vars.REDIS_IMAGE }}
+    steps:
+      - run: echo "hello from runner-microvm e2e"
+      - name: PING the redis service by its name
+        run: |
+          # Start returns once the service's command has started, which may
+          # be before redis listens: try for up to about 10 s. QUIT makes
+          # redis close the connection, so nc returns with the replies.
+          reply=
+          for i in $(seq 50); do
+            reply=$(printf 'PING\r\nQUIT\r\n' | nc -w 5 redis 6379 | tr -d '\r')
+            [ -n "$reply" ] && break
+            sleep 0.2
+          done
+          echo "redis replied: $(echo $reply)"
+          printf '%s\n' "$reply" | grep -Fqx '+PONG'
