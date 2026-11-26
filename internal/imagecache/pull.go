@@ -272,7 +272,7 @@ func (c *Cache) Acquire(ctx context.Context, req Request) (Image, error) {
 		"layers_pulled", pulled)
 	return Image{
 		Digest: r.digest.String(), Env: r.config.Config.Env, User: r.config.Config.User, WorkingDir: r.config.Config.WorkingDir,
-		Entrypoint: r.config.Config.Entrypoint, Cmd: r.config.Config.Cmd,
+		Entrypoint: r.config.Config.Entrypoint, Cmd: r.config.Config.Cmd, Healthcheck: healthcheck(r.config, r.raw),
 		LinkDir: linkDir, Layers: names, Pulled: pulled,
 	}, nil
 }

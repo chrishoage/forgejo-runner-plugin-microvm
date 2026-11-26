@@ -6,6 +6,8 @@
 // ImageCache seam.
 package imagecache
 
+import "time"
+
 // Request is what the plugin asks of the image cache for one VM of a job. It
 // is a struct, not positional arguments, so fields such as per-image registry
 // credentials can be added later without changing callers.
@@ -38,6 +40,9 @@ type Image struct {
 	Entrypoint []string
 	// Cmd is the image config's CMD, nil when it sets none.
 	Cmd []string
+	// Healthcheck is the image config's HEALTHCHECK, nil when it sets
+	// none.
+	Healthcheck *Healthcheck
 	// LinkDir is the VM's layer link directory, <cache>/jobs/<id>/<n>/:
 	// hard links to exactly the layers of the VM's image.
 	LinkDir string
@@ -50,4 +55,19 @@ type Image struct {
 	// deleted from under the cache counts once, so Pulled is never more
 	// than len(Layers).
 	Pulled int
+}
+
+// Healthcheck is an image config's HEALTHCHECK, as the image sets it: what
+// its fields mean, and what a zero one defaults to, is Docker's rule, which
+// the agent that runs the check applies.
+type Healthcheck struct {
+	// Test is the check: empty, or ["NONE"], for none; ["CMD", args…] or
+	// ["CMD-SHELL", command].
+	Test []string
+	// Interval, Timeout, StartPeriod and StartInterval are the check's
+	// timing; zero is Docker's default.
+	Interval, Timeout, StartPeriod, StartInterval time.Duration
+	// Retries is how many failures in a row make the service unhealthy;
+	// zero is Docker's default.
+	Retries int
 }
