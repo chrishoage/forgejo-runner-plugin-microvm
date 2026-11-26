@@ -53,16 +53,9 @@ type Spec struct {
 	// index, so a workflow can't make two VMs collide or make a path leave its
 	// directory.
 	//
-	// Today vms always holds exactly one VM, the job's container, because the
-	// plugin protocol passes a service only its name, image, env and ports,
-	// and no VM options: a job that declares services fails at Create, and the
-	// job process rejects a spec whose vms count isn't one with Failed. The
-	// shape is built for more: services become more VMs of the same job, each
-	// another entry in vms, on the same job network and in the same job
-	// process, and that shape needs no redesign. What a service needs beyond
-	// it is added fields and calls, for example its entrypoint and cmd at boot
-	// and the plugin dialling its agent. Where a service VM's shape and
-	// storage come from is decided when services are.
+	// It holds 1 to 253 VMs, what the job network's /24 gives addresses to;
+	// the job process fails any other count with Failed, as the plugin's bug.
+	// It starts every VM child at once, once the job network is up.
 	Vms []*VM `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
 	// The host's mkfs.ext4, which the plugin found at startup. The job process
 	// formats each VM's scratch disk with it (VM-5).
@@ -798,10 +791,10 @@ func (x *VMStarted) GetPid() int32 {
 
 // VMExited: one VM's VM child has exited.
 //
-// When the job's container (index 0) exits, the job ends: the job process
-// kills the other VM children, reports each one's VMExited once it is reaped,
-// and exits. What a service VM exiting does to the job is decided with
-// services.
+// Any other VM exiting doesn't end the job: the job process keeps running
+// the rest. When the job's container (index 0) exits, the job ends: the job
+// process kills the other VM children, reports each one's VMExited once it is
+// reaped, and exits.
 type VMExited struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The VM's index in Spec.vms; 0 is the job's container.

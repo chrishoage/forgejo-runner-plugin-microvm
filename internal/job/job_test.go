@@ -486,8 +486,6 @@ func TestRunFailsOnADiskSource(t *testing.T) {
 func TestRunFails(t *testing.T) {
 	t.Parallel()
 	missing := testJobSpec(t, filepath.Join(t.TempDir(), "no-such-binary"))
-	twoVMs := testJobSpec(t, fakeJobBinary(t, "exit 0"))
-	twoVMs.Vms = append(twoVMs.Vms, twoVMs.Vms[0])
 	noLog := testJobSpec(t, fakeJobBinary(t, "exit 0"))
 	noLog.Vms[0].VmLog = filepath.Join(t.TempDir(), "no", "such", "dir", "vm.log")
 	noLevel := testJobSpec(t, fakeJobBinary(t, "exit 0"))
@@ -502,7 +500,6 @@ func TestRunFails(t *testing.T) {
 		bug bool
 	}{
 		"no VM child":   {missing, "start the VM child", true, false},
-		"two VMs":       {twoVMs, "2 VMs", false, true},
 		"no VM log":     {noLog, "VM log", true, false},
 		"no VMs at all": {&jobv1.Spec{}, "0 VMs", false, true},
 		"no log level":  {noLevel, `log level ""`, false, true},

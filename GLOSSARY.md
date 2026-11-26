@@ -97,11 +97,11 @@ _Avoid_: router, host (the host is the machine the plugin runs on)
 ## Inside the VM
 
 **VM**:
-A microVM of a job, booted fresh from its image and discarded at Remove. Today each job has one, the job's container, because the plugin protocol passes no VM options for services. A VM is identified by its index in the job spec, 0 being the job's container; its name is only its DNS name on the job network and its name in log lines, never a path or a cache key.
+A microVM of a job, booted fresh from its image and discarded at Remove. A job has one or more: the job's container, and one for each service. A VM is identified by its index in the job spec, 0 being the job's container; its name is only its DNS name on the job network and its name in log lines, never a path or a cache key.
 _Avoid_: sandbox, container (except in "the job's container"), guest (except for what runs inside it)
 
 **Job's container**:
-The VM a job's steps run in, booted from the job's image; always the first VM in the job spec, index 0. Once services return, each service is another VM of the same job, on the same job network.
+The VM a job's steps run in, booted from the job's image; always the first VM in the job spec, index 0. Each service is another VM of the same job, on the same job network.
 
 **Agent**:
 The program injected into every VM that prepares it at boot, runs commands and copies files in and out. The job's steps run through the job's container's agent.
