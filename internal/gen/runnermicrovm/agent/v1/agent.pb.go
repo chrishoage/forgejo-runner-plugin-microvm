@@ -596,9 +596,8 @@ type BootConfig struct {
 	// The image's defaults for Exec.
 	Image *Image `protobuf:"bytes,9,opt,name=image,proto3" json:"image,omitempty"`
 	// The names on the job network, which the agent writes into /etc/hosts
-	// after localhost's lines. There is no DNS zone for them. Today it holds
-	// one entry, the VM's own name at its address; each service will add
-	// one.
+	// after localhost's lines: every VM of the job, each at its address, the
+	// VM's own entry its hostname. There is no DNS zone for them.
 	Hosts []*Host `protobuf:"bytes,10,rep,name=hosts,proto3" json:"hosts,omitempty"`
 	// The vsock port the agent listens on, once its boot work is done. Only
 	// the plugin sets it: the same value is libkrun's port mapping for the
@@ -806,7 +805,9 @@ func (x *GuestDir) GetMode() uint32 {
 // Host is one name on the job network and its address.
 type Host struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// A DNS label.
+	// One or more of a-z, 0-9, - and _: a service's name keeps the _ of the
+	// Docker backend's alias rule. The agent refuses anything else, so a name
+	// can't add a line of its own to /etc/hosts.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// An IPv4 address.
 	Address       string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`

@@ -139,9 +139,8 @@ message BootConfig {
   // The image's defaults for Exec.
   Image image = 9;
   // The names on the job network, which the agent writes into /etc/hosts
-  // after localhost's lines. There is no DNS zone for them. Today it holds
-  // one entry, the VM's own name at its address; each service will add
-  // one.
+  // after localhost's lines: every VM of the job, each at its address, the
+  // VM's own entry its hostname. There is no DNS zone for them.
   repeated Host hosts = 10;
   // The vsock port the agent listens on, once its boot work is done. Only
   // the plugin sets it: the same value is libkrun's port mapping for the
@@ -171,7 +170,9 @@ message GuestDir {
 
 // Host is one name on the job network and its address.
 message Host {
-  // A DNS label.
+  // One or more of a-z, 0-9, - and _: a service's name keeps the _ of the
+  // Docker backend's alias rule. The agent refuses anything else, so a name
+  // can't add a line of its own to /etc/hosts.
   string name = 1;
   // An IPv4 address.
   string address = 2;

@@ -50,11 +50,12 @@ func configureNames(sethostname func(string) error, root string, own owner, cfg 
 func sethostname(name string) error { return syscall.Sethostname([]byte(name)) }
 
 // nameFiles returns the contents of /etc/hosts, /etc/hostname and
-// /etc/resolv.conf for cfg, refusing a hostname or a host that isn't a DNS
-// label at an IPv4 address, so nothing the files hold can add a line of its
-// own. /etc/hosts maps localhost to the loopback addresses, then each of the
-// hosts list's names to its job-network address: the hostname is among
-// them, at the address others reach the VM on, not 127.0.1.1.
+// /etc/resolv.conf for cfg, refusing a hostname that isn't a DNS label and a
+// host that isn't a host name at an IPv4 address (isHostName), so nothing
+// the files hold can add a line of its own. /etc/hosts maps localhost to the
+// loopback addresses, then each of the hosts list's names, every VM of the
+// job, to its job-network address: the hostname is among them, at the
+// address others reach the VM on, not 127.0.1.1.
 func nameFiles(cfg *agentv1.BootConfig) ([]nameFile, error) {
 	if !isLabel(cfg.GetHostname()) {
 		return nil, fmt.Errorf("boot config: hostname %q is not a DNS label", cfg.GetHostname())
@@ -67,8 +68,8 @@ func nameFiles(cfg *agentv1.BootConfig) ([]nameFile, error) {
 	hosts.WriteString("127.0.0.1 localhost\n::1 localhost\n")
 	for _, h := range cfg.GetHosts() {
 		addr, err := netip.ParseAddr(h.GetAddress())
-		if err != nil || !addr.Is4() || !isLabel(h.GetName()) {
-			return nil, fmt.Errorf("boot config: host %q at %q is not a DNS label at an IPv4 address", h.GetName(), h.GetAddress())
+		if err != nil || !addr.Is4() || !isHostName(h.GetName()) {
+			return nil, fmt.Errorf("boot config: host %q at %q is not a name of a-z, 0-9, - and _ at an IPv4 address", h.GetName(), h.GetAddress())
 		}
 		fmt.Fprintf(&hosts, "%s %s\n", addr, h.GetName())
 	}
@@ -87,6 +88,24 @@ func isLabel(s string) bool {
 	}
 	for _, c := range []byte(s) {
 		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// isHostName reports whether s is a name the hosts list may hold: one or
+// more of a-z, 0-9, `-` and `_`. A service's name is its workflow key by the
+// Docker backend's alias rule, which keeps `_` and cuts nothing, so it
+// needn't be a DNS label; glibc, musl, Go and Node all resolve it from
+// /etc/hosts. Nothing else is let through, so a name can't add a line or a
+// field of its own.
+func isHostName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}

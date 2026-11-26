@@ -190,9 +190,10 @@ func TestConfigureNamesFailures(t *testing.T) {
 	})
 }
 
-// A hostname or host that isn't a DNS label at an IPv4 address, which
-// could add a line of its own to /etc/hosts, fails before anything is
-// written.
+// A hostname that isn't a DNS label, `_` included, or a host whose name
+// holds anything outside a-z, 0-9, `-` and `_` or that isn't at an IPv4
+// address, which could add a line of its own to /etc/hosts, fails before
+// anything is written.
 func TestConfigureNamesRefusesBadNames(t *testing.T) {
 	t.Parallel()
 	for desc, mutate := range map[string]func(*agentv1.BootConfig){
@@ -201,7 +202,13 @@ func TestConfigureNamesRefusesBadNames(t *testing.T) {
 		"upper case":            func(c *agentv1.BootConfig) { c.Hostname = "Job" },
 		"a leading hyphen":      func(c *agentv1.BootConfig) { c.Hostname = "-job" },
 		"64 characters":         func(c *agentv1.BootConfig) { c.Hostname = strings.Repeat("a", 64) },
+		"a _ in hostname":       func(c *agentv1.BootConfig) { c.Hostname = "my_job" },
+		"a dot in hostname":     func(c *agentv1.BootConfig) { c.Hostname = "a.b" },
 		"a host's name":         func(c *agentv1.BootConfig) { c.Hosts[0].Name = "a b" },
+		"a newline in a host":   func(c *agentv1.BootConfig) { c.Hosts[0].Name = "my_db\n1.2.3.4 evil" },
+		"a dot in a host":       func(c *agentv1.BootConfig) { c.Hosts[0].Name = "my.db" },
+		"upper case in a host":  func(c *agentv1.BootConfig) { c.Hosts[0].Name = "My_db" },
+		"an empty host":         func(c *agentv1.BootConfig) { c.Hosts[0].Name = "" },
 		"a host's address":      func(c *agentv1.BootConfig) { c.Hosts[0].Address = "198.18.0.2\n1.2.3.4" },
 		"an IPv6 host":          func(c *agentv1.BootConfig) { c.Hosts[0].Address = "::1" },
 		"no gateway":            func(c *agentv1.BootConfig) { c.Network = nil },
@@ -215,5 +222,24 @@ func TestConfigureNamesRefusesBadNames(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(root, "etc")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s: /etc was made: %v", desc, err)
 		}
+	}
+}
+
+// The hosts list may hold several entries, every VM of the job, each
+// written on a line of its own in the list's order; a service's name may
+// hold `_`, as the Docker backend's alias rule keeps it.
+func TestConfigureNamesWritesEveryHost(t *testing.T) {
+	t.Parallel()
+	cfg := testNames()
+	cfg.Hosts = append(cfg.Hosts,
+		&agentv1.Host{Name: "my_db", Address: "198.18.0.3"},
+		&agentv1.Host{Name: "_cache-2_", Address: "198.18.0.4"})
+	root := t.TempDir()
+	if err := configureNames(func(string) error { return nil }, root, testOwner(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := "127.0.0.1 localhost\n::1 localhost\n198.18.0.2 task-7-build\n198.18.0.3 my_db\n198.18.0.4 _cache-2_\n"
+	if b, err := os.ReadFile(filepath.Join(root, "etc", "hosts")); err != nil || string(b) != want {
+		t.Errorf("/etc/hosts holds %q (%v), want %q", b, err, want)
 	}
 }
