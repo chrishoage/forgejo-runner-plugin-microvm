@@ -34,6 +34,7 @@ const (
 	AgentService_CopyIn_FullMethodName       = "/runnermicrovm.agent.v1.AgentService/CopyIn"
 	AgentService_CopyOut_FullMethodName      = "/runnermicrovm.agent.v1.AgentService/CopyOut"
 	AgentService_Flush_FullMethodName        = "/runnermicrovm.agent.v1.AgentService/Flush"
+	AgentService_Health_FullMethodName       = "/runnermicrovm.agent.v1.AgentService/Health"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -74,6 +75,11 @@ type AgentServiceClient interface {
 	// ext4 clean. The disks stay frozen: the VM is killed right after. It
 	// fails with FailedPrecondition, naming each disk it could not freeze.
 	Flush(ctx context.Context, in *FlushRequest, opts ...grpc.CallOption) (*FlushResponse, error)
+	// Health returns the health of the VM's service, by its image's
+	// HEALTHCHECK, which the agent runs from the moment the service starts
+	// until it is healthy or unhealthy. The plugin calls it at Start, after
+	// StartService, until the service is no longer starting.
+	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 }
 
 type agentServiceClient struct {
@@ -165,6 +171,16 @@ func (c *agentServiceClient) Flush(ctx context.Context, in *FlushRequest, opts .
 	return out, nil
 }
 
+func (c *agentServiceClient) Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthResponse)
+	err := c.cc.Invoke(ctx, AgentService_Health_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -203,6 +219,11 @@ type AgentServiceServer interface {
 	// ext4 clean. The disks stay frozen: the VM is killed right after. It
 	// fails with FailedPrecondition, naming each disk it could not freeze.
 	Flush(context.Context, *FlushRequest) (*FlushResponse, error)
+	// Health returns the health of the VM's service, by its image's
+	// HEALTHCHECK, which the agent runs from the moment the service starts
+	// until it is healthy or unhealthy. The plugin calls it at Start, after
+	// StartService, until the service is no longer starting.
+	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -230,6 +251,9 @@ func (UnimplementedAgentServiceServer) CopyOut(*CopyOutRequest, grpc.ServerStrea
 }
 func (UnimplementedAgentServiceServer) Flush(context.Context, *FlushRequest) (*FlushResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Flush not implemented")
+}
+func (UnimplementedAgentServiceServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -335,6 +359,24 @@ func _AgentService_Flush_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HealthRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).Health(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_Health_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).Health(ctx, req.(*HealthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -353,6 +395,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Flush",
 			Handler:    _AgentService_Flush_Handler,
+		},
+		{
+			MethodName: "Health",
+			Handler:    _AgentService_Health_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

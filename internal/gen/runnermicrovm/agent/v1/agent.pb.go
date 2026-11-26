@@ -18,6 +18,7 @@ package agentv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -29,6 +30,68 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+type HealthResponse_State int32
+
+const (
+	HealthResponse_STATE_UNSPECIFIED HealthResponse_State = 0
+	// The VM has no service, or its service no health check: the image
+	// sets none, an empty test, NONE, or a kind of test Docker ignores.
+	HealthResponse_STATE_NONE HealthResponse_State = 1
+	// The check has neither passed yet nor failed retries times in a row
+	// outside its start period.
+	HealthResponse_STATE_STARTING HealthResponse_State = 2
+	// The check has passed once; the agent runs it no more.
+	HealthResponse_STATE_HEALTHY HealthResponse_State = 3
+	// The check failed retries times in a row outside its start period;
+	// the agent runs it no more.
+	HealthResponse_STATE_UNHEALTHY HealthResponse_State = 4
+)
+
+// Enum value maps for HealthResponse_State.
+var (
+	HealthResponse_State_name = map[int32]string{
+		0: "STATE_UNSPECIFIED",
+		1: "STATE_NONE",
+		2: "STATE_STARTING",
+		3: "STATE_HEALTHY",
+		4: "STATE_UNHEALTHY",
+	}
+	HealthResponse_State_value = map[string]int32{
+		"STATE_UNSPECIFIED": 0,
+		"STATE_NONE":        1,
+		"STATE_STARTING":    2,
+		"STATE_HEALTHY":     3,
+		"STATE_UNHEALTHY":   4,
+	}
+)
+
+func (x HealthResponse_State) Enum() *HealthResponse_State {
+	p := new(HealthResponse_State)
+	*p = x
+	return p
+}
+
+func (x HealthResponse_State) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HealthResponse_State) Descriptor() protoreflect.EnumDescriptor {
+	return file_runnermicrovm_agent_v1_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (HealthResponse_State) Type() protoreflect.EnumType {
+	return &file_runnermicrovm_agent_v1_agent_proto_enumTypes[0]
+}
+
+func (x HealthResponse_State) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HealthResponse_State.Descriptor instead.
+func (HealthResponse_State) EnumDescriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13, 0}
+}
 
 type PingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -640,6 +703,98 @@ func (*FlushResponse) Descriptor() ([]byte, []int) {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
+type HealthRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HealthRequest) Reset() {
+	*x = HealthRequest{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthRequest) ProtoMessage() {}
+
+func (x *HealthRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
+func (*HealthRequest) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+}
+
+type HealthResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	State HealthResponse_State   `protobuf:"varint,1,opt,name=state,proto3,enum=runnermicrovm.agent.v1.HealthResponse_State" json:"state,omitempty"`
+	// The last check's output, stdout and stderr together, its last 4 KiB,
+	// or why it failed without any: it timed out, or could not start. Empty
+	// before the first check. What the service's check prints is the
+	// guest's: the plugin cuts it to size again.
+	Output        string `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HealthResponse) Reset() {
+	*x = HealthResponse{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthResponse) ProtoMessage() {}
+
+func (x *HealthResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
+func (*HealthResponse) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *HealthResponse) GetState() HealthResponse_State {
+	if x != nil {
+		return x.State
+	}
+	return HealthResponse_STATE_UNSPECIFIED
+}
+
+func (x *HealthResponse) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
 // BootConfig is everything the agent needs to prepare the guest before it
 // serves: its root filesystem, mounts, disks, network, the image's defaults
 // for Exec and, for a service, the command to run, but never its
@@ -709,7 +864,7 @@ type BootConfig struct {
 
 func (x *BootConfig) Reset() {
 	*x = BootConfig{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -721,7 +876,7 @@ func (x *BootConfig) String() string {
 func (*BootConfig) ProtoMessage() {}
 
 func (x *BootConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -734,7 +889,7 @@ func (x *BootConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootConfig.ProtoReflect.Descriptor instead.
 func (*BootConfig) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *BootConfig) GetLayerDir() string {
@@ -853,14 +1008,19 @@ type Service struct {
 	// Cmd, run directly, never through a shell. argv[0] is looked up in the
 	// service's environment's PATH, or in image.default_path when it sets
 	// none, as an Exec's command is. The agent refuses an empty argv.
-	Argv          []string `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
+	Argv []string `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
+	// The image's HEALTHCHECK, as the image sets it; absent when it sets
+	// none. The agent runs it as it runs the command: as the image's user,
+	// in its working directory, with the service's environment: the image's
+	// with StartService's laid over it.
+	Healthcheck   *Healthcheck `protobuf:"bytes,3,opt,name=healthcheck,proto3" json:"healthcheck,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Service) Reset() {
 	*x = Service{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -872,7 +1032,7 @@ func (x *Service) String() string {
 func (*Service) ProtoMessage() {}
 
 func (x *Service) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -885,7 +1045,7 @@ func (x *Service) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Service.ProtoReflect.Descriptor instead.
 func (*Service) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Service) GetArgv() []string {
@@ -893,6 +1053,113 @@ func (x *Service) GetArgv() []string {
 		return x.Argv
 	}
 	return nil
+}
+
+func (x *Service) GetHealthcheck() *Healthcheck {
+	if x != nil {
+		return x.Healthcheck
+	}
+	return nil
+}
+
+// Healthcheck is an image config's HEALTHCHECK, as the image sets it. The
+// agent applies Docker's rules to it: what a test means, and what a zero
+// field defaults to.
+type Healthcheck struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Empty or ["NONE"]: no check. ["CMD", args…] runs args, as the
+	// service's command is run; ["CMD-SHELL", command] runs /bin/sh -c
+	// command. Any other kind is ignored, as Docker ignores it: no check.
+	Test []string `protobuf:"bytes,1,rep,name=test,proto3" json:"test,omitempty"`
+	// How long after a check the next one runs, once the start period is
+	// over; zero or absent: 30 s.
+	Interval *durationpb.Duration `protobuf:"bytes,2,opt,name=interval,proto3" json:"interval,omitempty"`
+	// How long a check may run before it is killed and fails; zero or
+	// absent: 30 s.
+	Timeout *durationpb.Duration `protobuf:"bytes,3,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	// How long after the service starts a failed check doesn't count; zero
+	// or absent: none.
+	StartPeriod *durationpb.Duration `protobuf:"bytes,4,opt,name=start_period,json=startPeriod,proto3" json:"start_period,omitempty"`
+	// How long after a check the next one runs during the start period;
+	// zero or absent: 5 s.
+	StartInterval *durationpb.Duration `protobuf:"bytes,5,opt,name=start_interval,json=startInterval,proto3" json:"start_interval,omitempty"`
+	// How many failed checks in a row, outside the start period, make the
+	// service unhealthy; zero or less: 3.
+	Retries       int32 `protobuf:"varint,6,opt,name=retries,proto3" json:"retries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Healthcheck) Reset() {
+	*x = Healthcheck{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Healthcheck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Healthcheck) ProtoMessage() {}
+
+func (x *Healthcheck) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Healthcheck.ProtoReflect.Descriptor instead.
+func (*Healthcheck) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Healthcheck) GetTest() []string {
+	if x != nil {
+		return x.Test
+	}
+	return nil
+}
+
+func (x *Healthcheck) GetInterval() *durationpb.Duration {
+	if x != nil {
+		return x.Interval
+	}
+	return nil
+}
+
+func (x *Healthcheck) GetTimeout() *durationpb.Duration {
+	if x != nil {
+		return x.Timeout
+	}
+	return nil
+}
+
+func (x *Healthcheck) GetStartPeriod() *durationpb.Duration {
+	if x != nil {
+		return x.StartPeriod
+	}
+	return nil
+}
+
+func (x *Healthcheck) GetStartInterval() *durationpb.Duration {
+	if x != nil {
+		return x.StartInterval
+	}
+	return nil
+}
+
+func (x *Healthcheck) GetRetries() int32 {
+	if x != nil {
+		return x.Retries
+	}
+	return 0
 }
 
 // GuestDir is a directory the agent creates in the job's root when the image
@@ -910,7 +1177,7 @@ type GuestDir struct {
 
 func (x *GuestDir) Reset() {
 	*x = GuestDir{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -922,7 +1189,7 @@ func (x *GuestDir) String() string {
 func (*GuestDir) ProtoMessage() {}
 
 func (x *GuestDir) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -935,7 +1202,7 @@ func (x *GuestDir) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestDir.ProtoReflect.Descriptor instead.
 func (*GuestDir) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GuestDir) GetPath() string {
@@ -967,7 +1234,7 @@ type Host struct {
 
 func (x *Host) Reset() {
 	*x = Host{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -979,7 +1246,7 @@ func (x *Host) String() string {
 func (*Host) ProtoMessage() {}
 
 func (x *Host) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -992,7 +1259,7 @@ func (x *Host) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Host.ProtoReflect.Descriptor instead.
 func (*Host) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Host) GetName() string {
@@ -1025,7 +1292,7 @@ type Mount struct {
 
 func (x *Mount) Reset() {
 	*x = Mount{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1304,7 @@ func (x *Mount) String() string {
 func (*Mount) ProtoMessage() {}
 
 func (x *Mount) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1317,7 @@ func (x *Mount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Mount.ProtoReflect.Descriptor instead.
 func (*Mount) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Mount) GetTag() string {
@@ -1092,7 +1359,7 @@ type Disk struct {
 
 func (x *Disk) Reset() {
 	*x = Disk{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1104,7 +1371,7 @@ func (x *Disk) String() string {
 func (*Disk) ProtoMessage() {}
 
 func (x *Disk) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1117,7 +1384,7 @@ func (x *Disk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disk.ProtoReflect.Descriptor instead.
 func (*Disk) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Disk) GetBlockId() string {
@@ -1160,7 +1427,7 @@ type Network struct {
 
 func (x *Network) Reset() {
 	*x = Network{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1172,7 +1439,7 @@ func (x *Network) String() string {
 func (*Network) ProtoMessage() {}
 
 func (x *Network) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1185,7 +1452,7 @@ func (x *Network) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Network.ProtoReflect.Descriptor instead.
 func (*Network) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Network) GetAddress() string {
@@ -1233,7 +1500,7 @@ type Image struct {
 
 func (x *Image) Reset() {
 	*x = Image{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1245,7 +1512,7 @@ func (x *Image) String() string {
 func (*Image) ProtoMessage() {}
 
 func (x *Image) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1258,7 +1525,7 @@ func (x *Image) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Image.ProtoReflect.Descriptor instead.
 func (*Image) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Image) GetEnv() []string {
@@ -1293,7 +1560,7 @@ var File_runnermicrovm_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\"runnermicrovm/agent/v1/agent.proto\x12\x16runnermicrovm.agent.v1\"\r\n" +
+	"\"runnermicrovm/agent/v1/agent.proto\x12\x16runnermicrovm.agent.v1\x1a\x1egoogle/protobuf/duration.proto\"\r\n" +
 	"\vPingRequest\"\x0e\n" +
 	"\fPingResponse\"\x95\x01\n" +
 	"\x13StartServiceRequest\x12F\n" +
@@ -1327,7 +1594,18 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\x8d\x05\n" +
+	"\rFlushResponse\"\x0f\n" +
+	"\rHealthRequest\"\xd8\x01\n" +
+	"\x0eHealthResponse\x12B\n" +
+	"\x05state\x18\x01 \x01(\x0e2,.runnermicrovm.agent.v1.HealthResponse.StateR\x05state\x12\x16\n" +
+	"\x06output\x18\x02 \x01(\tR\x06output\"j\n" +
+	"\x05State\x12\x15\n" +
+	"\x11STATE_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"STATE_NONE\x10\x01\x12\x12\n" +
+	"\x0eSTATE_STARTING\x10\x02\x12\x11\n" +
+	"\rSTATE_HEALTHY\x10\x03\x12\x13\n" +
+	"\x0fSTATE_UNHEALTHY\x10\x04\"\x8d\x05\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
 	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x1b\n" +
@@ -1347,9 +1625,17 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"guest_dirs\x18\f \x03(\v2 .runnermicrovm.agent.v1.GuestDirR\tguestDirs\x12\x1b\n" +
 	"\tlog_level\x18\x0e \x01(\tR\blogLevel\x129\n" +
-	"\aservice\x18\x0f \x01(\v2\x1f.runnermicrovm.agent.v1.ServiceR\aservice\"\x1d\n" +
+	"\aservice\x18\x0f \x01(\v2\x1f.runnermicrovm.agent.v1.ServiceR\aservice\"d\n" +
 	"\aService\x12\x12\n" +
-	"\x04argv\x18\x01 \x03(\tR\x04argv\"2\n" +
+	"\x04argv\x18\x01 \x03(\tR\x04argv\x12E\n" +
+	"\vhealthcheck\x18\x03 \x01(\v2#.runnermicrovm.agent.v1.HealthcheckR\vhealthcheck\"\xa7\x02\n" +
+	"\vHealthcheck\x12\x12\n" +
+	"\x04test\x18\x01 \x03(\tR\x04test\x125\n" +
+	"\binterval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\binterval\x123\n" +
+	"\atimeout\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12<\n" +
+	"\fstart_period\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\vstartPeriod\x12@\n" +
+	"\x0estart_interval\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\rstartInterval\x12\x18\n" +
+	"\aretries\x18\x06 \x01(\x05R\aretries\"2\n" +
 	"\bGuestDir\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\rR\x04mode\"4\n" +
@@ -1375,14 +1661,15 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x1f\n" +
 	"\vworking_dir\x18\x03 \x01(\tR\n" +
 	"workingDir\x12!\n" +
-	"\fdefault_path\x18\x04 \x01(\tR\vdefaultPath2\xb0\x04\n" +
+	"\fdefault_path\x18\x04 \x01(\tR\vdefaultPath2\x89\x05\n" +
 	"\fAgentService\x12Q\n" +
 	"\x04Ping\x12#.runnermicrovm.agent.v1.PingRequest\x1a$.runnermicrovm.agent.v1.PingResponse\x12i\n" +
 	"\fStartService\x12+.runnermicrovm.agent.v1.StartServiceRequest\x1a,.runnermicrovm.agent.v1.StartServiceResponse\x12S\n" +
 	"\x04Exec\x12#.runnermicrovm.agent.v1.ExecRequest\x1a$.runnermicrovm.agent.v1.ExecResponse0\x01\x12Y\n" +
 	"\x06CopyIn\x12%.runnermicrovm.agent.v1.CopyInRequest\x1a&.runnermicrovm.agent.v1.CopyInResponse(\x01\x12\\\n" +
 	"\aCopyOut\x12&.runnermicrovm.agent.v1.CopyOutRequest\x1a'.runnermicrovm.agent.v1.CopyOutResponse0\x01\x12T\n" +
-	"\x05Flush\x12$.runnermicrovm.agent.v1.FlushRequest\x1a%.runnermicrovm.agent.v1.FlushResponseB\x83\x02\n" +
+	"\x05Flush\x12$.runnermicrovm.agent.v1.FlushRequest\x1a%.runnermicrovm.agent.v1.FlushResponse\x12W\n" +
+	"\x06Health\x12%.runnermicrovm.agent.v1.HealthRequest\x1a&.runnermicrovm.agent.v1.HealthResponseB\x83\x02\n" +
 	"\x1acom.runnermicrovm.agent.v1B\n" +
 	"AgentProtoP\x01Z_github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1;agentv1\xa2\x02\x03RAX\xaa\x02\x16Runnermicrovm.Agent.V1\xca\x02\x16Runnermicrovm\\Agent\\V1\xe2\x02\"Runnermicrovm\\Agent\\V1\\GPBMetadata\xea\x02\x18Runnermicrovm::Agent::V1b\x06proto3"
 
@@ -1398,58 +1685,72 @@ func file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescData
 }
 
-var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_runnermicrovm_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_runnermicrovm_agent_v1_agent_proto_goTypes = []any{
-	(*PingRequest)(nil),          // 0: runnermicrovm.agent.v1.PingRequest
-	(*PingResponse)(nil),         // 1: runnermicrovm.agent.v1.PingResponse
-	(*StartServiceRequest)(nil),  // 2: runnermicrovm.agent.v1.StartServiceRequest
-	(*StartServiceResponse)(nil), // 3: runnermicrovm.agent.v1.StartServiceResponse
-	(*ExecRequest)(nil),          // 4: runnermicrovm.agent.v1.ExecRequest
-	(*ExecResponse)(nil),         // 5: runnermicrovm.agent.v1.ExecResponse
-	(*CopyInRequest)(nil),        // 6: runnermicrovm.agent.v1.CopyInRequest
-	(*CopyInResponse)(nil),       // 7: runnermicrovm.agent.v1.CopyInResponse
-	(*CopyOutRequest)(nil),       // 8: runnermicrovm.agent.v1.CopyOutRequest
-	(*CopyOutResponse)(nil),      // 9: runnermicrovm.agent.v1.CopyOutResponse
-	(*FlushRequest)(nil),         // 10: runnermicrovm.agent.v1.FlushRequest
-	(*FlushResponse)(nil),        // 11: runnermicrovm.agent.v1.FlushResponse
-	(*BootConfig)(nil),           // 12: runnermicrovm.agent.v1.BootConfig
-	(*Service)(nil),              // 13: runnermicrovm.agent.v1.Service
-	(*GuestDir)(nil),             // 14: runnermicrovm.agent.v1.GuestDir
-	(*Host)(nil),                 // 15: runnermicrovm.agent.v1.Host
-	(*Mount)(nil),                // 16: runnermicrovm.agent.v1.Mount
-	(*Disk)(nil),                 // 17: runnermicrovm.agent.v1.Disk
-	(*Network)(nil),              // 18: runnermicrovm.agent.v1.Network
-	(*Image)(nil),                // 19: runnermicrovm.agent.v1.Image
-	nil,                          // 20: runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
-	nil,                          // 21: runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	(HealthResponse_State)(0),    // 0: runnermicrovm.agent.v1.HealthResponse.State
+	(*PingRequest)(nil),          // 1: runnermicrovm.agent.v1.PingRequest
+	(*PingResponse)(nil),         // 2: runnermicrovm.agent.v1.PingResponse
+	(*StartServiceRequest)(nil),  // 3: runnermicrovm.agent.v1.StartServiceRequest
+	(*StartServiceResponse)(nil), // 4: runnermicrovm.agent.v1.StartServiceResponse
+	(*ExecRequest)(nil),          // 5: runnermicrovm.agent.v1.ExecRequest
+	(*ExecResponse)(nil),         // 6: runnermicrovm.agent.v1.ExecResponse
+	(*CopyInRequest)(nil),        // 7: runnermicrovm.agent.v1.CopyInRequest
+	(*CopyInResponse)(nil),       // 8: runnermicrovm.agent.v1.CopyInResponse
+	(*CopyOutRequest)(nil),       // 9: runnermicrovm.agent.v1.CopyOutRequest
+	(*CopyOutResponse)(nil),      // 10: runnermicrovm.agent.v1.CopyOutResponse
+	(*FlushRequest)(nil),         // 11: runnermicrovm.agent.v1.FlushRequest
+	(*FlushResponse)(nil),        // 12: runnermicrovm.agent.v1.FlushResponse
+	(*HealthRequest)(nil),        // 13: runnermicrovm.agent.v1.HealthRequest
+	(*HealthResponse)(nil),       // 14: runnermicrovm.agent.v1.HealthResponse
+	(*BootConfig)(nil),           // 15: runnermicrovm.agent.v1.BootConfig
+	(*Service)(nil),              // 16: runnermicrovm.agent.v1.Service
+	(*Healthcheck)(nil),          // 17: runnermicrovm.agent.v1.Healthcheck
+	(*GuestDir)(nil),             // 18: runnermicrovm.agent.v1.GuestDir
+	(*Host)(nil),                 // 19: runnermicrovm.agent.v1.Host
+	(*Mount)(nil),                // 20: runnermicrovm.agent.v1.Mount
+	(*Disk)(nil),                 // 21: runnermicrovm.agent.v1.Disk
+	(*Network)(nil),              // 22: runnermicrovm.agent.v1.Network
+	(*Image)(nil),                // 23: runnermicrovm.agent.v1.Image
+	nil,                          // 24: runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
+	nil,                          // 25: runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	(*durationpb.Duration)(nil),  // 26: google.protobuf.Duration
 }
 var file_runnermicrovm_agent_v1_agent_proto_depIdxs = []int32{
-	20, // 0: runnermicrovm.agent.v1.StartServiceRequest.env:type_name -> runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
-	21, // 1: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
-	16, // 2: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
-	17, // 3: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
-	18, // 4: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
-	19, // 5: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
-	15, // 6: runnermicrovm.agent.v1.BootConfig.hosts:type_name -> runnermicrovm.agent.v1.Host
-	14, // 7: runnermicrovm.agent.v1.BootConfig.guest_dirs:type_name -> runnermicrovm.agent.v1.GuestDir
-	13, // 8: runnermicrovm.agent.v1.BootConfig.service:type_name -> runnermicrovm.agent.v1.Service
-	0,  // 9: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
-	2,  // 10: runnermicrovm.agent.v1.AgentService.StartService:input_type -> runnermicrovm.agent.v1.StartServiceRequest
-	4,  // 11: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
-	6,  // 12: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
-	8,  // 13: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
-	10, // 14: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
-	1,  // 15: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
-	3,  // 16: runnermicrovm.agent.v1.AgentService.StartService:output_type -> runnermicrovm.agent.v1.StartServiceResponse
-	5,  // 17: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
-	7,  // 18: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
-	9,  // 19: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
-	11, // 20: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
-	15, // [15:21] is the sub-list for method output_type
-	9,  // [9:15] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	24, // 0: runnermicrovm.agent.v1.StartServiceRequest.env:type_name -> runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
+	25, // 1: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	0,  // 2: runnermicrovm.agent.v1.HealthResponse.state:type_name -> runnermicrovm.agent.v1.HealthResponse.State
+	20, // 3: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
+	21, // 4: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
+	22, // 5: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
+	23, // 6: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
+	19, // 7: runnermicrovm.agent.v1.BootConfig.hosts:type_name -> runnermicrovm.agent.v1.Host
+	18, // 8: runnermicrovm.agent.v1.BootConfig.guest_dirs:type_name -> runnermicrovm.agent.v1.GuestDir
+	16, // 9: runnermicrovm.agent.v1.BootConfig.service:type_name -> runnermicrovm.agent.v1.Service
+	17, // 10: runnermicrovm.agent.v1.Service.healthcheck:type_name -> runnermicrovm.agent.v1.Healthcheck
+	26, // 11: runnermicrovm.agent.v1.Healthcheck.interval:type_name -> google.protobuf.Duration
+	26, // 12: runnermicrovm.agent.v1.Healthcheck.timeout:type_name -> google.protobuf.Duration
+	26, // 13: runnermicrovm.agent.v1.Healthcheck.start_period:type_name -> google.protobuf.Duration
+	26, // 14: runnermicrovm.agent.v1.Healthcheck.start_interval:type_name -> google.protobuf.Duration
+	1,  // 15: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
+	3,  // 16: runnermicrovm.agent.v1.AgentService.StartService:input_type -> runnermicrovm.agent.v1.StartServiceRequest
+	5,  // 17: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
+	7,  // 18: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
+	9,  // 19: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
+	11, // 20: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
+	13, // 21: runnermicrovm.agent.v1.AgentService.Health:input_type -> runnermicrovm.agent.v1.HealthRequest
+	2,  // 22: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
+	4,  // 23: runnermicrovm.agent.v1.AgentService.StartService:output_type -> runnermicrovm.agent.v1.StartServiceResponse
+	6,  // 24: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
+	8,  // 25: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
+	10, // 26: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
+	12, // 27: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
+	14, // 28: runnermicrovm.agent.v1.AgentService.Health:output_type -> runnermicrovm.agent.v1.HealthResponse
+	22, // [22:29] is the sub-list for method output_type
+	15, // [15:22] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_runnermicrovm_agent_v1_agent_proto_init() }
@@ -1468,13 +1769,14 @@ func file_runnermicrovm_agent_v1_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runnermicrovm_agent_v1_agent_proto_rawDesc), len(file_runnermicrovm_agent_v1_agent_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   22,
+			NumEnums:      1,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_runnermicrovm_agent_v1_agent_proto_goTypes,
 		DependencyIndexes: file_runnermicrovm_agent_v1_agent_proto_depIdxs,
+		EnumInfos:         file_runnermicrovm_agent_v1_agent_proto_enumTypes,
 		MessageInfos:      file_runnermicrovm_agent_v1_agent_proto_msgTypes,
 	}.Build()
 	File_runnermicrovm_agent_v1_agent_proto = out.File
