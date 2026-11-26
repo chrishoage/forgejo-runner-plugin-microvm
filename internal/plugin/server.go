@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -470,22 +471,47 @@ const maxServices = maxVMs - 1
 
 // jobServices returns the services of a job whose runner's name is jobName,
 // its container's hostname hostname, each named by the Docker backend's
-// alias rule (serviceName), its hostname that name made a DNS label, in
-// the order the runner lists them. More than maxServices fail with
+// alias rule (serviceName), its hostname that name made a DNS label, in the
+// order the runner lists them. More than maxServices fail with
 // FailedPrecondition: the request is well formed, but no setting can make
 // it run. A service with no name or no image fails with InvalidArgument:
 // the runner skips a service whose image is empty, so one reaching the
-// plugin is malformed. So do two VMs of the job with one name,
-// the job's container's hostname included, naming both: one name in
-// /etc/hosts can't reach two VMs.
+// plugin is malformed. So do two VMs of the job with one name, the job's
+// container's hostname included, and a VM's hostname that is another VM's
+// name or hostname, naming both: one name in /etc/hosts can't reach two
+// VMs, and a VM's own hostname must resolve to it.
 func jobServices(jobName, hostname string, reqs []*pluginv1alpha.ServiceContainer) ([]service, error) {
 	if len(reqs) > maxServices {
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"the job has %d services, more than the %d a job network holds beside the job's container", len(reqs), maxServices)
 	}
-	// Each name taken, by the key it came from; the job's container's
-	// hostname is taken by no key.
-	taken := map[string]*string{hostname: nil}
+	// Each name and hostname taken, by the VM that has it; the job's
+	// container's name is its hostname.
+	taken := map[string]vmClaim{hostname: {kind: "name"}}
+	claim := func(value string, c vmClaim) error {
+		other, ok := taken[value]
+		if !ok {
+			taken[value] = c
+			return nil
+		}
+		switch {
+		case other.kind == c.kind && other.key == nil:
+			return status.Errorf(codes.InvalidArgument,
+				"service %q and the job's container (job %q) both have the %s %q on the job network", *c.key, jobName, c.kind, value)
+		case other.kind == c.kind:
+			return status.Errorf(codes.InvalidArgument,
+				"services %q and %q both have the %s %q on the job network", *other.key, *c.key, c.kind, value)
+		}
+		h, n := c, other
+		if h.kind != "hostname" {
+			h, n = other, c
+		}
+		owner := "the job's container (job " + strconv.Quote(jobName) + ")"
+		if n.key != nil {
+			owner = "service " + strconv.Quote(*n.key)
+		}
+		return status.Errorf(codes.InvalidArgument, "service %q's hostname is %q, the name of %s on the job network", *h.key, value, owner)
+	}
 	out := make([]service, 0, len(reqs))
 	for _, r := range reqs {
 		key := r.GetName()
@@ -496,18 +522,26 @@ func jobServices(jobName, hostname string, reqs []*pluginv1alpha.ServiceContaine
 			return nil, status.Errorf(codes.InvalidArgument, "service %q has no image", key)
 		}
 		name := serviceName(key)
-		if other, ok := taken[name]; ok {
-			if other == nil {
-				return nil, status.Errorf(codes.InvalidArgument,
-					"service %q and the job's container (job %q) both have the name %q on the job network", key, jobName, name)
-			}
-			return nil, status.Errorf(codes.InvalidArgument,
-				"services %q and %q both have the name %q on the job network", *other, key, name)
+		if err := claim(name, vmClaim{key: &key, kind: "name"}); err != nil {
+			return nil, err
 		}
-		taken[name] = &key
-		out = append(out, service{key: key, name: name, hostname: dnsName(name), image: r.GetImage(), env: secret.EnvOf(r.GetEnv())})
+		host := dnsName(name)
+		if host != name {
+			if err := claim(host, vmClaim{key: &key, kind: "hostname"}); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, service{key: key, name: name, hostname: host, image: r.GetImage(), env: secret.EnvOf(r.GetEnv())})
 	}
 	return out, nil
+}
+
+// vmClaim is a VM's claim on a name on the job network: as its name or as
+// its hostname, by the workflow key of its service, nil for the job's
+// container.
+type vmClaim struct {
+	key  *string
+	kind string
 }
 
 // servicesAttr formats a job's services for a log line, as name=image,
