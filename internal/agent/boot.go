@@ -479,6 +479,9 @@ func checkBootConfig(cfg *agentv1.BootConfig) error {
 			return fmt.Errorf("boot config: directory %s: mode %o is more than permission bits", d.GetPath(), d.GetMode())
 		}
 	}
+	if svc := cfg.GetService(); svc != nil && (len(svc.GetArgv()) == 0 || svc.GetArgv()[0] == "") {
+		return fmt.Errorf("boot config: the service has no command")
+	}
 	return nil
 }
 

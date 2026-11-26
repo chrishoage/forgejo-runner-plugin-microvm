@@ -5,6 +5,7 @@ package agentclient
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"path/filepath"
 	"sync/atomic"
@@ -24,6 +25,17 @@ type fakeAgent struct {
 
 func (fakeAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResponse, error) {
 	return &agentv1.PingResponse{}, nil
+}
+
+// fakeServiceEnv is the only environment the fake agent's StartService
+// takes; any other fails the call, as a service that can't start does.
+var fakeServiceEnv = map[string]string{"TOKEN": "s3cret"}
+
+func (fakeAgent) StartService(_ context.Context, req *agentv1.StartServiceRequest) (*agentv1.StartServiceResponse, error) {
+	if !maps.Equal(req.GetEnv(), fakeServiceEnv) {
+		return nil, status.Error(codes.FailedPrecondition, "service sh: not found in its PATH")
+	}
+	return &agentv1.StartServiceResponse{}, nil
 }
 
 // dropFirst closes the first n connections it accepts at once, as libkrun
@@ -158,5 +170,29 @@ func TestPingFailsAtOnceWithoutTheAgent(t *testing.T) {
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("Ping without the agent took %v", d)
+	}
+}
+
+// StartService hands the agent the service's environment, and returns the
+// agent's own error when the service can't start.
+func TestStartService(t *testing.T) {
+	t.Parallel()
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	lis, err := new(net.ListenConfig).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveAgent(t, lis)
+	c := newClient(t, sock)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartService(ctx, fakeServiceEnv); err != nil {
+		t.Fatalf("StartService: %v", err)
+	}
+	if err := c.StartService(ctx, nil); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("StartService of a service that can't start = %v, want the agent's FailedPrecondition", err)
 	}
 }

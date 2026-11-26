@@ -67,41 +67,22 @@ func (r execRequest) LogValue() slog.Value {
 }
 
 func (s *server) exec(req execRequest, stream agentv1.AgentService_ExecServer) error {
-	startError := func(format string, args ...any) error {
+	sendStartError := func(format string, args ...any) error {
 		return stream.Send(&agentv1.ExecResponse{Event: &agentv1.ExecResponse_StartError{StartError: fmt.Sprintf(format, args...)}})
 	}
-	argv := req.argv
-	if len(argv) == 0 {
-		return startError("no command")
+	c, err := prepare(s.root, s.image, req)
+	var cantStart *startError
+	if errors.As(err, &cantStart) {
+		return sendStartError("%v", cantStart.err)
 	}
-	image := s.image
-	id, err := resolveUser(s.root, cmp.Or(req.user, image.GetUser()))
-	if err != nil {
-		return startError("%v", err)
-	}
-	cred, err := credential(id)
 	if err != nil {
 		return err
-	}
-	env := environ(image.GetEnv(), req.env, image.GetDefaultPath(), id.home)
-	path, err := lookPath(argv[0], env)
-	if err != nil {
-		return startError("%v", err)
-	}
-	dir := cmp.Or(req.workingDir, image.GetWorkingDir(), "/")
-	if err := makeWorkDir(dir, id); err != nil {
-		return startError("%v", err)
 	}
 
 	// Cancelled with the call, or when the output can't be sent.
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, argv[1:]...) //nolint:gosec // G204: running the job's command is the agent's purpose
-	cmd.Args[0] = argv[0]
-	cmd.Env = env.Environ()
-	cmd.Dir = dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: cred}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd := c.command(ctx)
 	// The output pipes are the agent's own, not exec's, so Wait doesn't
 	// close them: the output is read to its end below.
 	stdout, err := newOutput()
@@ -120,7 +101,7 @@ func (s *server) exec(req execRequest, stream agentv1.AgentService_ExecServer) e
 	}
 	cmd.Stdout, cmd.Stderr = stdout.w, stderr.w
 	if err := cmd.Start(); err != nil {
-		return startError("%v", err)
+		return sendStartError("%v", err)
 	}
 	stdout.closeWriter()
 	stderr.closeWriter()
@@ -183,6 +164,67 @@ func (s *server) exec(req execRequest, stream agentv1.AgentService_ExecServer) e
 		code = 128 + int32(ws.Signal()) //nolint:gosec // G115: a signal number is below 65
 	}
 	return stream.Send(&agentv1.ExecResponse{Event: &agentv1.ExecResponse_ExitCode{ExitCode: code}})
+}
+
+// command is a command the agent is about to start, an Exec's or the
+// service's, resolved by one rule (GST-4 to GST-6).
+type command struct {
+	path string
+	argv []string
+	env  secret.Env
+	dir  string
+	cred *syscall.Credential
+}
+
+// startError is why a command can't start: a missing executable, an
+// unknown user or group, a working directory that can't be made. Exec sends
+// it as its start error, not as a failure of the call.
+type startError struct{ err error }
+
+func (e *startError) Error() string { return e.err.Error() }
+func (e *startError) Unwrap() error { return e.err }
+
+// prepare resolves req against the image's defaults in the job's root at
+// root: it runs as the request's user, else the image's, else root (GST-5),
+// in the request's working directory, else the image's, else /, which it
+// creates if missing (GST-6), with the image's environment under the
+// request's and argv[0] looked up in that environment's PATH, else the
+// default PATH (GST-4). Why the command can't start is a *startError.
+func prepare(root string, image *agentv1.Image, req execRequest) (command, error) {
+	argv := req.argv
+	if len(argv) == 0 {
+		return command{}, &startError{errors.New("no command")}
+	}
+	id, err := resolveUser(root, cmp.Or(req.user, image.GetUser()))
+	if err != nil {
+		return command{}, &startError{err}
+	}
+	cred, err := credential(id)
+	if err != nil {
+		return command{}, err
+	}
+	env := environ(image.GetEnv(), req.env, image.GetDefaultPath(), id.home)
+	path, err := lookPath(argv[0], env)
+	if err != nil {
+		return command{}, &startError{err}
+	}
+	dir := cmp.Or(req.workingDir, image.GetWorkingDir(), "/")
+	if err := makeWorkDir(dir, id); err != nil {
+		return command{}, &startError{err}
+	}
+	return command{path: path, argv: argv, env: env, dir: dir, cred: cred}, nil
+}
+
+// command returns c to start, as the leader of a process group of its own,
+// which ctx's end kills (GST-8).
+func (c command) command(ctx context.Context) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, c.path, c.argv[1:]...) //nolint:gosec // G204: running the job's command is the agent's purpose
+	cmd.Args[0] = c.argv[0]
+	cmd.Env = c.env.Environ()
+	cmd.Dir = c.dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: c.cred}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return cmd
 }
 
 // output is one of a command's output pipes, read by the agent.
@@ -316,5 +358,14 @@ func lookPath(name string, env secret.Env) (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("%s: not found in PATH %s", name, pathVar)
+	return "", &notFoundError{name: name, path: pathVar}
+}
+
+// notFoundError is a command lookPath can't find. Its message quotes the
+// PATH, for the runner only: the service's start failure, which is logged,
+// leaves it out, since a service's PATH may be its env's (LOG-2).
+type notFoundError struct{ name, path string }
+
+func (e *notFoundError) Error() string {
+	return fmt.Sprintf("%s: not found in PATH %s", e.name, e.path)
 }

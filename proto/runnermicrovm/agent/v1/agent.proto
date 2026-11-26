@@ -7,17 +7,30 @@ syntax = "proto3";
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
 // (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
-// vsock port its boot config names, and the VM is ready when it answers Ping.
+// vsock port its boot config names, and the VM is up when it answers Ping.
 package runnermicrovm.agent.v1;
 
-// AgentService prepares a VM at boot, runs commands inside it and copies files
-// in and out. The job's steps run through the job's container's agent.
+// AgentService prepares a VM at boot, starts its service, runs commands
+// inside it and copies files in and out. The job's steps run through the job's
+// container's agent.
 service AgentService {
-  // Ping answers once the agent has finished its boot mounts and can serve
-  // every other call. A VM is ready when its agent answers Ping. Today the
-  // job's container is the only VM, because the plugin protocol passes no VM
-  // options for services, so its agent is the only one the plugin dials.
+  // Ping answers once the agent has finished its boot work and can serve
+  // every other call: the agent is up. A service's VM answers it before its
+  // service has started, which only StartService does.
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // StartService starts the service the boot config names, with the
+  // request's environment, and returns once its process has started. The
+  // environment comes over the protocol, never in the boot config, because
+  // its values may be secrets, which must not appear in host files (LOG-2).
+  // Once the service runs, the agent exits when it exits, which stops the VM.
+  //
+  // A command that can't start fails the call with FailedPrecondition,
+  // naming only argv[0] and why, never its PATH or an environment value
+  // (LOG-2); the agent then exits 1. A second call, and a call on a VM whose
+  // boot config has no service, fail with FailedPrecondition. Until the call
+  // comes, the agent waits, with no timer of its own.
+  rpc StartService(StartServiceRequest) returns (StartServiceResponse);
 
   // Exec runs one step's command and streams its output, then its exit code
   // or the reason it could not start. Cancelling the call kills the command's
@@ -41,6 +54,16 @@ service AgentService {
 message PingRequest {}
 
 message PingResponse {}
+
+message StartServiceRequest {
+  // The service's own environment, laid over the image's (BootConfig's
+  // image.env) key by key, as an Exec's is: a key set here replaces the
+  // image's. The values may be secrets: they must not appear in logs, host
+  // files or command lines (LOG-2).
+  map<string, string> env = 1;
+}
+
+message StartServiceResponse {}
 
 message ExecRequest {
   // The command and its arguments, run directly, never through a shell. The
@@ -101,10 +124,12 @@ message FlushRequest {}
 message FlushResponse {}
 
 // BootConfig is everything the agent needs to prepare the guest before it
-// serves: its root filesystem, mounts, disks, network and the image's
-// defaults for Exec. The plugin builds it; the job spec and the VM child spec
-// carry it unopened. It reaches the agent as a file in the VM's boot root,
-// /.runner-microvm/boot-config.binpb, encoded as binary protobuf.
+// serves: its root filesystem, mounts, disks, network, the image's defaults
+// for Exec and, for a service, the command to run, but never its
+// environment, which StartService carries (LOG-2). The plugin builds it;
+// the job spec and the VM child spec carry it unopened. It reaches the
+// agent as a file in the VM's boot root, /.runner-microvm/boot-config.binpb,
+// encoded as binary protobuf.
 message BootConfig {
   // The guest directory where the agent mounts the VM's layer link
   // directory's share: /dev/.runner-microvm/layers, under the agent's
@@ -156,6 +181,23 @@ message BootConfig {
   // or "error". The agent fails its boot on any other value, the empty one
   // included.
   string log_level = 14;
+  // The service the VM runs, for a service's VM; absent for the job's
+  // container. The agent starts its command when StartService asks, after
+  // it listens, and exits when the command exits, which stops the VM.
+  Service service = 15;
+}
+
+// Service is the command a service's VM runs, the way Docker runs a
+// container: as the image's user (image.user), in its working directory
+// (image.working_dir), in a process group of its own, with its output on
+// the VM's console. Everything in it comes from the image, so none of it is
+// secret.
+message Service {
+  // The command and its arguments: the image's Entrypoint followed by its
+  // Cmd, run directly, never through a shell. argv[0] is looked up in the
+  // service's environment's PATH, or in image.default_path when it sets
+  // none, as an Exec's command is. The agent refuses an empty argv.
+  repeated string argv = 1;
 }
 
 // GuestDir is a directory the agent creates in the job's root when the image

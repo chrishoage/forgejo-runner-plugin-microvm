@@ -104,14 +104,14 @@ _Avoid_: sandbox, container (except in "the job's container"), guest (except for
 The VM a job's steps run in, booted from the job's image; always the first VM in the job spec, index 0. Each service is another VM of the same job, on the same job network.
 
 **Agent**:
-The program injected into every VM that prepares it at boot, runs commands and copies files in and out. The job's steps run through the job's container's agent.
+The program injected into every VM that prepares it at boot, runs commands and copies files in and out, or runs its service once the plugin asks it to start it. It is up when it answers Ping. The job's steps run through the job's container's agent.
 _Avoid_: guest daemon, init
 
 **Agent protocol**:
 The plugin's own protocol between the plugin and the agent.
 
 **Boot config**:
-What the plugin tells a VM's agent at boot: how to build the VM's root, its mounts, disks and network, and the image's defaults for Exec.
+What the plugin tells a VM's agent at boot: how to build the VM's root, its mounts, disks and network, the image's defaults for Exec, and, for a service, the command to run. Never the service's environment, which the agent protocol carries.
 _Avoid_: agent config
 
 **Scratch disk**:
