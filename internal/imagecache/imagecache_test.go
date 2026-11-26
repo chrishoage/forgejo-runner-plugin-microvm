@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,12 +59,15 @@ func pushTo(t *testing.T, host string, img v1.Image) string {
 	return ref
 }
 
-// Acquire returns the image's digest, environment, user and working
-// directory.
+// Acquire returns the image's digest, environment, user, working directory,
+// entrypoint and command.
 func TestAcquireReturnsTheImage(t *testing.T) {
 	t.Parallel()
 	img, err := mutate.Config(image(t, headerLayer(t, file("f"))),
-		v1.Config{Env: []string{"PATH=/usr/bin:/bin", "A=b"}, User: "builder:staff", WorkingDir: "/src"})
+		v1.Config{
+			Env: []string{"PATH=/usr/bin:/bin", "A=b"}, User: "builder:staff", WorkingDir: "/src",
+			Entrypoint: []string{"/entry", "-x"}, Cmd: []string{"serve", "--port=6379"},
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +87,9 @@ func TestAcquireReturnsTheImage(t *testing.T) {
 	}
 	if got.User != "builder:staff" || got.WorkingDir != "/src" {
 		t.Errorf("user %q, working directory %q, want builder:staff and /src", got.User, got.WorkingDir)
+	}
+	if !slices.Equal(got.Entrypoint, []string{"/entry", "-x"}) || !slices.Equal(got.Cmd, []string{"serve", "--port=6379"}) {
+		t.Errorf("entrypoint %q, command %q, want [/entry -x] and [serve --port=6379]", got.Entrypoint, got.Cmd)
 	}
 }
 
