@@ -11,7 +11,7 @@
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
 // (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
-// vsock port its boot config names, and the VM is ready when it answers Ping.
+// vsock port its boot config names, and the VM is up when it answers Ping.
 
 package agentv1
 
@@ -28,25 +28,38 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentService_Ping_FullMethodName    = "/runnermicrovm.agent.v1.AgentService/Ping"
-	AgentService_Exec_FullMethodName    = "/runnermicrovm.agent.v1.AgentService/Exec"
-	AgentService_CopyIn_FullMethodName  = "/runnermicrovm.agent.v1.AgentService/CopyIn"
-	AgentService_CopyOut_FullMethodName = "/runnermicrovm.agent.v1.AgentService/CopyOut"
-	AgentService_Flush_FullMethodName   = "/runnermicrovm.agent.v1.AgentService/Flush"
+	AgentService_Ping_FullMethodName         = "/runnermicrovm.agent.v1.AgentService/Ping"
+	AgentService_StartService_FullMethodName = "/runnermicrovm.agent.v1.AgentService/StartService"
+	AgentService_Exec_FullMethodName         = "/runnermicrovm.agent.v1.AgentService/Exec"
+	AgentService_CopyIn_FullMethodName       = "/runnermicrovm.agent.v1.AgentService/CopyIn"
+	AgentService_CopyOut_FullMethodName      = "/runnermicrovm.agent.v1.AgentService/CopyOut"
+	AgentService_Flush_FullMethodName        = "/runnermicrovm.agent.v1.AgentService/Flush"
 )
 
 // AgentServiceClient is the client API for AgentService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// AgentService prepares a VM at boot, runs commands inside it and copies files
-// in and out. The job's steps run through the job's container's agent.
+// AgentService prepares a VM at boot, starts its service, runs commands
+// inside it and copies files in and out. The job's steps run through the job's
+// container's agent.
 type AgentServiceClient interface {
-	// Ping answers once the agent has finished its boot mounts and can serve
-	// every other call. A VM is ready when its agent answers Ping. Today the
-	// job's container is the only VM, because the plugin protocol passes no VM
-	// options for services, so its agent is the only one the plugin dials.
+	// Ping answers once the agent has finished its boot work and can serve
+	// every other call: the agent is up. A service's VM answers it before its
+	// service has started, which only StartService does.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// StartService starts the service the boot config names, with the
+	// request's environment, and returns once its process has started. The
+	// environment comes over the protocol, never in the boot config, because
+	// its values may be secrets, which must not appear in host files (LOG-2).
+	// Once the service runs, the agent exits when it exits, which stops the VM.
+	//
+	// A command that can't start fails the call with FailedPrecondition,
+	// naming only argv[0] and why, never its PATH or an environment value
+	// (LOG-2); the agent then exits 1. A second call, and a call on a VM whose
+	// boot config has no service, fail with FailedPrecondition. Until the call
+	// comes, the agent waits, with no timer of its own.
+	StartService(ctx context.Context, in *StartServiceRequest, opts ...grpc.CallOption) (*StartServiceResponse, error)
 	// Exec runs one step's command and streams its output, then its exit code
 	// or the reason it could not start. Cancelling the call kills the command's
 	// process group at once (GST-8).
@@ -75,6 +88,16 @@ func (c *agentServiceClient) Ping(ctx context.Context, in *PingRequest, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PingResponse)
 	err := c.cc.Invoke(ctx, AgentService_Ping_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) StartService(ctx context.Context, in *StartServiceRequest, opts ...grpc.CallOption) (*StartServiceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartServiceResponse)
+	err := c.cc.Invoke(ctx, AgentService_StartService_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,14 +169,26 @@ func (c *agentServiceClient) Flush(ctx context.Context, in *FlushRequest, opts .
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
 //
-// AgentService prepares a VM at boot, runs commands inside it and copies files
-// in and out. The job's steps run through the job's container's agent.
+// AgentService prepares a VM at boot, starts its service, runs commands
+// inside it and copies files in and out. The job's steps run through the job's
+// container's agent.
 type AgentServiceServer interface {
-	// Ping answers once the agent has finished its boot mounts and can serve
-	// every other call. A VM is ready when its agent answers Ping. Today the
-	// job's container is the only VM, because the plugin protocol passes no VM
-	// options for services, so its agent is the only one the plugin dials.
+	// Ping answers once the agent has finished its boot work and can serve
+	// every other call: the agent is up. A service's VM answers it before its
+	// service has started, which only StartService does.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// StartService starts the service the boot config names, with the
+	// request's environment, and returns once its process has started. The
+	// environment comes over the protocol, never in the boot config, because
+	// its values may be secrets, which must not appear in host files (LOG-2).
+	// Once the service runs, the agent exits when it exits, which stops the VM.
+	//
+	// A command that can't start fails the call with FailedPrecondition,
+	// naming only argv[0] and why, never its PATH or an environment value
+	// (LOG-2); the agent then exits 1. A second call, and a call on a VM whose
+	// boot config has no service, fail with FailedPrecondition. Until the call
+	// comes, the agent waits, with no timer of its own.
+	StartService(context.Context, *StartServiceRequest) (*StartServiceResponse, error)
 	// Exec runs one step's command and streams its output, then its exit code
 	// or the reason it could not start. Cancelling the call kills the command's
 	// process group at once (GST-8).
@@ -180,6 +215,9 @@ type UnimplementedAgentServiceServer struct{}
 
 func (UnimplementedAgentServiceServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedAgentServiceServer) StartService(context.Context, *StartServiceRequest) (*StartServiceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartService not implemented")
 }
 func (UnimplementedAgentServiceServer) Exec(*ExecRequest, grpc.ServerStreamingServer[ExecResponse]) error {
 	return status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -228,6 +266,24 @@ func _AgentService_Ping_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServiceServer).Ping(ctx, req.(*PingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_StartService_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartServiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).StartService(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_StartService_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).StartService(ctx, req.(*StartServiceRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -289,6 +345,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _AgentService_Ping_Handler,
+		},
+		{
+			MethodName: "StartService",
+			Handler:    _AgentService_StartService_Handler,
 		},
 		{
 			MethodName: "Flush",

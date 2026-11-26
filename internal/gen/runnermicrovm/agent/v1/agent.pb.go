@@ -11,7 +11,7 @@
 // unix socket libkrun maps to the guest's vsock port, in that VM's runtime
 // directory, <runtime>/<id>/<n>/
 // (docs/adr/0003-plugin-talks-to-agent-directly.md). The agent listens on the
-// vsock port its boot config names, and the VM is ready when it answers Ping.
+// vsock port its boot config names, and the VM is up when it answers Ping.
 
 package agentv1
 
@@ -102,6 +102,90 @@ func (*PingResponse) Descriptor() ([]byte, []int) {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{1}
 }
 
+type StartServiceRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The service's own environment, laid over the image's (BootConfig's
+	// image.env) key by key, as an Exec's is: a key set here replaces the
+	// image's. The values may be secrets: they must not appear in logs, host
+	// files or command lines (LOG-2).
+	Env           map[string]string `protobuf:"bytes,1,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartServiceRequest) Reset() {
+	*x = StartServiceRequest{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartServiceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartServiceRequest) ProtoMessage() {}
+
+func (x *StartServiceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartServiceRequest.ProtoReflect.Descriptor instead.
+func (*StartServiceRequest) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *StartServiceRequest) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+type StartServiceResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartServiceResponse) Reset() {
+	*x = StartServiceResponse{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartServiceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartServiceResponse) ProtoMessage() {}
+
+func (x *StartServiceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartServiceResponse.ProtoReflect.Descriptor instead.
+func (*StartServiceResponse) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+}
+
 type ExecRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The command and its arguments, run directly, never through a shell. The
@@ -123,7 +207,7 @@ type ExecRequest struct {
 
 func (x *ExecRequest) Reset() {
 	*x = ExecRequest{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -135,7 +219,7 @@ func (x *ExecRequest) String() string {
 func (*ExecRequest) ProtoMessage() {}
 
 func (x *ExecRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[2]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -148,7 +232,7 @@ func (x *ExecRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecRequest.ProtoReflect.Descriptor instead.
 func (*ExecRequest) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ExecRequest) GetArgv() []string {
@@ -197,7 +281,7 @@ type ExecResponse struct {
 
 func (x *ExecResponse) Reset() {
 	*x = ExecResponse{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -209,7 +293,7 @@ func (x *ExecResponse) String() string {
 func (*ExecResponse) ProtoMessage() {}
 
 func (x *ExecResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -222,7 +306,7 @@ func (x *ExecResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecResponse.ProtoReflect.Descriptor instead.
 func (*ExecResponse) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ExecResponse) GetEvent() isExecResponse_Event {
@@ -314,7 +398,7 @@ type CopyInRequest struct {
 
 func (x *CopyInRequest) Reset() {
 	*x = CopyInRequest{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -326,7 +410,7 @@ func (x *CopyInRequest) String() string {
 func (*CopyInRequest) ProtoMessage() {}
 
 func (x *CopyInRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -339,7 +423,7 @@ func (x *CopyInRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyInRequest.ProtoReflect.Descriptor instead.
 func (*CopyInRequest) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CopyInRequest) GetDestination() string {
@@ -364,7 +448,7 @@ type CopyInResponse struct {
 
 func (x *CopyInResponse) Reset() {
 	*x = CopyInResponse{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +460,7 @@ func (x *CopyInResponse) String() string {
 func (*CopyInResponse) ProtoMessage() {}
 
 func (x *CopyInResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +473,7 @@ func (x *CopyInResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyInResponse.ProtoReflect.Descriptor instead.
 func (*CopyInResponse) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 type CopyOutRequest struct {
@@ -403,7 +487,7 @@ type CopyOutRequest struct {
 
 func (x *CopyOutRequest) Reset() {
 	*x = CopyOutRequest{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -415,7 +499,7 @@ func (x *CopyOutRequest) String() string {
 func (*CopyOutRequest) ProtoMessage() {}
 
 func (x *CopyOutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -428,7 +512,7 @@ func (x *CopyOutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyOutRequest.ProtoReflect.Descriptor instead.
 func (*CopyOutRequest) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CopyOutRequest) GetPath() string {
@@ -449,7 +533,7 @@ type CopyOutResponse struct {
 
 func (x *CopyOutResponse) Reset() {
 	*x = CopyOutResponse{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +545,7 @@ func (x *CopyOutResponse) String() string {
 func (*CopyOutResponse) ProtoMessage() {}
 
 func (x *CopyOutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +558,7 @@ func (x *CopyOutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyOutResponse.ProtoReflect.Descriptor instead.
 func (*CopyOutResponse) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CopyOutResponse) GetChunk() []byte {
@@ -492,7 +576,7 @@ type FlushRequest struct {
 
 func (x *FlushRequest) Reset() {
 	*x = FlushRequest{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +588,7 @@ func (x *FlushRequest) String() string {
 func (*FlushRequest) ProtoMessage() {}
 
 func (x *FlushRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +601,7 @@ func (x *FlushRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushRequest.ProtoReflect.Descriptor instead.
 func (*FlushRequest) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 type FlushResponse struct {
@@ -528,7 +612,7 @@ type FlushResponse struct {
 
 func (x *FlushResponse) Reset() {
 	*x = FlushResponse{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -540,7 +624,7 @@ func (x *FlushResponse) String() string {
 func (*FlushResponse) ProtoMessage() {}
 
 func (x *FlushResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -553,14 +637,16 @@ func (x *FlushResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushResponse.ProtoReflect.Descriptor instead.
 func (*FlushResponse) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 // BootConfig is everything the agent needs to prepare the guest before it
-// serves: its root filesystem, mounts, disks, network and the image's
-// defaults for Exec. The plugin builds it; the job spec and the VM child spec
-// carry it unopened. It reaches the agent as a file in the VM's boot root,
-// /.runner-microvm/boot-config.binpb, encoded as binary protobuf.
+// serves: its root filesystem, mounts, disks, network, the image's defaults
+// for Exec and, for a service, the command to run, but never its
+// environment, which StartService carries (LOG-2). The plugin builds it;
+// the job spec and the VM child spec carry it unopened. It reaches the
+// agent as a file in the VM's boot root, /.runner-microvm/boot-config.binpb,
+// encoded as binary protobuf.
 type BootConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The guest directory where the agent mounts the VM's layer link
@@ -612,14 +698,18 @@ type BootConfig struct {
 	// The agent's log level, the plugin's log_level: "debug", "info", "warn"
 	// or "error". The agent fails its boot on any other value, the empty one
 	// included.
-	LogLevel      string `protobuf:"bytes,14,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
+	LogLevel string `protobuf:"bytes,14,opt,name=log_level,json=logLevel,proto3" json:"log_level,omitempty"`
+	// The service the VM runs, for a service's VM; absent for the job's
+	// container. The agent starts its command when StartService asks, after
+	// it listens, and exits when the command exits, which stops the VM.
+	Service       *Service `protobuf:"bytes,15,opt,name=service,proto3" json:"service,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BootConfig) Reset() {
 	*x = BootConfig{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +721,7 @@ func (x *BootConfig) String() string {
 func (*BootConfig) ProtoMessage() {}
 
 func (x *BootConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,7 +734,7 @@ func (x *BootConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootConfig.ProtoReflect.Descriptor instead.
 func (*BootConfig) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BootConfig) GetLayerDir() string {
@@ -745,6 +835,66 @@ func (x *BootConfig) GetLogLevel() string {
 	return ""
 }
 
+func (x *BootConfig) GetService() *Service {
+	if x != nil {
+		return x.Service
+	}
+	return nil
+}
+
+// Service is the command a service's VM runs, the way Docker runs a
+// container: as the image's user (image.user), in its working directory
+// (image.working_dir), in a process group of its own, with its output on
+// the VM's console. Everything in it comes from the image, so none of it is
+// secret.
+type Service struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The command and its arguments: the image's Entrypoint followed by its
+	// Cmd, run directly, never through a shell. argv[0] is looked up in the
+	// service's environment's PATH, or in image.default_path when it sets
+	// none, as an Exec's command is. The agent refuses an empty argv.
+	Argv          []string `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Service) Reset() {
+	*x = Service{}
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Service) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Service) ProtoMessage() {}
+
+func (x *Service) ProtoReflect() protoreflect.Message {
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Service.ProtoReflect.Descriptor instead.
+func (*Service) Descriptor() ([]byte, []int) {
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Service) GetArgv() []string {
+	if x != nil {
+		return x.Argv
+	}
+	return nil
+}
+
 // GuestDir is a directory the agent creates in the job's root when the image
 // lacks it.
 type GuestDir struct {
@@ -760,7 +910,7 @@ type GuestDir struct {
 
 func (x *GuestDir) Reset() {
 	*x = GuestDir{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -772,7 +922,7 @@ func (x *GuestDir) String() string {
 func (*GuestDir) ProtoMessage() {}
 
 func (x *GuestDir) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -785,7 +935,7 @@ func (x *GuestDir) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestDir.ProtoReflect.Descriptor instead.
 func (*GuestDir) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GuestDir) GetPath() string {
@@ -817,7 +967,7 @@ type Host struct {
 
 func (x *Host) Reset() {
 	*x = Host{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -829,7 +979,7 @@ func (x *Host) String() string {
 func (*Host) ProtoMessage() {}
 
 func (x *Host) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -842,7 +992,7 @@ func (x *Host) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Host.ProtoReflect.Descriptor instead.
 func (*Host) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Host) GetName() string {
@@ -875,7 +1025,7 @@ type Mount struct {
 
 func (x *Mount) Reset() {
 	*x = Mount{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -887,7 +1037,7 @@ func (x *Mount) String() string {
 func (*Mount) ProtoMessage() {}
 
 func (x *Mount) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -900,7 +1050,7 @@ func (x *Mount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Mount.ProtoReflect.Descriptor instead.
 func (*Mount) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Mount) GetTag() string {
@@ -942,7 +1092,7 @@ type Disk struct {
 
 func (x *Disk) Reset() {
 	*x = Disk{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -954,7 +1104,7 @@ func (x *Disk) String() string {
 func (*Disk) ProtoMessage() {}
 
 func (x *Disk) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -967,7 +1117,7 @@ func (x *Disk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disk.ProtoReflect.Descriptor instead.
 func (*Disk) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Disk) GetBlockId() string {
@@ -1010,7 +1160,7 @@ type Network struct {
 
 func (x *Network) Reset() {
 	*x = Network{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1022,7 +1172,7 @@ func (x *Network) String() string {
 func (*Network) ProtoMessage() {}
 
 func (x *Network) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1035,7 +1185,7 @@ func (x *Network) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Network.ProtoReflect.Descriptor instead.
 func (*Network) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Network) GetAddress() string {
@@ -1083,7 +1233,7 @@ type Image struct {
 
 func (x *Image) Reset() {
 	*x = Image{}
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1095,7 +1245,7 @@ func (x *Image) String() string {
 func (*Image) ProtoMessage() {}
 
 func (x *Image) ProtoReflect() protoreflect.Message {
-	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_runnermicrovm_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1108,7 +1258,7 @@ func (x *Image) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Image.ProtoReflect.Descriptor instead.
 func (*Image) Descriptor() ([]byte, []int) {
-	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Image) GetEnv() []string {
@@ -1145,7 +1295,13 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"\"runnermicrovm/agent/v1/agent.proto\x12\x16runnermicrovm.agent.v1\"\r\n" +
 	"\vPingRequest\"\x0e\n" +
-	"\fPingResponse\"\xce\x01\n" +
+	"\fPingResponse\"\x95\x01\n" +
+	"\x13StartServiceRequest\x12F\n" +
+	"\x03env\x18\x01 \x03(\v24.runnermicrovm.agent.v1.StartServiceRequest.EnvEntryR\x03env\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x16\n" +
+	"\x14StartServiceResponse\"\xce\x01\n" +
 	"\vExecRequest\x12\x12\n" +
 	"\x04argv\x18\x01 \x03(\tR\x04argv\x12>\n" +
 	"\x03env\x18\x02 \x03(\v2,.runnermicrovm.agent.v1.ExecRequest.EnvEntryR\x03env\x12\x12\n" +
@@ -1171,7 +1327,7 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fCopyOutResponse\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\fR\x05chunk\"\x0e\n" +
 	"\fFlushRequest\"\x0f\n" +
-	"\rFlushResponse\"\xd2\x04\n" +
+	"\rFlushResponse\"\x8d\x05\n" +
 	"\n" +
 	"BootConfig\x12\x1b\n" +
 	"\tlayer_dir\x18\x01 \x01(\tR\blayerDir\x12\x1b\n" +
@@ -1190,7 +1346,10 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"vsock_port\x18\v \x01(\rR\tvsockPort\x12?\n" +
 	"\n" +
 	"guest_dirs\x18\f \x03(\v2 .runnermicrovm.agent.v1.GuestDirR\tguestDirs\x12\x1b\n" +
-	"\tlog_level\x18\x0e \x01(\tR\blogLevel\"2\n" +
+	"\tlog_level\x18\x0e \x01(\tR\blogLevel\x129\n" +
+	"\aservice\x18\x0f \x01(\v2\x1f.runnermicrovm.agent.v1.ServiceR\aservice\"\x1d\n" +
+	"\aService\x12\x12\n" +
+	"\x04argv\x18\x01 \x03(\tR\x04argv\"2\n" +
 	"\bGuestDir\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\rR\x04mode\"4\n" +
@@ -1216,9 +1375,10 @@ const file_runnermicrovm_agent_v1_agent_proto_rawDesc = "" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x1f\n" +
 	"\vworking_dir\x18\x03 \x01(\tR\n" +
 	"workingDir\x12!\n" +
-	"\fdefault_path\x18\x04 \x01(\tR\vdefaultPath2\xc5\x03\n" +
+	"\fdefault_path\x18\x04 \x01(\tR\vdefaultPath2\xb0\x04\n" +
 	"\fAgentService\x12Q\n" +
-	"\x04Ping\x12#.runnermicrovm.agent.v1.PingRequest\x1a$.runnermicrovm.agent.v1.PingResponse\x12S\n" +
+	"\x04Ping\x12#.runnermicrovm.agent.v1.PingRequest\x1a$.runnermicrovm.agent.v1.PingResponse\x12i\n" +
+	"\fStartService\x12+.runnermicrovm.agent.v1.StartServiceRequest\x1a,.runnermicrovm.agent.v1.StartServiceResponse\x12S\n" +
 	"\x04Exec\x12#.runnermicrovm.agent.v1.ExecRequest\x1a$.runnermicrovm.agent.v1.ExecResponse0\x01\x12Y\n" +
 	"\x06CopyIn\x12%.runnermicrovm.agent.v1.CopyInRequest\x1a&.runnermicrovm.agent.v1.CopyInResponse(\x01\x12\\\n" +
 	"\aCopyOut\x12&.runnermicrovm.agent.v1.CopyOutRequest\x1a'.runnermicrovm.agent.v1.CopyOutResponse0\x01\x12T\n" +
@@ -1238,50 +1398,58 @@ func file_runnermicrovm_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_runnermicrovm_agent_v1_agent_proto_rawDescData
 }
 
-var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_runnermicrovm_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_runnermicrovm_agent_v1_agent_proto_goTypes = []any{
-	(*PingRequest)(nil),     // 0: runnermicrovm.agent.v1.PingRequest
-	(*PingResponse)(nil),    // 1: runnermicrovm.agent.v1.PingResponse
-	(*ExecRequest)(nil),     // 2: runnermicrovm.agent.v1.ExecRequest
-	(*ExecResponse)(nil),    // 3: runnermicrovm.agent.v1.ExecResponse
-	(*CopyInRequest)(nil),   // 4: runnermicrovm.agent.v1.CopyInRequest
-	(*CopyInResponse)(nil),  // 5: runnermicrovm.agent.v1.CopyInResponse
-	(*CopyOutRequest)(nil),  // 6: runnermicrovm.agent.v1.CopyOutRequest
-	(*CopyOutResponse)(nil), // 7: runnermicrovm.agent.v1.CopyOutResponse
-	(*FlushRequest)(nil),    // 8: runnermicrovm.agent.v1.FlushRequest
-	(*FlushResponse)(nil),   // 9: runnermicrovm.agent.v1.FlushResponse
-	(*BootConfig)(nil),      // 10: runnermicrovm.agent.v1.BootConfig
-	(*GuestDir)(nil),        // 11: runnermicrovm.agent.v1.GuestDir
-	(*Host)(nil),            // 12: runnermicrovm.agent.v1.Host
-	(*Mount)(nil),           // 13: runnermicrovm.agent.v1.Mount
-	(*Disk)(nil),            // 14: runnermicrovm.agent.v1.Disk
-	(*Network)(nil),         // 15: runnermicrovm.agent.v1.Network
-	(*Image)(nil),           // 16: runnermicrovm.agent.v1.Image
-	nil,                     // 17: runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	(*PingRequest)(nil),          // 0: runnermicrovm.agent.v1.PingRequest
+	(*PingResponse)(nil),         // 1: runnermicrovm.agent.v1.PingResponse
+	(*StartServiceRequest)(nil),  // 2: runnermicrovm.agent.v1.StartServiceRequest
+	(*StartServiceResponse)(nil), // 3: runnermicrovm.agent.v1.StartServiceResponse
+	(*ExecRequest)(nil),          // 4: runnermicrovm.agent.v1.ExecRequest
+	(*ExecResponse)(nil),         // 5: runnermicrovm.agent.v1.ExecResponse
+	(*CopyInRequest)(nil),        // 6: runnermicrovm.agent.v1.CopyInRequest
+	(*CopyInResponse)(nil),       // 7: runnermicrovm.agent.v1.CopyInResponse
+	(*CopyOutRequest)(nil),       // 8: runnermicrovm.agent.v1.CopyOutRequest
+	(*CopyOutResponse)(nil),      // 9: runnermicrovm.agent.v1.CopyOutResponse
+	(*FlushRequest)(nil),         // 10: runnermicrovm.agent.v1.FlushRequest
+	(*FlushResponse)(nil),        // 11: runnermicrovm.agent.v1.FlushResponse
+	(*BootConfig)(nil),           // 12: runnermicrovm.agent.v1.BootConfig
+	(*Service)(nil),              // 13: runnermicrovm.agent.v1.Service
+	(*GuestDir)(nil),             // 14: runnermicrovm.agent.v1.GuestDir
+	(*Host)(nil),                 // 15: runnermicrovm.agent.v1.Host
+	(*Mount)(nil),                // 16: runnermicrovm.agent.v1.Mount
+	(*Disk)(nil),                 // 17: runnermicrovm.agent.v1.Disk
+	(*Network)(nil),              // 18: runnermicrovm.agent.v1.Network
+	(*Image)(nil),                // 19: runnermicrovm.agent.v1.Image
+	nil,                          // 20: runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
+	nil,                          // 21: runnermicrovm.agent.v1.ExecRequest.EnvEntry
 }
 var file_runnermicrovm_agent_v1_agent_proto_depIdxs = []int32{
-	17, // 0: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
-	13, // 1: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
-	14, // 2: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
-	15, // 3: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
-	16, // 4: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
-	12, // 5: runnermicrovm.agent.v1.BootConfig.hosts:type_name -> runnermicrovm.agent.v1.Host
-	11, // 6: runnermicrovm.agent.v1.BootConfig.guest_dirs:type_name -> runnermicrovm.agent.v1.GuestDir
-	0,  // 7: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
-	2,  // 8: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
-	4,  // 9: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
-	6,  // 10: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
-	8,  // 11: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
-	1,  // 12: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
-	3,  // 13: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
-	5,  // 14: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
-	7,  // 15: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
-	9,  // 16: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
-	12, // [12:17] is the sub-list for method output_type
-	7,  // [7:12] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	20, // 0: runnermicrovm.agent.v1.StartServiceRequest.env:type_name -> runnermicrovm.agent.v1.StartServiceRequest.EnvEntry
+	21, // 1: runnermicrovm.agent.v1.ExecRequest.env:type_name -> runnermicrovm.agent.v1.ExecRequest.EnvEntry
+	16, // 2: runnermicrovm.agent.v1.BootConfig.mounts:type_name -> runnermicrovm.agent.v1.Mount
+	17, // 3: runnermicrovm.agent.v1.BootConfig.disks:type_name -> runnermicrovm.agent.v1.Disk
+	18, // 4: runnermicrovm.agent.v1.BootConfig.network:type_name -> runnermicrovm.agent.v1.Network
+	19, // 5: runnermicrovm.agent.v1.BootConfig.image:type_name -> runnermicrovm.agent.v1.Image
+	15, // 6: runnermicrovm.agent.v1.BootConfig.hosts:type_name -> runnermicrovm.agent.v1.Host
+	14, // 7: runnermicrovm.agent.v1.BootConfig.guest_dirs:type_name -> runnermicrovm.agent.v1.GuestDir
+	13, // 8: runnermicrovm.agent.v1.BootConfig.service:type_name -> runnermicrovm.agent.v1.Service
+	0,  // 9: runnermicrovm.agent.v1.AgentService.Ping:input_type -> runnermicrovm.agent.v1.PingRequest
+	2,  // 10: runnermicrovm.agent.v1.AgentService.StartService:input_type -> runnermicrovm.agent.v1.StartServiceRequest
+	4,  // 11: runnermicrovm.agent.v1.AgentService.Exec:input_type -> runnermicrovm.agent.v1.ExecRequest
+	6,  // 12: runnermicrovm.agent.v1.AgentService.CopyIn:input_type -> runnermicrovm.agent.v1.CopyInRequest
+	8,  // 13: runnermicrovm.agent.v1.AgentService.CopyOut:input_type -> runnermicrovm.agent.v1.CopyOutRequest
+	10, // 14: runnermicrovm.agent.v1.AgentService.Flush:input_type -> runnermicrovm.agent.v1.FlushRequest
+	1,  // 15: runnermicrovm.agent.v1.AgentService.Ping:output_type -> runnermicrovm.agent.v1.PingResponse
+	3,  // 16: runnermicrovm.agent.v1.AgentService.StartService:output_type -> runnermicrovm.agent.v1.StartServiceResponse
+	5,  // 17: runnermicrovm.agent.v1.AgentService.Exec:output_type -> runnermicrovm.agent.v1.ExecResponse
+	7,  // 18: runnermicrovm.agent.v1.AgentService.CopyIn:output_type -> runnermicrovm.agent.v1.CopyInResponse
+	9,  // 19: runnermicrovm.agent.v1.AgentService.CopyOut:output_type -> runnermicrovm.agent.v1.CopyOutResponse
+	11, // 20: runnermicrovm.agent.v1.AgentService.Flush:output_type -> runnermicrovm.agent.v1.FlushResponse
+	15, // [15:21] is the sub-list for method output_type
+	9,  // [9:15] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_runnermicrovm_agent_v1_agent_proto_init() }
@@ -1289,7 +1457,7 @@ func file_runnermicrovm_agent_v1_agent_proto_init() {
 	if File_runnermicrovm_agent_v1_agent_proto != nil {
 		return
 	}
-	file_runnermicrovm_agent_v1_agent_proto_msgTypes[3].OneofWrappers = []any{
+	file_runnermicrovm_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
 		(*ExecResponse_Stdout)(nil),
 		(*ExecResponse_Stderr)(nil),
 		(*ExecResponse_ExitCode)(nil),
@@ -1301,7 +1469,7 @@ func file_runnermicrovm_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runnermicrovm_agent_v1_agent_proto_rawDesc), len(file_runnermicrovm_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
