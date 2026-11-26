@@ -2,8 +2,8 @@
 
 // Package agentclient is the plugin's side of the agent protocol: it dials a
 // VM's agent over the unix socket libkrun maps to the guest's vsock port,
-// decides readiness, starts a service's VM's service, and runs Exec, CopyIn,
-// CopyOut and Flush.
+// decides readiness, starts a service's VM's service, asks its health, and
+// runs Exec, CopyIn, CopyOut and Flush.
 //
 // It is its own package so it can't drift into internal/agent and pull host
 // code toward the guest.
@@ -83,6 +83,12 @@ func (c *Client) Ping(ctx context.Context) error {
 func (c *Client) StartService(ctx context.Context, env map[string]string) error {
 	_, err := c.rpc.StartService(ctx, &agentv1.StartServiceRequest{Env: env})
 	return err
+}
+
+// Health returns the health of the VM's service. Like Ping, it does not wait
+// for the agent to be ready: it is asked once WaitReady has returned.
+func (c *Client) Health(ctx context.Context) (*agentv1.HealthResponse, error) {
+	return c.rpc.Health(ctx, &agentv1.HealthRequest{})
 }
 
 // Close closes the connection, ending every call on it.

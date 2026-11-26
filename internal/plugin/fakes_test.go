@@ -91,6 +91,9 @@ type fakeCache struct {
 	// commandless are the references whose image has neither an
 	// Entrypoint nor a Cmd; every other image has both.
 	commandless map[string]bool
+	// healthchecks are the HEALTHCHECKs of images, by their references;
+	// every other image has none.
+	healthchecks map[string]*imagecache.Healthcheck
 	// block makes Acquire send its job on entered, then wait for its
 	// context, or for release to close when it is set.
 	block   bool
@@ -157,6 +160,7 @@ func (c *fakeCache) Acquire(ctx context.Context, req imagecache.Request) (imagec
 	if c.commandless[req.Ref] {
 		img.Entrypoint, img.Cmd = nil, nil
 	}
+	img.Healthcheck = c.healthchecks[req.Ref]
 	return img, nil
 }
 
@@ -500,6 +504,11 @@ func (*fakeAgent) Ping(context.Context, *agentv1.PingRequest) (*agentv1.PingResp
 // StartService starts nothing, and succeeds.
 func (*fakeAgent) StartService(context.Context, *agentv1.StartServiceRequest) (*agentv1.StartServiceResponse, error) {
 	return &agentv1.StartServiceResponse{}, nil
+}
+
+// Health answers that its VM's service has no health check.
+func (*fakeAgent) Health(context.Context, *agentv1.HealthRequest) (*agentv1.HealthResponse, error) {
+	return &agentv1.HealthResponse{State: agentv1.HealthResponse_STATE_NONE}, nil
 }
 
 // Exec writes its argv and working directory to stdout, its env's A to
