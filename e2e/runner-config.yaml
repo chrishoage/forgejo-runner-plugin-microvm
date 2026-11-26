@@ -17,10 +17,12 @@ runner:
   # microvm names no profile, so it gets default; microvm-big names big.
   # microvm-node has the Node image, with git and node, for the workflows
   # that clone, fetch or use actions; it gets default too. microvm-storage
-  # names storage, with the harness's mount and disk fixtures.
+  # names storage, with the harness's mount and disk fixtures. microvm-small
+  # names small, 256 MiB, for the services workflow's VMs.
   labels:
     - microvm:runner-microvm://@IMAGE@
     - microvm-big:runner-microvm://@IMAGE@;profile=big
+    - microvm-small:runner-microvm://@IMAGE@;profile=small
     - microvm-node:runner-microvm://@NODE_IMAGE@
     - microvm-storage:runner-microvm://@IMAGE@;profile=storage
 

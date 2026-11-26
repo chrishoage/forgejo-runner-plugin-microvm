@@ -120,10 +120,11 @@ up:
     # listen socket in the runtime directory, which the runner's container
     # mounts, and its lib_dir is the dev shell's libraries. It defines
     # default, a larger profile, big, which the microvm-big label names,
-    # and storage, with the fixtures above, which the microvm-storage label
-    # names; each key on a line of its own, so an edit for a reload is one
-    # sed. Its memory budget is big's memory, so two big jobs run one after
-    # the other, and two of the others at once.
+    # small, 256 MiB, which the microvm-small label names, for the services
+    # workflow, and storage, with the fixtures above, which the
+    # microvm-storage label names; each key on a line of its own, so an
+    # edit for a reload is one sed. Its memory budget is big's memory, so
+    # two big jobs run one after the other, and two of the others at once.
     sock='{{ plugin_dir }}/runtime/runner-microvm.sock'
     {
         echo "listen: unix://$sock"
@@ -141,6 +142,10 @@ up:
         echo "    cpus: 2"
         echo "    memory_mib: 1536"
         echo "    scratch_gib: 4"
+        echo "  small:"
+        echo "    cpus: 1"
+        echo "    memory_mib: 256"
+        echo "    scratch_gib: 2"
         echo "  storage:"
         echo "    cpus: 1"
         echo "    memory_mib: 768"
@@ -232,6 +237,11 @@ run workflow="echo":
     curl -sS --max-time 30 -o /dev/null -u '{{ admin }}':"$password" -X DELETE "$repo"
     call -X POST '{{ api }}/user/repos' \
         -d '{"name": "{{ workflow }}", "default_branch": "main", "private": true}' >/dev/null
+    # The services workflow's service image, e2e/redis-image, as the
+    # repository's REDIS_IMAGE variable: a workflow file can't read a file.
+    # Every repository gets it, whether or not its workflow names it.
+    redis_image=$(tr -d '[:space:]' <redis-image)
+    call -X POST "$repo/actions/variables/REDIS_IMAGE" -d "{\"value\": \"$redis_image\"}" >/dev/null
     # One commit on main: the workflow, and e2e/actions/ at actions/, which
     # a workflow's uses: names at its own commit. Pushed with git, since
     # Forgejo's contents API can't set the executable bits the actions'
