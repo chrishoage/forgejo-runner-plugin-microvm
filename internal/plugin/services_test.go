@@ -47,7 +47,8 @@ func createWithServices(t *testing.T, c pluginv1alpha.BackendPluginClient, name 
 
 // Create accepts a job's services, each named by the Docker backend's alias
 // rule, and refuses, adding no job: two VMs with one name, the job's
-// container's hostname included, naming both keys, and a service with no
+// container's hostname included, or a VM's hostname that is another's name
+// or hostname, naming both keys, and a service with no
 // name or no image, with InvalidArgument; more than 252 services with
 // FailedPrecondition, naming the count and the limit, as a job whose need,
 // its profile's memory_mib for each VM, is over max_memory_mib.
@@ -97,6 +98,26 @@ func TestCreateTakesServices(t *testing.T) {
 			[]*pluginv1alpha.ServiceContainer{svc("Build", "postgres")},
 			codes.InvalidArgument, `service "Build" and the job's container (job "build") both have the name "build" on the job network`,
 		},
+		{
+			"a hostname that is another service's name",
+			[]*pluginv1alpha.ServiceContainer{svc("my-db", "postgres"), svc("my_db", "mysql")},
+			codes.InvalidArgument, `service "my_db"'s hostname is "my-db", the name of service "my-db" on the job network`,
+		},
+		{
+			"a name that is an earlier service's hostname",
+			[]*pluginv1alpha.ServiceContainer{svc("my_db", "mysql"), svc("my-db", "postgres")},
+			codes.InvalidArgument, `service "my_db"'s hostname is "my-db", the name of service "my-db" on the job network`,
+		},
+		{
+			"two hostnames, one cut",
+			[]*pluginv1alpha.ServiceContainer{svc(strings.Repeat("a", 63)+"_1", "postgres"), svc(strings.Repeat("a", 63)+"_2", "mysql")},
+			codes.InvalidArgument, `services "` + strings.Repeat("a", 63) + `_1" and "` + strings.Repeat("a", 63) + `_2" both have the hostname "` + strings.Repeat("a", 63) + `" on the job network`,
+		},
+		{
+			"two hostnames, one collapsed",
+			[]*pluginv1alpha.ServiceContainer{svc("a__b", "postgres"), svc("a_b", "mysql")},
+			codes.InvalidArgument, `services "a__b" and "a_b" both have the hostname "a-b" on the job network`,
+		},
 		{"no name", []*pluginv1alpha.ServiceContainer{svc("", "postgres")}, codes.InvalidArgument, `a service has no name (its image is "postgres")`},
 		{"no image", []*pluginv1alpha.ServiceContainer{svc("db", "")}, codes.InvalidArgument, `service "db" has no image`},
 		{
@@ -108,6 +129,12 @@ func TestCreateTakesServices(t *testing.T) {
 		if status.Code(err) != tc.code || status.Convert(err).Message() != tc.want {
 			t.Errorf("%s: Create = %v; want %v: %s", tc.desc, err, tc.code, tc.want)
 		}
+	}
+	// A service's hostname may not be the job's container's name either.
+	_, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{Name: "X-Y", LabelArg: testImage, Services: []*pluginv1alpha.ServiceContainer{svc("x_y", "postgres")}})
+	if want := `service "x_y"'s hostname is "x-y", the name of the job's container (job "X-Y") on the job network`; status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != want {
+		t.Errorf("Create of a service whose hostname is the job's container's = %v; want InvalidArgument: %s", err, want)
 	}
 	if n := srv.jobCount(); n != 1 {
 		t.Errorf("%d jobs in the table after refused Creates, want 1", n)

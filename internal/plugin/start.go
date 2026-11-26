@@ -384,7 +384,7 @@ func (s *Server) boot(ctx context.Context, j *job, p *progress) (imagecache.Imag
 	specVMs := make([]*jobv1.VM, len(vms))
 	for i, vm := range vms {
 		// A VM's own hostname maps to its own address, as Docker's does, when
-		// it isn't its name.
+		// it isn't its name; Create made sure no other VM has it.
 		own := hosts
 		if vm.hostname != vm.name {
 			own = append(slices.Clone(hosts), &agentv1.Host{Name: vm.hostname, Address: hosts[i].GetAddress()})
