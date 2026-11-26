@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/admission"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/agentclient"
@@ -125,10 +127,11 @@ const (
 // Start pulls the image of every VM of the job, the job's container and
 // each service, waits for the job's admission to its disks and memory,
 // starts its job process, which boots every VM, waits until every VM is
-// ready (waitReady), and ends with StartComplete carrying the job's
-// container's image's environment (PROTO-8). Before that it sends a
-// progress line for each image, each wait if there is one, each VM and the
-// total (PROTO-9). A failed Start
+// ready and every service is healthy, or has no health check (waitReady),
+// and ends with StartComplete carrying the job's container's image's
+// environment (PROTO-8). Before that it sends a progress line for each
+// image, each wait if there is one, each VM, each service's health wait and
+// the total (PROTO-9). A failed Start
 // kills the job process, waits until its group is reaped, and then releases
 // the job's admission, its disks and memory together; when the kill fails,
 // the job keeps its admission until its Remove reaps the group.
@@ -514,6 +517,27 @@ func checkCommand(img imagecache.Image) error {
 	return nil
 }
 
+// bootHealthcheck is the boot config's copy of an image's HEALTHCHECK hc,
+// as the image sets it, nil for none: the agent applies Docker's rules to
+// it. A zero duration is left unset, as the image left it.
+func bootHealthcheck(hc *imagecache.Healthcheck) *agentv1.Healthcheck {
+	if hc == nil {
+		return nil
+	}
+	d := func(v time.Duration) *durationpb.Duration {
+		if v == 0 {
+			return nil
+		}
+		return durationpb.New(v)
+	}
+	return &agentv1.Healthcheck{
+		Test: hc.Test, Interval: d(hc.Interval), Timeout: d(hc.Timeout), StartPeriod: d(hc.StartPeriod), StartInterval: d(hc.StartInterval),
+		// Retries past an int32 are as good as never: the agent takes
+		// one below 1 as Docker's default.
+		Retries: int32(min(max(hc.Retries, 0), math.MaxInt32)),
+	}
+}
+
 // serviceArgv is a service's command from its image: the Entrypoint
 // followed by the Cmd, as Docker runs it.
 func serviceArgv(img imagecache.Image) []string {
@@ -551,7 +575,7 @@ func (s *Server) vmSpec(j *job, vm *jobVM, hosts []*agentv1.Host) (*jobv1.VM, er
 	var mounts []*jobv1.Mount
 	var disks []*jobv1.Disk
 	if svc := vm.service; svc != nil {
-		boot.Service = &agentv1.Service{Argv: serviceArgv(img)}
+		boot.Service = &agentv1.Service{Argv: serviceArgv(img), Healthcheck: bootHealthcheck(img.Healthcheck)}
 	} else {
 		// The directories steps expect.
 		for _, d := range guestDirs {
@@ -744,14 +768,20 @@ func diskMode(readWrite bool) string {
 // agents their clients, is ready, sending each VM's progress line as it is,
 // timed from booting: the job's container once its agent answers Ping, a
 // service's VM once its agent has answered Ping and then StartService, sent
-// once, with the service's env, has started its command. It fails as soon
-// as any VM exits or the job process fails, naming the VM, once a service's
-// command can't start, quoting the agent, or once the ready timeout, which
-// bounds the Pings and StartServices together, passes before every VM is
-// ready (VM-8).
+// once, with the service's env, has started its command. It then waits
+// until each service is healthy, or has no health check, asking its agent's
+// Health every healthPoll from the moment its StartService succeeded,
+// bounded by ctx only, with a progress line as the wait starts and as the
+// check passes. It fails as soon as any VM exits or the job process fails,
+// naming the VM, once a service's command can't start, quoting the agent,
+// once the ready timeout, which bounds the Pings and StartServices
+// together, passes before every VM is ready (VM-8), or once a service is
+// unhealthy, naming it, with its last check's output.
 func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents []*agentclient.Client, p *progress, booting time.Time) error {
 	readyCtx, cancel := context.WithTimeout(ctx, s.cfg.ReadyTimeout)
 	defer cancel()
+	healthCtx, cancelHealth := context.WithCancel(ctx)
+	defer cancelHealth()
 	type answer struct {
 		i int
 		// pinged says the agent answered Ping, so err, if any, is
@@ -762,6 +792,9 @@ func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents 
 	answers := make(chan answer, len(agents))
 	// starting[i] is set once VM i's StartService is sent.
 	starting := make([]atomic.Bool, len(agents))
+	// Each service's health goroutine sends at most two: starting, then
+	// its end.
+	healths := make(chan healthEvent, 2*len(agents))
 	var wg sync.WaitGroup
 	for i, a := range agents {
 		wg.Go(func() {
@@ -776,18 +809,38 @@ func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents 
 			answers <- answer{i, true, a.StartService(readyCtx, j.services[i-1].env.Reveal())}
 		})
 	}
-	// Every goroutine ends, once readyCtx does at the latest.
-	defer func() { cancel(); wg.Wait() }()
+	// Every goroutine ends, once readyCtx and healthCtx do at the latest.
+	defer func() { cancel(); cancelHealth(); wg.Wait() }()
 	// answered[i] is set once VM i's answer is read.
 	ready, answered := make([]bool, len(vms)), make([]bool, len(vms))
+	// left counts every VM still to be ready and every service's health
+	// still to wait for.
 	left := len(vms)
+	for _, vm := range vms {
+		if vm.GetBoot().GetService() != nil {
+			left++
+		}
+	}
+	waitingSince := make([]time.Time, len(vms))
+	// pending marks each service whose health is still to wait for.
+	pending := make([]bool, len(vms))
+	// A Health that failed, for any reason but Start's own end, is most
+	// likely its VM dying: the job process's events say so within the
+	// grace, and lostHealth fails Start once it has passed.
+	var lostHealth error
+	var grace <-chan time.Time
 	// Once the job process has exited, its events still to come say why:
 	// they end when the launcher reaches the end of its stdout, which no
 	// process is left to hold open, so they are read to their end before
-	// the exit is reported. It names the first VM not yet ready.
+	// the exit is reported. It names the first VM not yet ready or, once
+	// every agent has answered, the first service whose health is pending.
 	events, exited := j.proc.Events, j.proc.Exited
 	exitedErr := func() error {
-		vm := vms[slices.Index(ready, false)]
+		i := slices.Index(ready, false)
+		if i < 0 {
+			i = max(slices.Index(pending, true), 0)
+		}
+		vm := vms[i]
 		return &outputError{fmt.Sprintf("VM %s: its job process exited during boot", vm.GetName()), vmOutput(tail(vm.GetVmLog()), tail(vm.GetConsole())), isService(vm)}
 	}
 	// A StartService whose connection failed is how the plugin first sees
@@ -803,6 +856,10 @@ func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents 
 			if a.err == nil {
 				ready[a.i] = true
 				p.line("VM %s (%d CPUs, %d MiB) ready in %s", vm.GetName(), vm.GetCpus(), vm.GetMemoryMib(), seconds(time.Since(booting)))
+				if vm.GetBoot().GetService() != nil {
+					waitingSince[a.i], pending[a.i] = time.Now(), true
+					wg.Go(func() { awaitHealth(healthCtx, a.i, agents[a.i], healths) })
+				}
 				if left--; left == 0 {
 					return nil
 				}
@@ -833,6 +890,44 @@ func (s *Server) waitReady(ctx context.Context, j *job, vms []*jobv1.VM, agents 
 			}
 		case <-lostC:
 			return lost
+		case h := <-healths:
+			name := vms[h.i].GetName()
+			if !h.starting && h.err == nil {
+				pending[h.i] = false
+			}
+			switch {
+			case h.err != nil:
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if h.alive {
+					return fmt.Errorf("VM %s: its agent's Health failed: %w", name, h.err)
+				}
+				if lostHealth == nil {
+					lostHealth = fmt.Errorf("VM %s: its agent's Health failed, and the VM has not exited: %w", name, h.err)
+					grace = time.After(s.cfg.LostAgentGrace)
+				}
+				continue
+			case h.starting:
+				p.log.Info("waiting for a service's health", "vm", name)
+				p.line("waiting for service %s to be healthy", name)
+				continue
+			case h.resp.GetState() == agentv1.HealthResponse_STATE_UNHEALTHY:
+				var out string
+				if last := lastLines(h.resp.GetOutput()); last != "" {
+					out = "\nlast health check:\n" + last
+				}
+				return &outputError{"service " + name + " is unhealthy", out, true}
+			case h.resp.GetState() == agentv1.HealthResponse_STATE_HEALTHY:
+				took := time.Since(waitingSince[h.i])
+				p.log.Info("service healthy", "vm", name, "took", took.Round(time.Millisecond))
+				p.line("service %s healthy after %s", name, seconds(took))
+			}
+			if left--; left == 0 {
+				return nil
+			}
+		case <-grace:
+			return lostHealth
 		case ev, ok := <-events:
 			if !ok {
 				if exited == nil {
@@ -894,6 +989,93 @@ func serviceNotStarted(vm *jobv1.VM, err error) string {
 		msg = msg[:maxAgentMessage]
 	}
 	return fmt.Sprintf("VM %s: its service did not start: %s", vm.GetName(), strings.ToValidUTF8(msg, ""))
+}
+
+// healthEvent is what awaitHealth tells waitReady of VM i's service: that
+// its check is starting, or how the wait ended: its last Health answer,
+// none, healthy or unhealthy, or the error that ended it.
+type healthEvent struct {
+	i        int
+	starting bool
+	resp     *agentv1.HealthResponse
+	err      error
+	// alive is set with err when the agent still answers Ping: its own
+	// error, which no VM's exit explains.
+	alive bool
+}
+
+// healthClient is what awaitHealth calls on a service's agent: its
+// *agentclient.Client.
+type healthClient interface {
+	Health(ctx context.Context) (*agentv1.HealthResponse, error)
+	Ping(ctx context.Context) error
+}
+
+// healthPoll is how often Start asks a starting service's Health. The
+// agent runs the check on Docker's timing and Health only reads its state,
+// so a fixed pace sees a pass within about a second, whatever the check's
+// interval, and leaves the guest nothing that sets how often the plugin
+// calls.
+const healthPoll = time.Second
+
+// healthCallTimeout bounds each Health call, and the Ping that tells a
+// failed one's agent alive: an agent that doesn't answer fails the wait
+// rather than holding it.
+const healthCallTimeout = 5 * time.Second
+
+// awaitHealth asks a's Health, VM i's, until its service is no longer
+// starting: at once, then every healthPoll, each call bounded by
+// healthCallTimeout. It sends its events on events: starting, the first
+// time it is, then its end. It returns with ctx.
+func awaitHealth(ctx context.Context, i int, a healthClient, events chan<- healthEvent) {
+	ticker := time.NewTicker(healthPoll)
+	defer ticker.Stop()
+	starting := false
+	for {
+		resp, err := callHealth(ctx, a)
+		if err != nil {
+			// An agent that answers is alive: its error is its own.
+			// One that doesn't is, most likely, a VM dying.
+			alive := status.Code(err) != codes.Unavailable && ctx.Err() == nil && pingWithin(ctx, a) == nil
+			events <- healthEvent{i: i, err: err, alive: alive}
+			return
+		}
+		switch resp.GetState() {
+		case agentv1.HealthResponse_STATE_NONE, agentv1.HealthResponse_STATE_HEALTHY, agentv1.HealthResponse_STATE_UNHEALTHY:
+			events <- healthEvent{i: i, resp: resp}
+			return
+		case agentv1.HealthResponse_STATE_STARTING:
+		case agentv1.HealthResponse_STATE_UNSPECIFIED:
+			fallthrough
+		default:
+			events <- healthEvent{i: i, err: fmt.Errorf("it answered with an unknown state, %v", resp.GetState()), alive: true}
+			return
+		}
+		if !starting {
+			starting = true
+			events <- healthEvent{i: i, starting: true}
+		}
+		select {
+		case <-ctx.Done():
+			events <- healthEvent{i: i, err: ctx.Err()}
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// callHealth is one Health call on a, bounded by healthCallTimeout.
+func callHealth(ctx context.Context, a healthClient) (*agentv1.HealthResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, healthCallTimeout)
+	defer cancel()
+	return a.Health(ctx)
+}
+
+// pingWithin is a Ping of a, bounded by healthCallTimeout.
+func pingWithin(ctx context.Context, a healthClient) error {
+	ctx, cancel := context.WithTimeout(ctx, healthCallTimeout)
+	defer cancel()
+	return a.Ping(ctx)
 }
 
 // lostAgentGrace is how long a call whose agent failed, and is gone, waits
