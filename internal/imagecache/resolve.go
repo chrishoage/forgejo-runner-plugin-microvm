@@ -406,6 +406,27 @@ func parseConfig(raw []byte) (*v1.ConfigFile, error) {
 	return v1.ParseConfigFile(bytes.NewReader(raw))
 }
 
+// healthcheck returns the HEALTHCHECK of the image config cfg, parsed from
+// raw, or nil when it sets none. go-containerregistry's config has no
+// StartInterval, which Docker added later, so it is read from raw; one that
+// can't be read is left to its default, as an image that sets none.
+func healthcheck(cfg *v1.ConfigFile, raw []byte) *Healthcheck {
+	hc := cfg.Config.Healthcheck
+	if hc == nil {
+		return nil
+	}
+	var extra struct {
+		Config struct {
+			Healthcheck struct{ StartInterval time.Duration }
+		}
+	}
+	_ = json.Unmarshal(raw, &extra)
+	return &Healthcheck{
+		Test: hc.Test, Interval: hc.Interval, Timeout: hc.Timeout, StartPeriod: hc.StartPeriod,
+		StartInterval: extra.Config.Healthcheck.StartInterval, Retries: hc.Retries,
+	}
+}
+
 // writeFile writes b to <cache>/<dir>/<name>: a temp file, fsync, rename
 // into place, and fsync of the directory, so a crash leaves the old file or
 // the new one, never a partial one. Mode 0600, from os.CreateTemp.

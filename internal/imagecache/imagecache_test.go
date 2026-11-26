@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -60,13 +62,14 @@ func pushTo(t *testing.T, host string, img v1.Image) string {
 }
 
 // Acquire returns the image's digest, environment, user, working directory,
-// entrypoint and command.
+// entrypoint, command and health check.
 func TestAcquireReturnsTheImage(t *testing.T) {
 	t.Parallel()
 	img, err := mutate.Config(image(t, headerLayer(t, file("f"))),
 		v1.Config{
 			Env: []string{"PATH=/usr/bin:/bin", "A=b"}, User: "builder:staff", WorkingDir: "/src",
 			Entrypoint: []string{"/entry", "-x"}, Cmd: []string{"serve", "--port=6379"},
+			Healthcheck: &v1.HealthConfig{Test: []string{"CMD", "ping"}, Interval: time.Second, Timeout: 2 * time.Second, StartPeriod: 3 * time.Second, Retries: 4},
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +93,37 @@ func TestAcquireReturnsTheImage(t *testing.T) {
 	}
 	if !slices.Equal(got.Entrypoint, []string{"/entry", "-x"}) || !slices.Equal(got.Cmd, []string{"serve", "--port=6379"}) {
 		t.Errorf("entrypoint %q, command %q, want [/entry -x] and [serve --port=6379]", got.Entrypoint, got.Cmd)
+	}
+	wantHC := Healthcheck{Test: []string{"CMD", "ping"}, Interval: time.Second, Timeout: 2 * time.Second, StartPeriod: 3 * time.Second, Retries: 4}
+	if got.Healthcheck == nil || !reflect.DeepEqual(*got.Healthcheck, wantHC) {
+		t.Errorf("health check %+v, want %+v", got.Healthcheck, wantHC)
+	}
+}
+
+// An image's health check carries Docker's StartInterval, which
+// go-containerregistry's config lacks, read from the raw config; an image
+// with no HEALTHCHECK has none.
+func TestHealthcheckReadsTheStartInterval(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		raw  string
+		want *Healthcheck
+	}{
+		{`{"config":{}}`, nil},
+		{
+			`{"config":{"Healthcheck":{"Test":["CMD-SHELL","true"],"Interval":1000000000,"StartPeriod":2000000000,"StartInterval":500000000,"Retries":2}}}`,
+			&Healthcheck{Test: []string{"CMD-SHELL", "true"}, Interval: time.Second, StartPeriod: 2 * time.Second, StartInterval: 500 * time.Millisecond, Retries: 2},
+		},
+		// A StartInterval that is no duration is left to its default.
+		{`{"config":{"Healthcheck":{"Test":["NONE"],"StartInterval":"5s"}}}`, &Healthcheck{Test: []string{"NONE"}}},
+	} {
+		cfg, err := parseConfig([]byte(tc.raw))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.raw, err)
+		}
+		if got := healthcheck(cfg, []byte(tc.raw)); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: health check %+v, want %+v", tc.raw, got, tc.want)
+		}
 	}
 }
 
