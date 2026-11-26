@@ -61,6 +61,20 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - run: nix develop -c just test
 
+  # The Nix package: red on a Go module update until `just vendor-hash`
+  # refreshes its vendorHash (docs/conventions.md, Renovate).
+  package:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: write # purge old Nix store caches (pushes to main only)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix
+      - run: nix develop -c just package
+
   licenses:
     runs-on: ubuntu-26.04
     permissions:
