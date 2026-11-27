@@ -14,6 +14,7 @@ import (
 	"time"
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // dieBound is how soon a job process must be gone once the plugin is.
@@ -66,9 +67,7 @@ func stuckInMkfs(t *testing.T) (*jobv1.Spec, string) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "mkfs.pid")
 	mkfs := filepath.Join(dir, "mkfs.ext4")
-	if err := os.WriteFile(mkfs, []byte("#!/bin/sh\necho $$ >"+pidFile+"\nexec sleep 1000\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, mkfs, "#!/bin/sh\necho $$ >"+pidFile+"\nexec sleep 1000\n")
 	return &jobv1.Spec{
 		Job:       "job-1",
 		JobBinary: bin,

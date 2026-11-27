@@ -802,6 +802,7 @@ internal/job/internal/gen/runnermicrovm/vm/v1/  generated, committed
 internal/agent/                     the agent: boot mounts, Exec, CopyIn, CopyOut
 internal/logging/                   slog setup
 internal/secret/                    the self-redacting secret type
+internal/testbin/                   writes the executables tests run, free of ETXTBSY; tests only
 ```
 
 - **`cmd/<name>/` with thin mains, and everything else under `internal/`, with no `pkg/`.** This is the Go team's layout for multi-binary server repos (go.dev/doc/modules/layout). The project has no public Go API.
@@ -827,6 +828,7 @@ Third-party libraries are free to use except where the boundary test below forbi
 | `internal/agent` | the agent: boot mounts, the guest's network, a service's command and health check, Exec, CopyIn, CopyOut, Flush, Health | `logging`, `secret`, the agent protocol | `cmd/runner-microvm-agent`; `plugin`'s tests, only to read the boot root's boot config as the agent does |
 | `internal/logging` | slog setup | none | all three programs |
 | `internal/secret` | the self-redacting secret type | none | all three programs |
+| `internal/testbin` | writes the executables tests run (Tests, below) | none | tests only |
 
 - **The job network and the VM child are nested under `internal/job/internal/`,** so the compiler stops any package outside `internal/job` from importing them.
 - **The VM child spec has its own proto package, generated under `internal/job/internal/gen/`.** Only the job binary uses it, so the plugin cannot depend on it.
@@ -960,3 +962,4 @@ Three `.proto` files under `proto/`, each in a directory that mirrors its versio
 - **forgejo-runner's module (`code.forgejo.org/forgejo/runner/v13`) is a test-only dependency.** It brings in about 65 indirect modules, the docker client among them, but none reach a shipped binary: `cmd/deps_test.go` fails if any binary depends on it. Only `cmd/internal/runnerclient`, the test program, imports it outside a test, so `go-licenses` and `govulncheck` see just what its plugin client reaches (`act/plugin`, `act/container`, logrus and creack/pty). Its GPL-3.0-or-later license matches the project's.
 - **`cmd/plugin_proto_test.go` checks that the vendored plugin protocol is byte for byte the runner module's copy,** under plain `go test`, so a runner update that changes the protocol fails CI.
 - **No test runs its own binary** (`os.Args[0]`, `os.Executable()`). A test that needs a program builds it and runs it by path, with a timeout, and kills its process group on cleanup.
+- **A test writes an executable the host execs, such as a shell script standing in for the job binary or mkfs.ext4, with `internal/testbin`'s `Write`, never `os.WriteFile` (#160).** A file the test process held open for writing can't be executed while any process holds a copy of that fd, and a fork for a parallel test, between its fork and its exec, holds a copy of every fd the process had: the exec then fails with ETXTBSY (golang/go#22315). `Write` has a child process, `cp`, write the file and exit before it returns, so no process holds it open for writing. An agent binary only the guest runs, over virtiofs, needs no `Write`, since no host exec can race the write. The one exception the host execs is the plugin's own `writeFileAtomic` writing `fakePayload`'s job script: the tests that use it set PATH, so they are not parallel, and Go runs no parallel test of the package while a sequential one runs. (Flagged decision, #160: one shared test-only package rather than a helper in each package, since a dozen tests in five packages write executables, and every future one should get the fix by default. Rejected: writing every fake before any parallel test starts, which most tests can't, since their scripts name the test's own temporary paths; retrying the exec on ETXTBSY, which would put a test-only retry, with its wait, into the code under test.)

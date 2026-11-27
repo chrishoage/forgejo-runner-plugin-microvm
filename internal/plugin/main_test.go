@@ -15,6 +15,7 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // runMain runs Main with RUNNER_MICROVM_CONFIG set to file, and returns its
@@ -224,9 +225,7 @@ func TestRunClosesTheLauncherWhenStartupFails(t *testing.T) {
 	t.Cleanup(launcher.Close)
 	// A job binary that would run, were the launcher still open.
 	bin := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, "#!/bin/sh\ncat >/dev/null\n")
 	p, err := launcher.Launch(t.Context(), &jobv1.Spec{Job: "job-1", JobBinary: bin}, filepath.Join(t.TempDir(), "job.log"))
 	if err == nil {
 		t.Error("run left its job launcher open: it launched a job process")

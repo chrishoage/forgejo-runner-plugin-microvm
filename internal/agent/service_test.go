@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // serviceBound is how long a service test waits for a condition: a command
@@ -385,9 +386,7 @@ func TestServiceThatCantStartFailsStartService(t *testing.T) {
 	if err := os.Mkdir(wrongFormat, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(wrongFormat, "wrong-format"), []byte("not a program\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, filepath.Join(wrongFormat, "wrong-format"), "not a program\n")
 	for name, tc := range map[string]struct {
 		argv []string
 		env  map[string]string
