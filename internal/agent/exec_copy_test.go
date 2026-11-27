@@ -26,6 +26,7 @@ import (
 	agentv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/agent/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/secret"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // result is an Exec's whole output.
@@ -103,9 +104,7 @@ func TestExecSignal(t *testing.T) {
 func TestExecLooksUpTheRequestsPath(t *testing.T) {
 	t.Parallel()
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "hello"), []byte("#!/bin/sh\necho hi from $0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, filepath.Join(bin, "hello"), "#!/bin/sh\necho hi from $0\n")
 	r, err := runExec(testContext(t), t, startAgent(t), &agentv1.ExecRequest{
 		Argv: []string{"hello"}, Env: map[string]string{"PATH": bin + ":" + os.Getenv("PATH")}, User: testUser,
 	})
@@ -156,9 +155,7 @@ func TestExecEnvironment(t *testing.T) {
 	imageBin, requestBin, defaultBin := t.TempDir(), t.TempDir(), t.TempDir()
 	for _, bin := range []string{imageBin, requestBin, defaultBin} {
 		script := "#!/bin/sh\necho \"from=" + bin + " A=$A B=$B PATH=$PATH HOME=$HOME\"\n"
-		if err := os.WriteFile(filepath.Join(bin, "show"), []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		testbin.Write(t, filepath.Join(bin, "show"), script)
 	}
 	const home = "/home/" + testUser
 	for _, tt := range []struct {

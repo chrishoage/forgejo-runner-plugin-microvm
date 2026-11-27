@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/encoding/protodelim"
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // vmsBound is how long a test waits for the job process to return.
@@ -36,9 +37,7 @@ func fakeVMs(t *testing.T, scripts ...string) string {
 	}
 	body.WriteString("esac\nexit 97\n")
 	path := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(path, []byte(body.String()), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, body.String())
 	return path
 }
 

@@ -16,15 +16,14 @@ import (
 	"time"
 
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // fakeJobBinary writes a job binary that runs script, and returns its path.
 func fakeJobBinary(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, "#!/bin/sh\n"+script+"\n")
 	return path
 }
 

@@ -24,6 +24,7 @@ import (
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	vmv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/job/internal/gen/runnermicrovm/vm/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/logging"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // fakeJobBinary writes a shell script standing in for the job binary: run
@@ -32,9 +33,7 @@ func fakeJobBinary(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runner-microvm-job")
 	body := "#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat >/dev/null\n" + script + "\n"
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, body)
 	return path
 }
 
@@ -42,9 +41,7 @@ func fakeJobBinary(t *testing.T, script string) string {
 func fakeMkfs(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mkfs.ext4")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, "#!/bin/sh\n"+script+"\n")
 	return path
 }
 
@@ -157,9 +154,7 @@ func TestRunPassesTheLibrariesOn(t *testing.T) {
 	t.Parallel()
 	got := filepath.Join(t.TempDir(), "vm-spec")
 	bin := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat >"+got+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, "#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat >"+got+"\n")
 	spec := testJobSpec(t, bin)
 	spec.LibDir, spec.LibkrunLogLevel, spec.LogLevel = "/opt/libkrun", "trace", "debug"
 	if _, err := runJob(t, spec); err != nil {
@@ -317,9 +312,7 @@ func TestRunPassesTheMounts(t *testing.T) {
 	dir := t.TempDir()
 	saved := filepath.Join(dir, "vm-child-spec")
 	bin := filepath.Join(dir, "runner-microvm-job")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat > "+saved+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, "#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat > "+saved+"\n")
 	tools, data := filepath.Join(dir, "tools"), filepath.Join(dir, "data")
 	for _, d := range []string{tools, data} {
 		if err := os.Mkdir(d, 0o755); err != nil {
@@ -399,9 +392,7 @@ func TestRunPassesTheDisks(t *testing.T) {
 	script := "#!/bin/sh\n[ \"$1\" = vm ] || exit 99\ncat > " + saved + "\n" +
 		"cat <&5 > " + dir + "/fd5\ncat <&6 > " + dir + "/fd6\n" +
 		"if echo x >&5; then echo writable > " + dir + "/fd5-writable; fi\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, script)
 	store, tools := filepath.Join(dir, "store.ext4"), filepath.Join(dir, "tools.erofs")
 	for _, p := range []string{store, tools} {
 		if err := os.WriteFile(p, []byte(filepath.Base(p)), 0o600); err != nil {
@@ -596,9 +587,7 @@ func TestRunDoesNotWaitOnTheSpecsReader(t *testing.T) {
 	// With job control off, sh gives a background command /dev/null as
 	// stdin unless it is redirected explicitly.
 	script := "#!/bin/sh\nexec 3<&0\nsleep 1000 <&3 3<&- &\necho $! >" + pidFile + "\nexit 3\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, script)
 	t.Cleanup(func() {
 		if b, err := os.ReadFile(pidFile); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {

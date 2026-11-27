@@ -13,6 +13,7 @@ import (
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/config"
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
 	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/joblaunch"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // testDirs returns directories under base: <base>/state, <base>/cache and
@@ -311,9 +312,7 @@ func TestJobProcessInheritsNoLock(t *testing.T) {
 	// The real launcher, with a shell script standing in for the job
 	// binary: no test runs its own binary.
 	bin := filepath.Join(tmp, "runner-microvm-job")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\necho $$ >&2\nexec sleep 1000\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, bin, "#!/bin/sh\ncat >/dev/null\necho $$ >&2\nexec sleep 1000\n")
 	launcher, err := joblaunch.New(discardLog())
 	if err != nil {
 		_ = l.Close()

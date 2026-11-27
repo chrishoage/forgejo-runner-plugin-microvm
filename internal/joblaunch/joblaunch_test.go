@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/encoding/protodelim"
 
 	jobv1 "github.com/chrishoage/forgejo-runner-plugin-microvm/internal/gen/runnermicrovm/job/v1"
+	"github.com/chrishoage/forgejo-runner-plugin-microvm/internal/testbin"
 )
 
 // The test process is a subreaper, as the plugin is, so a grandchild left
@@ -41,9 +42,7 @@ func TestMain(m *testing.M) {
 func fakeJobBinary(t *testing.T, script string) *jobv1.Spec {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\ncat >/dev/null\n"+script+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, "#!/bin/sh\ncat >/dev/null\n"+script+"\n")
 	return &jobv1.Spec{Job: "job-1", JobBinary: path, Vms: []*jobv1.VM{{Name: "echo"}}}
 }
 
@@ -228,9 +227,7 @@ func TestLaunchFails(t *testing.T) {
 func TestLaunchFailsWhenTheSpecCantBeWritten(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "runner-microvm-job")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec 0<&-\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.Write(t, path, "#!/bin/sh\nexec 0<&-\nexit 0\n")
 	// A spec bigger than a pipe's buffer, so the write can't complete
 	// before the job process is gone.
 	spec := &jobv1.Spec{Job: strings.Repeat("x", 1<<20), JobBinary: path}
