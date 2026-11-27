@@ -3,6 +3,7 @@
 package job
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -69,22 +70,54 @@ func testVMsSpec(t *testing.T, jobBinary string, n int) *jobv1.Spec {
 // unless it returns within vmsBound.
 func runBounded(t *testing.T, spec *jobv1.Spec) ([]*jobv1.Event, error) {
 	t.Helper()
-	type result struct {
-		events []*jobv1.Event
-		err    error
+	return runEach(t, spec, func(*jobv1.Event) {})
+}
+
+// runEach is runBounded handing each event to each as it arrives, on t's
+// goroutine, before it reads the next one.
+func runEach(t *testing.T, spec *jobv1.Spec, each func(*jobv1.Event)) ([]*jobv1.Event, error) {
+	t.Helper()
+	var in bytes.Buffer
+	if _, err := protodelim.MarshalTo(&in, spec); err != nil {
+		t.Fatal(err)
 	}
-	done := make(chan result, 1)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should t end first, the job process's next send fails, which ends it.
+	t.Cleanup(func() { _ = r.Close() })
+	if err := r.SetReadDeadline(time.Now().Add(vmsBound)); err != nil {
+		t.Fatal(err)
+	}
+	live, _ := livenessPipe(t)
+	th := startThread()
+	done := make(chan error, 1)
 	go func() {
-		events, err := runJob(t, spec)
-		done <- result{events, err}
+		err := run(t.Context(), &in, w, live, th, slog.New(slog.DiscardHandler), new(slog.LevelVar))
+		th.stop()
+		_ = w.Close()
+		done <- err
 	}()
-	select {
-	case r := <-done:
-		return r.events, r.err
-	case <-time.After(vmsBound):
-		t.Fatalf("the job process still runs %v later", vmsBound)
-		return nil, nil
+	var events []*jobv1.Event
+	br := bufio.NewReader(r)
+	for {
+		ev := &jobv1.Event{}
+		err := protodelim.UnmarshalFrom(br, ev)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("the job process still runs %v later", vmsBound)
+		}
+		if err != nil {
+			t.Fatalf("reading events: %v", err)
+		}
+		events = append(events, ev)
+		each(ev)
 	}
+	// The job process closes its end of the pipe once it has returned.
+	return events, <-done
 }
 
 // pidFile is a file in a fresh directory a fake VM child writes its pid to.
@@ -141,16 +174,30 @@ func TestRunRefusesAVMCount(t *testing.T) {
 }
 
 // With two VMs the job process starts both, reports each one's events by
-// its index, and runs on after VM 1 exits: VM 0, which waits until VM 1 is
-// gone, ends with its own exit code, not killed.
+// its index, and runs on after VM 1 exits: VM 0, which exits only once the
+// test has seen VM 1's VMExited, ends with its own exit code, not killed.
 func TestRunKeepsRunningAfterAServiceExits(t *testing.T) {
 	t.Parallel()
-	vm1 := pidFile(t, "vm1")
+	release := filepath.Join(t.TempDir(), "release")
 	bin := fakeVMs(t,
-		shellWaitFor(`[ -s `+vm1+` ] && ! kill -0 "$(cat `+vm1+`)" 2>/dev/null`)+"echo vm0 >&2; exit 3",
-		"echo $$ > "+vm1+"; echo vm1; exit 5",
+		shellWaitFor("[ -e "+release+" ]")+"echo vm0 >&2; exit 3",
+		"echo vm1; exit 5",
 	)
-	events, err := runBounded(t, testVMsSpec(t, bin, 2))
+	vm0Exited := false
+	events, err := runEach(t, testVMsSpec(t, bin, 2), func(ev *jobv1.Event) {
+		switch x := ev.GetVmExited(); {
+		case x == nil:
+		case x.GetVm() == 0:
+			vm0Exited = true
+		case x.GetVm() == 1:
+			if vm0Exited {
+				t.Error("VM 0's VMExited came before VM 1's")
+			}
+			if err := os.WriteFile(release, nil, 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
