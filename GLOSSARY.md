@@ -30,7 +30,7 @@ _Avoid_: reaper (reaping is of processes), expiry
 A runner label routed to the plugin, naming an image and optionally a profile. Today it is the only way a job chooses the shape of its VMs, because the plugin protocol passes no per-job or per-service VM options.
 
 **Profile**:
-A named VM shape (CPUs, memory, scratch size, scratch paths, mounts, disks) that an operator defines. Today a label selects it, and it is the only source of a VM's shape and storage, because the plugin protocol passes no per-job or per-service VM options. The job's container takes all of it; each service takes its shape (CPUs, memory, scratch size and scratch paths, and `force_pull`) but not its mounts or disks, which are the job's storage.
+A named VM shape (CPUs, memory, scratch size, scratch paths, mounts, disks) that an operator defines. Today a label selects it, and it is the only source of a VM's shape and storage, because the plugin protocol passes no per-job or per-service VM options. The job's container takes all of it; each service takes its shape (CPUs, memory, scratch size and scratch paths, and `force_pull`) and its read-only mounts and disks, never a read-write one, which only the job's container writes.
 _Avoid_: flavour, template, size
 
 **Memory budget**:
@@ -157,10 +157,10 @@ A VM's view of the image cache, holding exactly the layers of that VM's image.
 The small read-only directory a VM boots from, holding the agent and its boot config, and the bottom layer of the VM's root filesystem.
 
 **Mount**:
-A host directory shared into a VM. Today only the label's profile names mounts, for the job's container and never a service, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
+A host directory shared into a VM. Today only the label's profile names mounts: the job's container gets every one, and each service the read-only ones, never a read-write one, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 
 **Disk**:
-A host file attached to a VM as a block device. Today only the label's profile names disks, for the job's container and never a service, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
+A host file attached to a VM as a block device. Today only the label's profile names disks: the job's container gets every one, and each service the read-only ones, never a read-write one, because the plugin protocol passes no workflow mounts or volumes (STO-11, a limit of today's plugin protocol).
 _Avoid_: volume, which is the workflow's `container.volumes` key; the plugin protocol doesn't pass it today.
 
 **Disk lock**:

@@ -546,10 +546,13 @@ func serviceArgv(img imagecache.Image) []string {
 
 // vmSpec returns the job spec's entry for vm of j, every VM of the job
 // named in hosts, and makes its boot root. Every VM has the shape of j's
-// profile: its CPUs, memory, scratch size and scratch paths. Only the job's
-// container gets the profile's mounts and disks, which are the job's
-// storage: a read-write disk can't be attached to two VMs of one job, and
-// a service has no use for the job's caches. A service's boot config
+// profile: its CPUs, memory, scratch size and scratch paths. The job's
+// container gets every mount and disk of the profile; a service gets the
+// read-only ones, in the profile's order, under the tags and block ids the
+// job's container has them under: it may need the same read-only data as
+// the steps, and keeping every read-write entry on the job's container
+// alone keeps a read-write disk off two VMs and only that VM writing the
+// job's storage. A service's boot config
 // carries its command, never its own environment, whose values may be
 // secrets, which must not appear in host files (LOG-2): StartService
 // carries that.
@@ -572,8 +575,6 @@ func (s *Server) vmSpec(j *job, vm *jobVM, hosts []*agentv1.Host) (*jobv1.VM, er
 		VsockPort:     agentPort,
 		LogLevel:      s.cfg.LogLevel,
 	}
-	var mounts []*jobv1.Mount
-	var disks []*jobv1.Disk
 	if svc := vm.service; svc != nil {
 		boot.Service = &agentv1.Service{Argv: serviceArgv(img), Healthcheck: bootHealthcheck(img.Healthcheck)}
 	} else {
@@ -581,20 +582,29 @@ func (s *Server) vmSpec(j *job, vm *jobVM, hosts []*agentv1.Host) (*jobv1.VM, er
 		for _, d := range guestDirs {
 			boot.GuestDirs = append(boot.GuestDirs, &agentv1.GuestDir{Path: d.path, Mode: d.mode})
 		}
-		// Each mount is a share of its own, under a tag only its position
-		// names; the job process checks its source again before the VM
-		// starts (STO-1, STO-2, STO-5).
-		for i, m := range j.profile.Mounts {
-			mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
-			boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
+	}
+	var mounts []*jobv1.Mount
+	var disks []*jobv1.Disk
+	// Each mount is a share of its own, under a tag only its position in
+	// the profile names; the job process checks its source again before
+	// the VM starts (STO-1, STO-2, STO-5).
+	for i, m := range j.profile.Mounts {
+		if m.ReadWrite && vm.service != nil {
+			continue
 		}
-		// Each disk is attached under a block id only its position names,
-		// which the agent finds it by; the job process opens its source
-		// before the VM starts (STO-1, STO-4).
-		for i, d := range j.profile.Disks {
-			disks = append(disks, &jobv1.Disk{Source: d.Source, BlockId: diskBlockID(i), ReadWrite: d.ReadWrite})
-			boot.Disks = append(boot.Disks, &agentv1.Disk{BlockId: diskBlockID(i), Target: d.Target, ReadWrite: d.ReadWrite})
+		mounts = append(mounts, &jobv1.Mount{Source: m.Source, Tag: mountTag(i), ReadWrite: m.ReadWrite})
+		boot.Mounts = append(boot.Mounts, &agentv1.Mount{Tag: mountTag(i), Target: m.Target, ReadWrite: m.ReadWrite})
+	}
+	// Each disk is attached under a block id only its position in the
+	// profile names, which the agent finds it by; the job process opens
+	// its source for each VM that has it before the VM starts (STO-1,
+	// STO-4).
+	for i, d := range j.profile.Disks {
+		if d.ReadWrite && vm.service != nil {
+			continue
 		}
+		disks = append(disks, &jobv1.Disk{Source: d.Source, BlockId: diskBlockID(i), ReadWrite: d.ReadWrite})
+		boot.Disks = append(boot.Disks, &agentv1.Disk{BlockId: diskBlockID(i), Target: d.Target, ReadWrite: d.ReadWrite})
 	}
 	state := s.vmStateDir(j.id, vm.index)
 	root := filepath.Join(state, "root")

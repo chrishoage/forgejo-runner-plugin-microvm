@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,6 +135,64 @@ func TestTwoPathsToOneDiskShareAQueue(t *testing.T) {
 	}
 	if err := r.result(t); err != nil {
 		t.Fatalf("the waiting Start, once admitted: %v", err)
+	}
+}
+
+// A job whose service takes its profile's read-only disk holds the disk
+// once, as one reader beside the others: it and a job without services on
+// that disk start at once, sending no disk line; a job writing the disk
+// waits for both, named once each, and boots once both are removed (QUE-2,
+// QUE-3).
+func TestAJobWithServicesReadsADiskOnce(t *testing.T) {
+	t.Parallel()
+	disk := diskFile(t, "seed.ext4")
+	launcher := &fakeLauncher{}
+	_, c, log := diskServer(t, launcher, config.Profiles{
+		"ro": diskProfile(config.Disk{Source: disk, Target: "/seed"}),
+		"rw": diskProfile(config.Disk{Source: disk, Target: "/seed", ReadWrite: true}),
+	})
+	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
+		Name: "with-service", LabelArg: testImage + ";profile=ro", Services: []*pluginv1alpha.ServiceContainer{svc("db", "postgres:17")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withService, reader, writer := resp.GetEnvironmentId(), createProfile(t, c, "ro"), createProfile(t, c, "rw")
+	for _, id := range []string{withService, reader} {
+		r := startInBackground(testContext(t), c, id)
+		if err := r.result(t); err != nil {
+			t.Fatalf("Start of %s: %v", id, err)
+		}
+		for _, l := range r.remaining() {
+			if strings.Contains(l, "disk") {
+				t.Errorf("a reader's Start sent %q", l)
+			}
+		}
+	}
+	if disks := specOf(t, launcher, withService).GetVms()[1].GetDisks(); len(disks) != 1 || disks[0].GetSource() != disk {
+		t.Fatalf("the service's disks = %v, want the profile's read-only disk", disks)
+	}
+
+	r := startInBackground(testContext(t), c, writer)
+	holders := []string{withService, reader}
+	slices.Sort(holders)
+	r.waiting(t, regexp.MustCompile(at+`waiting for disk `+regexp.QuoteMeta(disk)+` \(held by `+strings.Join(holders, ", ")+`; 0 ahead\)\n$`))
+	if n := launcher.launched(); n != 2 {
+		t.Fatalf("%d job processes launched while the writer waits, want 2", n)
+	}
+	for _, id := range holders {
+		if _, err := c.Remove(testContext(t), &pluginv1alpha.RemoveRequest{EnvironmentId: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l := r.next(t); !regexp.MustCompile(at + `got disk ` + regexp.QuoteMeta(disk) + ` after \d+\.\d\ds\n$`).MatchString(l) {
+		t.Errorf("progress line after the wait %q, want the got line", l)
+	}
+	if err := r.result(t); err != nil {
+		t.Fatalf("the writer's Start, once admitted: %v", err)
+	}
+	if !strings.Contains(log.String(), `msg="waiting for disk" env=`+writer+` disk=`+disk+` mode=rw holders=`+strings.Join(holders, ",")+` ahead=0`) {
+		t.Errorf("the plugin's log lacks the writer's wait for both readers:\n%s", log)
 	}
 }
 
