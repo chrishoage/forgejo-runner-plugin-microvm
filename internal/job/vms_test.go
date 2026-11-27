@@ -126,6 +126,12 @@ func pidFile(t *testing.T, name string) string {
 	return filepath.Join(t.TempDir(), name+".pid")
 }
 
+// shellWritePid is shell that writes its pid to path whole: a VM child
+// killed while it writes leaves no pid file, never an empty one.
+func shellWritePid(path string) string {
+	return "echo $$ > " + path + ".tmp && mv " + path + ".tmp " + path + "; "
+}
+
 // gone fails t unless the process whose pid is in path no longer exists: it
 // was killed and reaped.
 func gone(t *testing.T, path string) {
@@ -229,7 +235,7 @@ func TestRunKillsTheServicesWhenTheJobsContainerExits(t *testing.T) {
 	vm1 := pidFile(t, "vm1")
 	bin := fakeVMs(t,
 		shellWaitFor("[ -s "+vm1+" ]")+"exit 0",
-		"echo $$ > "+vm1+"; exec sleep 1000",
+		shellWritePid(vm1)+"exec sleep 1000",
 	)
 	events, err := runBounded(t, testVMsSpec(t, bin, 2))
 	if err != nil {
@@ -276,7 +282,7 @@ func TestRunPreparesEveryVMBeforeStartingAny(t *testing.T) {
 func TestRunKillsTheStartedVMsWhenOneCantStart(t *testing.T) {
 	t.Parallel()
 	vm0 := pidFile(t, "vm0")
-	spec := testVMsSpec(t, fakeVMs(t, "echo $$ > "+vm0+"; exec sleep 1000", "exit 0"), 2)
+	spec := testVMsSpec(t, fakeVMs(t, shellWritePid(vm0)+"exec sleep 1000", "exit 0"), 2)
 	spec.Vms[1].VmLog = filepath.Join(t.TempDir(), "no", "such", "dir", "vm.log")
 	events, err := runBounded(t, spec)
 	if err == nil || !strings.Contains(err.Error(), "VM vm1: VM log") {
@@ -316,7 +322,7 @@ func TestRunKillsEveryVMWhenNobodyReads(t *testing.T) {
 		t.Run(fmt.Sprintf("after %d events", writes), func(t *testing.T) {
 			t.Parallel()
 			pids := []string{pidFile(t, "vm0"), pidFile(t, "vm1")}
-			spec := testVMsSpec(t, fakeVMs(t, "echo $$ > "+pids[0]+"; exec sleep 1000", "echo $$ > "+pids[1]+"; exec sleep 1000"), 2)
+			spec := testVMsSpec(t, fakeVMs(t, shellWritePid(pids[0])+"exec sleep 1000", shellWritePid(pids[1])+"exec sleep 1000"), 2)
 			var in bytes.Buffer
 			if _, err := protodelim.MarshalTo(&in, spec); err != nil {
 				t.Fatal(err)
