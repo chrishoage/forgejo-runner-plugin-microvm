@@ -192,7 +192,7 @@ func TestStartUsesTheJobsProfile(t *testing.T) {
 // its target and the flag (STO-1, STO-2, STO-3). The job's copy,
 // taken at Create, shares nothing with the profiles a reload swaps. Only the
 // operator chooses them: backend options naming volumes or mounts add none,
-// and a service's VM gets none (STO-11).
+// and a service's VM gets the read-only ones only (STO-11).
 func TestStartSharesTheProfilesMounts(t *testing.T) {
 	t.Parallel()
 	launcher := &fakeLauncher{}
@@ -225,8 +225,9 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 	if want := []string{"mount0 /opt/tools rw=false", "mount1 /var/lib/docker/data rw=true"}; !slices.Equal(mounted, want) {
 		t.Errorf("boot config mounts %q, want %q", mounted, want)
 	}
-	// A service's VM gets none of the profile's mounts, which are the
-	// job's storage, and no storage of its own (STO-11).
+	// A service's VM gets the profile's read-only mount under its tag, at
+	// its target as this job's Create copied it, and no storage of its own
+	// (STO-11).
 	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{
 		LabelArg: testImage + ";profile=tools", Services: []*pluginv1alpha.ServiceContainer{{Name: "db", Image: "postgres"}},
 	})
@@ -237,9 +238,12 @@ func TestStartSharesTheProfilesMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	vms := specOf(t, launcher, resp.GetEnvironmentId()).GetVms()
-	if len(vms[0].GetMounts()) != 2 || len(vms[1].GetMounts()) != 0 || len(vms[1].GetBoot().GetMounts()) != 0 {
-		t.Errorf("with a service: the job's container's mounts %v, the service's %v and %v; want only the job's container's two",
-			vms[0].GetMounts(), vms[1].GetMounts(), vms[1].GetBoot().GetMounts())
+	svcShares, svcMounted := vms[1].GetMounts(), vms[1].GetBoot().GetMounts()
+	if len(vms[0].GetMounts()) != 2 || len(svcShares) != 1 || len(svcMounted) != 1 ||
+		svcShares[0].GetSource() != "/srv/tools" || svcShares[0].GetTag() != "mount0" || svcShares[0].GetReadWrite() ||
+		svcMounted[0].GetTag() != "mount0" || svcMounted[0].GetTarget() != "/changed" || svcMounted[0].GetReadWrite() {
+		t.Errorf("with a service: the job's container's mounts %v, the service's %v and %v; want the job's container's two and the service the read-only one",
+			vms[0].GetMounts(), svcShares, svcMounted)
 	}
 	// A profile without mounts shares none.
 	resp, err = c.Create(testContext(t), &pluginv1alpha.CreateRequest{LabelArg: testImage})

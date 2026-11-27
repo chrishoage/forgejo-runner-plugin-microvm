@@ -177,8 +177,10 @@ func TestCreateChecksServicesLast(t *testing.T) {
 }
 
 // Start boots each service as a VM after the job's container, in the order
-// the runner lists them, with the profile's shape but none of its mounts
-// or disks, on the job network at the address its index gives, and its
+// the runner lists them, with the profile's shape and exactly its
+// read-only mounts and disks, in the profile's order, at the targets, tags
+// and block ids the job's container has them at, which has them all, on
+// the job network at the address its index gives, and its
 // command, the image's Entrypoint and Cmd, in its boot config; every VM's
 // hosts list names every VM, and its own hostname when that isn't its
 // name. No file of the job holds a service's env: Start sends it in one
@@ -193,10 +195,21 @@ func TestStartBootsTheServices(t *testing.T) {
 	agents := []*recordingAgent{{}, {execFails: true}, {}}
 	launcher := &fakeLauncher{vmAgents: map[int]agentv1.AgentServiceServer{0: agents[0], 1: agents[1], 2: agents[2]}}
 	srv := newTestServer(t, cache, launcher)
+	// Read-only and read-write entries alternate, so an entry out of order
+	// or a read-write one given to a service shows. The config caps a
+	// profile's entries (CFG-10); the plugin doesn't count them again.
+	store, seed := diskFile(t, "store.ext4"), diskFile(t, "seed.ext4")
 	srv.SetProfiles(config.Profiles{"svc": {
 		CPUs: 3, MemoryMiB: 768, ScratchGiB: 2, ScratchPaths: []string{"/var/lib/docker"}, ForcePull: true,
-		Mounts: []config.Mount{{Source: "/srv/tools", Target: "/opt/tools"}},
-		Disks:  []config.Disk{{Source: diskFile(t, "store.ext4"), Target: "/var/lib/store", ReadWrite: true}},
+		Mounts: []config.Mount{
+			{Source: "/srv/tools", Target: "/opt/tools"},
+			{Source: "/srv/cache", Target: "/var/cache/build", ReadWrite: true},
+			{Source: "/srv/certs", Target: "/etc/certs"},
+		},
+		Disks: []config.Disk{
+			{Source: store, Target: "/var/lib/store", ReadWrite: true},
+			{Source: seed, Target: "/var/lib/seed"},
+		},
 	}})
 	c := pluginv1alpha.NewBackendPluginClient(serve(t, srv))
 	resp, err := c.Create(testContext(t), &pluginv1alpha.CreateRequest{
@@ -234,6 +247,22 @@ func TestStartBootsTheServices(t *testing.T) {
 	// A VM whose hostname isn't its name has its hostname in its own hosts
 	// list only, at its own address.
 	ownHosts := [][]*agentv1.Host{hosts, append(slices.Clone(hosts), &agentv1.Host{Name: "my-db", Address: "198.18.0.3"}), hosts}
+	allStorage := vmStorage{
+		mounts: []*jobv1.Mount{
+			{Source: "/srv/tools", Tag: "mount0"}, {Source: "/srv/cache", Tag: "mount1", ReadWrite: true}, {Source: "/srv/certs", Tag: "mount2"},
+		},
+		disks: []*jobv1.Disk{{Source: store, BlockId: "disk0", ReadWrite: true}, {Source: seed, BlockId: "disk1"}},
+		bootMounts: []*agentv1.Mount{
+			{Tag: "mount0", Target: "/opt/tools"}, {Tag: "mount1", Target: "/var/cache/build", ReadWrite: true}, {Tag: "mount2", Target: "/etc/certs"},
+		},
+		bootDisks: []*agentv1.Disk{{BlockId: "disk0", Target: "/var/lib/store", ReadWrite: true}, {BlockId: "disk1", Target: "/var/lib/seed"}},
+	}
+	serviceStorage := vmStorage{
+		mounts:     []*jobv1.Mount{{Source: "/srv/tools", Tag: "mount0"}, {Source: "/srv/certs", Tag: "mount2"}},
+		disks:      []*jobv1.Disk{{Source: seed, BlockId: "disk1"}},
+		bootMounts: []*agentv1.Mount{{Tag: "mount0", Target: "/opt/tools"}, {Tag: "mount2", Target: "/etc/certs"}},
+		bootDisks:  []*agentv1.Disk{{BlockId: "disk1", Target: "/var/lib/seed"}},
+	}
 	state := filepath.Join(srv.cfg.Dirs.State, "jobs", id)
 	for i, tc := range []struct{ name, hostname, addr, mac string }{
 		{"build", "build", "198.18.0.2", "02:00:c6:12:00:02"},
@@ -257,14 +286,15 @@ func TestStartBootsTheServices(t *testing.T) {
 		if b, err := guestagent.ReadBootConfig(filepath.Join(vm.GetRootDir(), guestagent.BootConfigPath), &slog.LevelVar{}); err != nil || !proto.Equal(b, boot) {
 			t.Errorf("VM %d's boot config file = %v, %v; want %v", i, b, err, boot)
 		}
+		wantStorage(t, i, vm, allStorage, serviceStorage)
 		if i == 0 {
-			if len(vm.GetMounts()) != 1 || len(vm.GetDisks()) != 1 || boot.GetService() != nil || len(boot.GetGuestDirs()) != 3 {
+			if boot.GetService() != nil || len(boot.GetGuestDirs()) != 3 {
 				t.Errorf("the job's container = %v", vm)
 			}
 			continue
 		}
-		if len(vm.GetMounts()) != 0 || len(vm.GetDisks()) != 0 || len(boot.GetMounts()) != 0 || len(boot.GetDisks()) != 0 || len(boot.GetGuestDirs()) != 0 {
-			t.Errorf("service VM %d has storage or guest directories: %v", i, vm)
+		if len(boot.GetGuestDirs()) != 0 {
+			t.Errorf("service VM %d has guest directories: %v", i, vm)
 		}
 		want := &agentv1.Service{Argv: []string{"entrypoint.sh", "serve", "--port", "6379"}}
 		if !proto.Equal(boot.GetService(), want) {
@@ -317,6 +347,38 @@ func TestStartBootsTheServices(t *testing.T) {
 	}
 	if _, err := c.Remove(testContext(t), &pluginv1alpha.RemoveRequest{EnvironmentId: id}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// vmStorage is the mounts and disks a VM of a job spec has: the job
+// process's copies and the agent's, in its boot config.
+type vmStorage struct {
+	mounts     []*jobv1.Mount
+	disks      []*jobv1.Disk
+	bootMounts []*agentv1.Mount
+	bootDisks  []*agentv1.Disk
+}
+
+// wantStorage fails t unless VM i, vm, has container's storage when i is 0,
+// the job's container, and service's otherwise, each list in order.
+func wantStorage(t *testing.T, i int, vm *jobv1.VM, container, service vmStorage) {
+	t.Helper()
+	want := service
+	if i == 0 {
+		want = container
+	}
+	eq := proto.Equal
+	if !slices.EqualFunc(vm.GetMounts(), want.mounts, func(a, b *jobv1.Mount) bool { return eq(a, b) }) {
+		t.Errorf("VM %d's mounts = %v, want %v", i, vm.GetMounts(), want.mounts)
+	}
+	if !slices.EqualFunc(vm.GetDisks(), want.disks, func(a, b *jobv1.Disk) bool { return eq(a, b) }) {
+		t.Errorf("VM %d's disks = %v, want %v", i, vm.GetDisks(), want.disks)
+	}
+	if !slices.EqualFunc(vm.GetBoot().GetMounts(), want.bootMounts, func(a, b *agentv1.Mount) bool { return eq(a, b) }) {
+		t.Errorf("VM %d's boot config's mounts = %v, want %v", i, vm.GetBoot().GetMounts(), want.bootMounts)
+	}
+	if !slices.EqualFunc(vm.GetBoot().GetDisks(), want.bootDisks, func(a, b *agentv1.Disk) bool { return eq(a, b) }) {
+		t.Errorf("VM %d's boot config's disks = %v, want %v", i, vm.GetBoot().GetDisks(), want.bootDisks)
 	}
 }
 

@@ -69,7 +69,7 @@ Read at startup only (see Reload, above).
 
 ## Profiles
 
-`profiles` maps a profile's name to its keys. A label picks a profile; the profile is the shape of every VM of the job, the job's container and each of its services, and the job's container's storage.
+`profiles` maps a profile's name to its keys. A label picks a profile; the profile is the shape of every VM of the job, the job's container and each of its services, and their storage: all of it the job's container's, its read-only part each service's too.
 
 - **A name matches `[a-z0-9][a-z0-9_-]*`.** Any other name could never appear in a label.
 - **A label without `;profile=` uses the profile named `default`.** When the file defines no `default`, it is every built-in value; `;profile=default` gets the same.
@@ -92,7 +92,7 @@ Read at startup only (see Reload, above).
 
 ## Profile keys
 
-Reloaded on `SIGHUP`. A key left out takes its built-in value. A job's services take `cpus`, `memory_mib`, `scratch_gib`, `scratch_paths` and `force_pull` from the job's profile, as its container does, but not `mounts` or `disks`, which are the job's storage: a read-write disk can't be attached to two VMs.
+Reloaded on `SIGHUP`. A key left out takes its built-in value. A job's services take `cpus`, `memory_mib`, `scratch_gib`, `scratch_paths` and `force_pull` from the job's profile, as its container does, and every entry of `mounts` and `disks` whose `read_write` is `false`, in the profile's order, at the same targets: a service may need the same read-only data as the steps, such as certificates, seeded data or a tool tree. A read-write entry stays the job's container's alone, since a read-write disk can't be attached to two VMs and only the job's container writes the job's storage. No key keeps a read-only entry from the services. A target a service's image can't take, such as a regular file there, fails the job's Start, naming the service's VM and the target.
 
 | Key | Built-in value | Meaning | Valid values |
 |---|---|---|---|
@@ -100,8 +100,8 @@ Reloaded on `SIGHUP`. A key left out takes its built-in value. A job's services 
 | `memory_mib` | `1024` | Each VM's memory, in MiB, a service's too; the job's share of the memory budget is this once for each of its VMs | an integer from 1 to 4294967295 |
 | `scratch_gib` | `10` | The size of each VM's scratch disk, a service's too, fresh for every job, that holds every change the job makes to the VM's root filesystem | an integer from 1 to 8589934591 |
 | `scratch_paths` | `[]` | Guest directories kept on the scratch disk instead of the overlay, in each VM, a service's too: each starts empty at every boot, hiding what the image has there | a list of guest paths (below), each listed once |
-| `mounts` | `[]` | Host directories shared into the job's container, never a service | a list of entries (below); each source an existing directory |
-| `disks` | `[]` | Host files attached to the job's container as block devices, each mounted at its target; never to a service | a list of entries (below); each source an existing regular file |
+| `mounts` | `[]` | Host directories shared into the job's container; each read-only one into each service too, never a read-write one | a list of entries (below); each source an existing directory |
+| `disks` | `[]` | Host files attached to the job's container as block devices, each mounted at its target; each read-only one to each service too, never a read-write one | a list of entries (below); each source an existing regular file |
 | `force_pull` | `false` | `true` looks each image's tag up in the registry on every Start, a service's too, even when the image cache holds it; a registry error then fails the Start | a boolean (see [General rules](#general-rules)) |
 
 - **`0` is invalid for `cpus`, `memory_mib` and `scratch_gib`:** leave the key out to get the built-in value.
